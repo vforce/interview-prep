@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: topo
+fam: graphs
+label: Topological Sort
+order: 16
+trigger: ordering with prerequisites, DAG, cycle detection
+insight: 'Kahn''s: in-degree queue, peel zeros, decrement neighbors; if processed < N there is a cycle'
+probs:
+- {n: Course Schedule, slug: course-schedule, d: M}
+- {n: Course Schedule II, slug: course-schedule-ii, d: M}
+- {n: Parallel Courses III, slug: parallel-courses-iii, d: H}

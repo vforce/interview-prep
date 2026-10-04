@@ -1,0 +1,34 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: t-positional
+type: concept
+area: Attention Mechanics
+order: 12
+front: Why do Transformers need positional encodings, and what kinds exist?
+back: |-
+  Self-attention is permutation-invariant — without position info, word order is lost.
+
+  Kinds: sinusoidal (fixed), learned absolute, and relative schemes like RoPE (rotary) and ALiBi that generalise better to longer contexts. Most modern LLMs use RoPE.
+more: |-
+  Attention is a sum over tokens — permute the inputs, permute the outputs. Nothing encodes "token 3 is before token 5," so position must be injected.
+
+  ## RoPE (rotary) — the modern default
+  Split each head into 2D pairs; **rotate** the pair at position m by angle mθ:
+  ```
+  R(mθ) = [[cos mθ, −sin mθ],
+           [sin mθ,  cos mθ]]
+  ```
+  Key identity:
+  ```
+  (R(mθ)q)·(R(nθ)k) = q · R((n−m)θ) k
+  ```
+  The attention score depends only on the **relative** offset (n−m), with frequencies `θ_i = 10000^(−2i/d)` spanning fast→slow. Used in Llama, Gemma, Qwen, Mistral.
+
+  ## ALiBi — even simpler
+  Add a linear penalty straight to the scores (no embeddings):
+  ```
+  score_ij += −slope · (i − j)     # j ≤ i
+  ```
+  Each head gets a fixed geometric slope (e.g. 2⁻¹, 2⁻², … 2⁻⁸). Distant tokens get more penalty.
+
+  **Why relative > absolute:** both RoPE and ALiBi extrapolate to longer contexts than seen in training, since they encode distance, not an absolute index. Sinusoidal/learned-absolute schemes generalize worse past trained length.

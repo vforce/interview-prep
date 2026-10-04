@@ -1,0 +1,100 @@
+{
+  "id": "rag-overview",
+  "title": "RAG Overview",
+  "definition": "Retrieval-Augmented Generation (RAG) is an architecture that, at inference time, retrieves relevant text from an external knowledge store and inserts it into the LLM's prompt so generation is grounded in that retrieved evidence rather than only the model's frozen parameters.",
+  "summary": "RAG separates \"knowledge\" from \"reasoning\": facts live in an updatable index (vector DB, search engine), and the LLM's job is to read retrieved passages and compose an answer. This avoids retraining for every knowledge update and enables source citation, at the cost of a more complex, multi-stage system that can fail at retrieval, ranking, or generation independently.",
+  "objectives": [
+    "Explain why RAG exists: knowledge cutoff, hallucination, cost of fine-tuning, need for attribution/freshness",
+    "Trace the standard pipeline: ingest → chunk → embed → index → retrieve → (rerank) → prompt → generate",
+    "Localize failures to retrieval vs. generation using oracle-context testing",
+    "Compare RAG vs. fine-tuning vs. long-context stuffing as knowledge-injection strategies",
+    "Reason about production concerns: latency budget, cost per query, index freshness, access control, evaluation"
+  ],
+  "lesson": "Think of a base LLM as a closed-book exam: it answers from what it memorized during training, frozen at a cutoff date, with no way to say \"let me look that up.\" RAG turns it into an open-book exam: given a question, first fetch the pages likely to contain the answer, hand them to the model, and instruct it to answer from those pages. The model still does the reasoning and composition; it just isn't trusted to recall facts from its weights.\n\n**Worked example.** A support bot needs to answer \"What's our Q3 refund policy?\" using an internal wiki that changes monthly.\n1. Offline: split wiki pages into ~300-token chunks, embed each with a sentence-embedding model, store vectors + text + metadata in a vector index.\n2. Online: embed the user's query with the same model, run a similarity (or hybrid dense+BM25) search, take the top-k chunks.\n3. Optionally rerank the top-k with a cross-encoder for precision.\n4. Build a prompt: `\"Answer using only the context below. If it's not there, say you don't know.\\n\\nContext:\\n{chunks}\\n\\nQuestion: {query}\"`.\n5. Generate, and return the source chunk IDs alongside the answer for citation.\n\n**The key gotcha:** generation quality is capped by retrieval quality. If the right chunk never makes it into top-k (a recall failure), the model either hallucinates or correctly says \"I don't know\" — no prompt engineering fixes a document that was never retrieved. In production, most \"RAG is giving bad answers\" incidents trace back to chunking (too coarse/fine, losing context), a mismatched embedding model, or missing hybrid search/reranking — not the LLM. Always debug by asking: \"if I hand-pick the right chunk and put it in the prompt, does the answer become correct?\" If yes, it's a retrieval bug; if no, it's a generation/prompting bug. A second gotcha: stuffing too many chunks degrades quality via the \"lost-in-the-middle\" effect — LLMs attend better to the start/end of context — so rerank the most relevant chunk first and cap k rather than dumping everything retrieved.",
+  "examples": "**Example 1 — minimal RAG loop:**\n\n```python\nimport numpy as np\nfrom dataclasses import dataclass\n\n@dataclass\nclass Chunk:\n    text: str\n    embedding: np.ndarray\n    source: str\n\ndef cosine(a: np.ndarray, b: np.ndarray) -> float:\n    return float(a @ b / (np.linalg.norm(a) * np.linalg.norm(b)))\n\ndef retrieve(query_emb: np.ndarray, chunks: list[Chunk], k: int = 4) -> list[Chunk]:\n    return sorted(chunks, key=lambda c: -cosine(query_emb, c.embedding))[:k]\n\ndef build_prompt(query: str, chunks: list[Chunk]) -> str:\n    context = \"\\n\\n\".join(f\"[{c.source}] {c.text}\" for c in chunks)\n    return (\n        \"Answer using ONLY the context. If the answer isn't there, say \"\n        f\"'I don't know'.\\n\\nContext:\\n{context}\\n\\nQuestion: {query}\\nAnswer:\"\n    )\n\n# rag_answer(query, chunks, embed_fn, llm):\n#   build_prompt(query, retrieve(embed_fn(query), chunks)) -> llm.generate(...)\n```\n\n**Example 2 — diagnosing a retrieval vs. generation bug (production debugging):**\n\n```\nSymptom: bot says \"no refund after 14 days\" but policy says 30 days.\n\nStep 1 (oracle test): manually paste the correct policy paragraph into the\n                       prompt and re-ask.\n  -> Correct now?  YES -> retrieval bug (chunk wasn't in top-k)\n                   NO  -> generation/prompt bug (model ignored context)\n\nStep 2a (if retrieval bug): check chunk boundaries (split mid-sentence?),\n  embedding similarity score of the missing chunk, whether hybrid/keyword\n  search would have caught \"refund\" + \"Q3\".\n\nStep 2b (if generation bug): check the prompt forces \"use only context\",\n  check context wasn't truncated by the context window, check chunk order\n  (lost-in-the-middle).\n```",
+  "tradeoffs": "Use RAG when the knowledge base is large, changes frequently, needs per-user access control, or must be cited/audited — re-indexing a document is far cheaper than fine-tuning. Avoid it when the entire knowledge fits cheaply and statically in context (just stuff it in the prompt; simpler system, and prompt caching makes repeated calls cheap), or when the task requires learning a new skill/style/reasoning pattern rather than recalling facts (fine-tuning fits better there). RAG also adds real infra cost — vector store, embedding pipeline, retrieval-hop latency, and a new failure surface (stale index, low recall, prompt injection via untrusted retrieved content) — so don't reach for it if a well-crafted system prompt or long-context window already solves the problem at your data scale.",
+  "diagnosticQuiz": [
+    {
+      "q": "According to the lesson's definition, what fundamentally distinguishes RAG from a standard LLM call?",
+      "choices": [
+        "RAG fine-tunes the model's weights on new documents before it answers",
+        "RAG replaces the LLM entirely with a search engine that returns exact-match documents",
+        "RAG retrieves relevant external text at inference time and inserts it into the prompt so generation is grounded in that evidence",
+        "RAG permanently increases the model's context window size"
+      ],
+      "answer": 2,
+      "explanation": "The definition is explicit: retrieval happens \"at inference time\" and the retrieved text is \"inserted into the LLM's prompt\" so generation is grounded in it rather than the model's frozen parameters. The best distractor (A) is the classic confusion with fine-tuning — RAG's whole appeal is that you re-index a document instead of retraining, which the tradeoffs section calls out directly (\"re-indexing is far cheaper than fine-tuning\")."
+    },
+    {
+      "q": "In the `cosine()` function from the worked example (`a @ b / (norm(a) * norm(b))`), what would it return if a query embedding were exactly orthogonal to a chunk's embedding, and what does that imply for `retrieve()`?",
+      "choices": [
+        "The function would raise a division-by-zero error",
+        "-1.0, indicating the chunk means the opposite of the query",
+        "0.0, indicating no directional similarity, so the chunk would likely rank low and be excluded from top-k",
+        "1.0, so the chunk would rank at the very top of the top-k"
+      ],
+      "answer": 2,
+      "explanation": "Cosine similarity is the dot product divided by the product of norms; two orthogonal vectors have a dot product of zero, so the score is 0.0 — the midpoint of the [-1, 1] range, meaning \"unrelated,\" not \"opposite.\" The tempting wrong answer (-1.0) confuses \"orthogonal\" with \"antiparallel\": -1 only occurs when vectors point in exactly opposite directions, which is a much stronger (and rarer) condition than simple unrelatedness."
+    },
+    {
+      "q": "The lesson compares a base LLM to a \"closed-book exam\" and RAG to an \"open-book exam.\" What design principle does this analogy actually convey?",
+      "choices": [
+        "The LLM must be retrained whenever the underlying documents change",
+        "The LLM should memorize more facts during pretraining so it needs fewer lookups",
+        "The LLM's job shifts from recalling facts from its weights to reasoning over evidence handed to it at inference time",
+        "The LLM is tested on how well it can quote the retrieved documents verbatim"
+      ],
+      "answer": 2,
+      "explanation": "The lesson states the model \"still does the reasoning and composition; it just isn't trusted to recall facts from its weights\" — that's the entire point of \"open-book\": you don't need a better memorizer, you need a better reasoner fed the right page. Option D is the misconception the analogy is specifically designed to dispel: unlike fine-tuning, RAG lets the knowledge store change (e.g., a monthly wiki update) without touching the model at all."
+    },
+    {
+      "q": "A team has an internal glossary of ~2,000 tokens total that rarely changes and must be available for every query. Per the lesson's tradeoffs, what's the better call?",
+      "choices": [
+        "Add a cross-encoder reranker to select the most relevant glossary lines per query",
+        "Fine-tune the model on the glossary so it memorizes the content",
+        "Just stuff the glossary into the system prompt/context — simpler system, and prompt caching makes repeated calls cheap",
+        "Build a vector index and retrieval pipeline so the model looks it up each query"
+      ],
+      "answer": 2,
+      "explanation": "The tradeoffs section says to avoid RAG \"when the entire knowledge base fits cheaply and statically in context (just stuff it in the prompt; simpler system, and prompt caching makes repeated calls cheap).\" Building a retrieval pipeline (A) for 2,000 static tokens adds a vector store, embedding pipeline, and a new failure surface for a problem a plain prompt already solves — exactly the unnecessary infra cost the lesson warns against."
+    },
+    {
+      "q": "A bot answers a refund-policy question incorrectly. You manually paste the correct policy paragraph into the prompt and re-ask — the answer is now correct. Per the lesson's oracle-test heuristic, what's the bug and what should you check next?",
+      "choices": [
+        "A tokenizer bug — check the vocabulary used during embedding",
+        "A generation/prompting bug — check whether the prompt forces \"use only context\" and whether lost-in-the-middle truncation occurred",
+        "A model-capacity bug — the LLM needs to be upgraded to a larger model",
+        "A retrieval bug — check chunk boundaries, the missing chunk's embedding similarity score, and whether hybrid/keyword search would have surfaced it"
+      ],
+      "answer": 3,
+      "explanation": "The lesson's oracle test is explicit: if hand-feeding the right chunk makes the answer correct, \"it's a retrieval bug\" — the chunk simply never made it into top-k. The best wrong answer (A) describes the diagnosis for the opposite result (still wrong even with the correct chunk supplied), which is the case the lesson reserves for prompt/context-window issues like lost-in-the-middle — mixing up the two directions of this test is the exact confusion the heuristic exists to prevent."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Walk me through how you'd design a production RAG system for internal company documents.",
+      "a": "Design it as a pipeline with independently testable stages:\n- **Ingest & chunk**: parse docs, split into ~200–500 token chunks with overlap, preserve metadata (source, permissions, timestamp).\n- **Embed & index**: embed chunks with a consistent embedding model, store in a vector DB (pgvector/FAISS/managed service); keep a keyword index too for hybrid search.\n- **Retrieve**: hybrid dense + BM25 search, filtering by the requesting user's access rights at query time, not just at ingest.\n- **Rerank**: cross-encoder on top-k to boost precision before it consumes the LLM's limited context.\n- **Generate**: prompt template that forces \"answer only from context\" and returns citations.\n- **Evaluate & monitor**: offline recall@k for retrieval, online groundedness/faithfulness checks, latency and cost per query.\n- **Freshness**: incremental re-indexing triggered on doc changes, not full rebuilds."
+    },
+    {
+      "q": "How do you evaluate a RAG system, and how do you tell apart a retrieval bug from a generation bug?",
+      "a": "Evaluate the two stages separately. For retrieval, build a labeled set of (query, relevant chunk) pairs and measure recall@k / MRR / nDCG. For generation, measure faithfulness (is the answer supported by the given context?) and answer relevance, e.g. via an LLM-judge framework (RAGAS-style) or human review. To localize a specific failure, run an \"oracle\" test: manually inject the correct chunk into the prompt and re-run — if the answer becomes correct, it's a retrieval miss; if it's still wrong, it's a generation/prompting problem (ignoring context, truncation, or lost-in-the-middle ordering)."
+    },
+    {
+      "q": "When would you choose long-context stuffing over RAG, and how does that decision change at scale?",
+      "a": "Long-context stuffing is simpler and fine when the corpus is small and static, when cross-document reasoning matters more than lookup, and when prompt caching can amortize the cost of repeated context. It stops working at scale: cost and latency grow with context size, retrieval-free context suffers \"lost-in-the-middle\" degradation, and you can't do per-user access control at the document level without re-filtering context anyway. Once the corpus exceeds what's cheap to send on every call, changes faster than you want to re-cache, or needs governed access, RAG's index-once/retrieve-per-query model wins on cost and freshness."
+    }
+  ],
+  "version": 2,
+  "relatedConcepts": [
+    "graphrag"
+  ],
+  "followUps": [
+    "graphrag"
+  ],
+  "metadata": {
+    "inputHash": "d1c4dbfb22dcdc7c",
+    "model": "sonnet",
+    "generatedAt": "2026-07-03T10:31:31Z",
+    "quizUpdatedAt": "2026-07-04T05:26:43Z"
+  }
+}

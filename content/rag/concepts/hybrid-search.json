@@ -1,0 +1,99 @@
+{
+  "id": "hybrid-search",
+  "title": "Hybrid Search",
+  "definition": "Hybrid search retrieves candidates with both a sparse lexical method (BM25) and a dense method (embeddings) in parallel, then fuses the two ranked lists into one, so retrieval benefits from exact-term matching and semantic similarity simultaneously.",
+  "summary": "BM25 and embeddings fail in complementary ways: BM25 nails exact tokens (IDs, codes, rare proper nouns) but misses paraphrase; embeddings capture meaning but blur or drop rare/out-of-vocabulary tokens. Hybrid search runs both retrievers and merges results — usually via Reciprocal Rank Fusion (RRF) or normalized weighted scoring — often followed by a cross-encoder reranker on the merged top-k. This is the default production retrieval pattern in most mature RAG systems (Elasticsearch, OpenSearch, Weaviate, Vespa all ship it natively).",
+  "objectives": [
+    "Explain why BM25 and embeddings fail on different query types, and why that makes them complementary",
+    "Implement Reciprocal Rank Fusion (RRF) to merge two ranked lists without score-scale problems",
+    "Contrast rank fusion vs normalized weighted-score fusion and know the failure mode of naive score addition",
+    "Identify when a reranker should sit on top of hybrid retrieval, and when hybrid isn't worth the complexity",
+    "Reason about production concerns: dual-index infra, latency budget, and tuning surface (alpha, k)"
+  ],
+  "lesson": "BM25 scores documents by term overlap weighted by inverse document frequency — it's exact-match, so it excels at product codes, error IDs, acronyms, and rare proper nouns that an embedding model may barely differentiate from noise. Embeddings score by cosine distance in a learned semantic space — they excel at paraphrase and conceptual similarity (\"how do I cancel my plan\" ≈ \"steps to end a subscription\") but degrade on tokens the model wasn't trained to distinguish, like alphanumeric SKUs or exact numbers, since two different codes can land nearly on top of each other in vector space.\n\n**Worked example**: query \"error code E1234 connection timeout.\" BM25 retrieves the doc containing \"E1234\" verbatim, ranked top because that token is rare in the corpus (high IDF). The embedding retriever may rank a generic \"troubleshooting network timeouts\" doc higher, because semantically it's the closest match — but it never mentions E1234 and is the wrong doc. Neither retriever alone is reliable here; hybrid search returns both candidate lists and lets fusion decide.\n\n**The key gotcha**: you cannot just add BM25 scores and cosine similarities. BM25 scores are unbounded and corpus/query-dependent (a score of 12 means nothing in isolation); cosine similarity is bounded in [-1, 1]. Summing raw scores lets whichever signal happens to have larger magnitude silently dominate, regardless of actual relevance. Two fixes:\n\n1. **Rank-based fusion (RRF)** — ignore raw scores entirely, use only rank position. Scale-invariant, no tuning required, robust default.\n2. **Normalized weighted fusion** — min-max (or z-score) normalize each list per-query, then combine with a tunable weight α. Uses more signal (magnitude, not just order) but requires calibration and drifts as the corpus changes.\n\nIn production, start with RRF because it \"just works\" without a labeled validation set; move to tuned weighted fusion or a learned reranker only if you have relevance judgments showing it helps.",
+  "examples": "**Example 1 — Reciprocal Rank Fusion**\n\n```python\nfrom collections import defaultdict\n\ndef reciprocal_rank_fusion(ranked_lists, k=60):\n    \"\"\"ranked_lists: list of lists of doc_ids, each already sorted best-first.\"\"\"\n    scores = defaultdict(float)\n    for ranked in ranked_lists:\n        for rank, doc_id in enumerate(ranked):\n            scores[doc_id] += 1.0 / (k + rank + 1)\n    return sorted(scores.items(), key=lambda x: -x[1])\n\nbm25_ranked  = [\"doc3\", \"doc1\", \"doc9\", \"doc2\"]   # exact-match retriever\ndense_ranked = [\"doc1\", \"doc7\", \"doc3\", \"doc4\"]   # embedding retriever\n\nfused = reciprocal_rank_fusion([bm25_ranked, dense_ranked])\n# doc1 and doc3 appear near the top of both lists -> they win the fusion\n# even though neither is individually rank #1 in the same position twice\n```\n\n`k` (typically ~60) dampens rank-1 dominance: a doc ranked #1 in only one list won't automatically beat a doc ranked #2-#3 in *both* lists — which is exactly the behavior you want from fusion.\n\n**Example 2 — normalized weighted fusion (alternative to RRF)**\n\n```python\ndef minmax(scores):\n    lo, hi = min(scores.values()), max(scores.values())\n    return {d: (s - lo) / (hi - lo + 1e-9) for d, s in scores.items()}\n\ndef weighted_fusion(bm25_scores, dense_scores, alpha=0.5):\n    bm25_n, dense_n = minmax(bm25_scores), minmax(dense_scores)\n    docs = set(bm25_n) | set(dense_n)\n    return sorted(\n        ((d, alpha * dense_n.get(d, 0) + (1 - alpha) * bm25_n.get(d, 0)) for d in docs),\n        key=lambda x: -x[1],\n    )\n```\n\n`alpha` becomes a tunable knob (e.g., grid-search against a labeled eval set) — more expressive than RRF but requires that eval set to tune responsibly.",
+  "tradeoffs": "Hybrid search reliably improves recall over either retriever alone whenever the query mix includes both lexical (IDs, codes, names, exact numbers) and semantic (paraphrased, conceptual) queries — which is most real-world RAG traffic. The cost is real: two indexes to build and keep in sync (sparse + dense), two retrieval calls per query, a fusion step to tune (RRF's `k` or weighted `alpha`), and a larger debugging surface when relevance looks wrong. Skip it when the corpus and query distribution are purely conversational/semantic with no rare identifiers (embeddings alone are simpler and sufficient), or when the latency budget can't absorb a second retrieval leg and a single well-tuned retriever already hits target recall. A common strong production default: hybrid retrieval (RRF) over a generous candidate pool (top-50 per retriever), then a cross-encoder reranker over the merged top-k to sharpen final precision.",
+  "diagnosticQuiz": [
+    {
+      "q": "According to the lesson's definition, what structurally distinguishes hybrid search from other retrieval approaches?",
+      "choices": [
+        "BM25 and embedding retrieval run in parallel over the corpus, and their independent ranked lists are fused afterward",
+        "BM25 retrieves first, then a cross-encoder reranks only those candidates",
+        "Keyword metadata fields are concatenated into the document text before generating one embedding per document",
+        "A single embedding model is fine-tuned on both keyword and semantic signals so one dense index handles both cases"
+      ],
+      "answer": 0,
+      "explanation": "The lesson defines hybrid search as two independent retrievers (sparse + dense) run in parallel, each producing its own ranked list, which are then fused — the signals stay separate until fusion. The best distractor (cross-encoder reranking) describes a real, related pattern the lesson mentions as a downstream step *after* hybrid fusion, not a substitute for having two parallel retrievers in the first place."
+    },
+    {
+      "q": "Using Reciprocal Rank Fusion with k=60, a document sits at rank index 0 (1st place) in the BM25 list and rank index 2 (3rd place) in the dense list. What is its fused score?",
+      "choices": [
+        "1/61 + 1/63 ≈ 0.032",
+        "1/61 × 1/63 ≈ 0.00026",
+        "(1/61 + 1/63) / 2 ≈ 0.016",
+        "1/60 + 1/62 ≈ 0.033"
+      ],
+      "answer": 0,
+      "explanation": "The formula is `1.0 / (k + rank + 1)`, so rank index 0 gives `1/(60+0+1)=1/61` and rank index 2 gives `1/(60+2+1)=1/63`; RRF *sums* these contributions across lists. The averaging distractor reflects the misconception that fusion should normalize per-list like weighted fusion does — RRF's whole design is unweighted summation, so appearing near the top of *both* lists compounds the score rather than diluting it."
+    },
+    {
+      "q": "In the worked example (\"error code E1234 connection timeout\"), why might the embedding retriever rank a generic \"troubleshooting network timeouts\" doc above the one that actually contains \"E1234\"?",
+      "choices": [
+        "Cosine similarity scores are unbounded, so the generic doc's raw score dominated the comparison",
+        "The dense index never includes documents that contain rare tokens like E1234",
+        "BM25 always outperforms embeddings on any query containing numbers, by design",
+        "The model wasn't trained to differentiate alphanumeric codes, so E1234 doesn't stand out semantically, while the generic doc's topic vector is closer to the query's overall meaning"
+      ],
+      "answer": 3,
+      "explanation": "Embeddings degrade on tokens the model wasn't trained to distinguish — two different alphanumeric codes can land nearly on top of each other in vector space — so the semantic space collapses exactly the distinction that mattered, while the generic doc scores high on overall conceptual similarity. The best distractor overgeneralizes BM25's advantage to \"any query with numbers,\" when the lesson is specific: BM25 wins on rare, exact-match tokens (high IDF), but embeddings would still win on paraphrased/conceptual queries."
+    },
+    {
+      "q": "Per the lesson's tradeoffs, in which scenario should you skip hybrid search?",
+      "choices": [
+        "Queries are purely conversational/semantic with no rare identifiers, or the latency budget can't absorb a second retrieval leg",
+        "Query traffic is a high-volume mix of lexical and semantic queries",
+        "You have no labeled relevance judgments to tune against",
+        "The corpus contains many product SKUs and error codes"
+      ],
+      "answer": 0,
+      "explanation": "The lesson states hybrid search should be skipped when the corpus/queries are purely semantic with no rare identifiers (embeddings alone suffice) or when latency can't absorb a second retrieval leg and a single retriever already hits target recall. The \"no labeled data\" distractor reflects a common conflation: lacking relevance judgments is actually a reason to use RRF (which needs no tuning) rather than weighted fusion — it's not a reason to skip hybrid search altogether."
+    },
+    {
+      "q": "Why is it incorrect to fuse results by simply adding raw BM25 scores to raw cosine similarity scores?",
+      "choices": [
+        "Addition is computationally more expensive than rank-based fusion at query time",
+        "Cosine similarity cannot be computed for documents retrieved by BM25 since they lack precomputed embeddings",
+        "BM25 scores are unbounded and corpus/query-dependent while cosine is bounded in [-1, 1], so whichever signal has larger magnitude silently dominates regardless of relevance",
+        "BM25 scores are always negative and cosine scores are always positive, so they cancel out"
+      ],
+      "answer": 2,
+      "explanation": "A BM25 score of 12 has no fixed meaning — it depends on corpus statistics and the query — while cosine similarity is bounded, so summing lets an arbitrarily large BM25 score overwhelm a bounded cosine score with no relation to actual relevance. This is exactly why the lesson offers two real fixes — RRF (ignore magnitude, use rank only) or min-max/z-score normalization before weighting — rather than treating \"just add them\" as a viable option."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "We added hybrid search to our RAG pipeline but recall@10 barely improved over embeddings alone. How would you debug this?",
+      "a": "Work top-down through the pipeline:\n- **Is BM25 actually contributing?** Check whether the two ranked lists are near-identical (index misconfigured, stale, or empty) or genuinely diverse.\n- **Check the fusion math.** A common bug is naive raw-score addition where BM25's unbounded scale silently drowns out cosine similarity (or vice versa) — verify normalization or that RRF is used correctly.\n- **Check the effective weight.** If using weighted fusion, confirm `alpha` isn't accidentally near 0 or 1 for one signal.\n- **Segment the eval set.** Compute recall separately for lexical-heavy queries (IDs, codes, names) vs semantic/paraphrase queries. Hybrid should show a clear win on the lexical segment — if it doesn't even there, the sparse retriever itself is broken, not the fusion.\n- **Check candidate pool size.** If each retriever only returns top-5 before fusion, one signal may starve the other; widen to top-50 pre-fusion."
+    },
+    {
+      "q": "How would you decide between RRF and weighted score normalization for combining BM25 and dense retrieval scores in production?",
+      "a": "Default to **RRF**: it's scale-invariant, needs no calibration, and stays robust as score distributions drift with corpus growth or model updates — low maintenance burden. Weighted normalization can outperform it because it preserves magnitude information (a BM25 score of 45 vs 2 signals confidence that rank alone discards), but it requires a labeled relevance set to tune `alpha`, per-query min-max normalization is noisy with small candidate pools, and it needs periodic re-tuning as data shifts. In practice: ship RRF first, and only invest in tuned weighted fusion (or better, a learned cross-encoder reranker, which subsumes both) if you have the eval infrastructure to justify and monitor it."
+    },
+    {
+      "q": "Design a hybrid search system for a RAG pipeline with a 50ms p99 retrieval latency budget. What's your architecture?",
+      "a": "Fan out BM25 and ANN vector search **concurrently**, not sequentially — fused latency should be `max(bm25_latency, ann_latency)`, not the sum; instrument both legs separately in monitoring. Cap each retriever to a bounded top-k (e.g., 50) before fusion so RRF/normalization stays O(n log n) and cheap. Use RRF over weighted fusion by default — it's a sort, negligible cost, no runtime normalization needed. Keep both indexes warm/in-memory (HNSW for vectors, inverted index for BM25); prefer a system with native hybrid support (Vespa, Weaviate, OpenSearch/Elasticsearch with `dense_vector`) to avoid an extra network hop between two separate services. If a cross-encoder reranker is required for quality, treat it as a separate downstream stage outside the 50ms retrieval budget, or use a small distilled reranker on a tightly capped top-20 to stay in budget."
+    }
+  ],
+  "version": 2,
+  "relatedConcepts": [
+    "bm25",
+    "embeddings"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "72e36edf621cfd45",
+    "model": "sonnet",
+    "generatedAt": "2026-07-03T10:39:34Z",
+    "quizUpdatedAt": "2026-07-04T05:44:23Z"
+  }
+}

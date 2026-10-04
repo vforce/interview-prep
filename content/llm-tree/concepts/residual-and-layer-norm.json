@@ -1,0 +1,97 @@
+{
+  "id": "residual-and-layer-norm",
+  "title": "Residual and Layer Norm",
+  "definition": "Residual (skip) connections add a sublayer's input to its output — `x + Sublayer(x)` — to give gradients an unbroken identity path through depth, while Layer Normalization rescales each token's activation vector over the feature dimension (independent of batch) to zero mean/unit variance times a learned gain and bias, stabilizing what flows into the next sublayer.",
+  "summary": "Residual connections and normalization are paired in every transformer block so depth doesn't break training: the residual stream carries information unchanged across all layers, while normalization keeps each sublayer's input at a consistent scale. LayerNorm normalizes per-token over the feature dimension — not per-feature over the batch like BatchNorm — which is what makes it compatible with variable-length sequences and batch-size-1 autoregressive decoding. Where the norm sits relative to the residual add (\"pre-norm\" vs \"post-norm\") is a first-order training-stability decision at LLM scale.",
+  "objectives": [
+    "Explain why the residual identity path (y = x + F(x)) prevents vanishing gradients across deep transformer stacks",
+    "Compute LayerNorm's forward pass by hand: per-token mean/variance over the feature dimension, then scale by learned gamma/beta",
+    "Contrast pre-norm (`x + Sublayer(LN(x))`) vs post-norm (`LN(x + Sublayer(x))`) and explain why LLMs use pre-norm at scale",
+    "State why LayerNorm normalizes per-token instead of per-batch, unlike BatchNorm, and why that matters for autoregressive inference",
+    "Recognize RMSNorm as the mean-free, cheaper variant used in LLaMA/Mistral"
+  ],
+  "lesson": "**Residual connections.** Stack enough layers and plain backprop gradients vanish or explode — each layer multiplies in another Jacobian. A residual connection reframes a sublayer as `y = x + F(x)` instead of `y = F(x)`. Now `dy/dx = I + dF/dx`: there's always an identity term, so a gradient of magnitude ~1 can flow all the way from the loss back to layer 1 regardless of depth. This is the single biggest reason transformers scale to 100+ layers.\n\n**LayerNorm.** `F(x)` can still produce activations with drifting scale across layers, which destabilizes training and downstream attention/softmax scores. LayerNorm fixes this by re-centering and re-scaling *each token's* activation vector independently:\n\n```\nLN(x) = gamma * (x - mu) / sqrt(var + eps) + beta\n```\n\n`mu` and `var` are computed over the feature dimension (`d_model`), per token — not over the batch. That's the key contrast with BatchNorm, which normalizes per-feature over the batch: BatchNorm needs running statistics and breaks down at batch size 1 or with padded/variable-length sequences — exactly the conditions of autoregressive decoding. LayerNorm has no such dependency, so it's the default in every transformer.\n\n**The gotcha: where you put the norm.** The original Transformer used *post-norm*: `x = LN(x + Sublayer(x))`. That normalizes the residual stream itself every layer, which quietly destroys the clean identity path residual connections were supposed to give you — post-norm networks need careful LR warmup and get hard to train past ~20-30 layers. Every modern LLM (GPT-2 onward, LLaMA, PaLM) instead uses *pre-norm*: `x = x + Sublayer(LN(x))`. The norm only touches the branch; the residual stream itself is never normalized, so it stays an unbroken identity path from the embeddings to the final layer. The cost: the residual stream's norm grows with depth, so you need one extra final LayerNorm right before the output head — nearly every LLM has exactly this `ln_f` sitting between the last block and the LM head.",
+  "examples": "**1. LayerNorm by hand** (one token, `d_model=4`, gamma=1, beta=0):\n\n```\nx   = [2, 4, 6, 8]\nmu  = mean(x)            = 5\nvar = mean((x - mu)**2)  = mean([9, 1, 1, 9]) = 5\nstd = sqrt(var)          ≈ 2.236\n\nLN(x) = (x - mu) / std = [-1.342, -0.447, 0.447, 1.342]\n```\n\n**2. Pre-norm vs post-norm vs RMSNorm** in code:\n\n```python\n# post-norm (original Transformer, 2017) — residual stream gets normalized\ndef post_norm_block(x, attn, ffn, ln1, ln2):\n    x = ln1(x + attn(x))\n    x = ln2(x + ffn(x))\n    return x\n\n# pre-norm (GPT-2+, LLaMA, PaLM) — residual stream stays untouched\ndef pre_norm_block(x, attn, ffn, ln1, ln2):\n    x = x + attn(ln1(x))\n    x = x + ffn(ln2(x))\n    return x\n\n# RMSNorm (LLaMA/Mistral) — no mean-centering, no bias, cheaper\ndef rmsnorm(x, gamma, eps=1e-6):\n    return x / (x.pow(2).mean(-1, keepdim=True) + eps).sqrt() * gamma\n```",
+  "tradeoffs": "Pre-norm is the default for any LLM beyond a few dozen layers: it trains stably with minimal/no LR warmup, at the cost of needing a final LayerNorm and a residual stream whose activation norm grows with depth. Post-norm can yield marginally stronger representations at shallow depth (12-layer Transformer, BERT-base) but becomes fragile and warmup-dependent as depth grows — avoid it for large decoder-only LLMs. RMSNorm trades away mean-centering for a cheaper, bandwidth-lighter kernel (one reduction instead of two, no bias term); at LLM scale, where norm ops are memory-bandwidth-bound, this is close to a free win, which is why LLaMA/Mistral/T5 default to it over LayerNorm. Batch-based normalization is essentially never used in transformer LLMs because of its batch/running-stats dependence.",
+  "diagnosticQuiz": [
+    {
+      "q": "What does a residual connection compute in a transformer sublayer?",
+      "choices": [
+        "y = concat(x, Sublayer(x)) along the feature dimension",
+        "y = Sublayer(x) only, discarding x",
+        "y = x + Sublayer(x), adding the sublayer's input to its output",
+        "y = x * Sublayer(x), an elementwise gate"
+      ],
+      "answer": 2,
+      "explanation": "A residual connection is an additive identity shortcut. Discarding x (A) gives you a plain feedforward layer with no shortcut; elementwise gating (C) describes something closer to a GLU/highway gate; concatenation (D) is the DenseNet-style pattern, not a residual."
+    },
+    {
+      "q": "For one token's activations x = [2, 4, 6, 8], what is LayerNorm(x) before applying gamma/beta (eps ≈ 0)?",
+      "choices": [
+        "[-3, -1, 1, 3]",
+        "[0.25, 0.5, 0.75, 1.0]",
+        "[-1.342, -0.447, 0.447, 1.342]",
+        "[-1, -0.5, 0.5, 1]"
+      ],
+      "answer": 2,
+      "explanation": "mean = 5, variance = mean([9,1,1,9]) = 5, std ≈ 2.236, so (x - mean)/std ≈ [-1.342, -0.447, 0.447, 1.342]. Option B is the common shortcut mistake of subtracting the mean but forgetting to divide by the standard deviation."
+    },
+    {
+      "q": "Why do residual connections help train very deep transformer stacks?",
+      "choices": [
+        "They reduce the number of parameters in each layer",
+        "They act as a form of dropout regularization",
+        "They give gradients an identity path so they aren't repeatedly multiplied by every sublayer's Jacobian, preventing vanishing gradients",
+        "They remove the need for any normalization"
+      ],
+      "answer": 2,
+      "explanation": "`dy/dx = I + dF/dx` means an unbroken gradient of magnitude ~1 exists regardless of depth. Option D is a common misconception — residual connections solve the gradient-flow problem, but activation *scale* still drifts across layers, which is exactly why normalization is paired with them, not replaced by them."
+    },
+    {
+      "q": "You're designing a 100+ layer decoder-only LLM in 2026. Which normalization placement should you default to, and why?",
+      "choices": [
+        "BatchNorm across the batch dimension, since it's cheaper than LayerNorm",
+        "No normalization at all, relying purely on careful weight initialization",
+        "Pre-norm (LN inside each sublayer branch, residual stream left unnormalized, plus a final LN before the output head), for training stability at depth",
+        "Post-norm (LN after the residual add), matching the original 2017 Transformer, for the strongest final representations"
+      ],
+      "answer": 2,
+      "explanation": "Pre-norm keeps the residual stream as a clean, unnormalized identity path, which is what makes 70-100+ layer training stable without fragile warmup schedules — it's the standard in GPT-2+, LLaMA, and PaLM. Post-norm (A) is what the original Transformer used but becomes unstable at this depth; BatchNorm (D) breaks under variable-length sequences and batch-size-1 autoregressive decoding."
+    },
+    {
+      "q": "A colleague says \"LayerNorm and BatchNorm are basically the same, just normalized over different axes.\" What's the practically important consequence of LayerNorm normalizing per-token over the feature dimension instead of per-feature over the batch?",
+      "choices": [
+        "LayerNorm requires a running mean/variance buffer updated during training, just like BatchNorm",
+        "LayerNorm's statistics depend only on a single token's own activations, so behavior is identical during training and inference — essential for autoregressive generation at batch size 1",
+        "LayerNorm's output for a token depends on which other tokens are in the same batch",
+        "LayerNorm cannot use learnable gain/bias parameters"
+      ],
+      "answer": 1,
+      "explanation": "Because LayerNorm's mean/variance are computed per-token, it needs no batch or running statistics, so there's no train/inference mismatch — exactly what batch-size-1, variable-length autoregressive decoding requires. Option A describes BatchNorm's actual requirement (running stats), a common gotcha of attributing BatchNorm's mechanics to LayerNorm."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "You're serving an autoregressive decoder LLM at batch size 1 for interactive chat. Why would BatchNorm break here, and why don't LayerNorm/RMSNorm have this problem?",
+      "a": "BatchNorm normalizes per-feature across the batch dimension using running statistics accumulated in training; at batch size 1 (or with padded, variable-length sequences) there's no meaningful batch statistic, and train-time running stats don't match single-example serving. LayerNorm and RMSNorm normalize per-token over the feature dimension only, so each token is normalized independently of everything else in the batch — the same computation applies whether batch size is 1 or 1024, with no running statistics and no train/inference mismatch. That's why every transformer LLM uses LayerNorm/RMSNorm in the residual stream and never BatchNorm."
+    },
+    {
+      "q": "You're pretraining a 70-layer decoder model and loss spikes or diverges early unless you use a long LR warmup. A colleague suggests switching from post-norm to pre-norm blocks. Why would that help, and what's the tradeoff?",
+      "a": "Post-norm (`x = LN(x + Sublayer(x))`) normalizes the residual stream itself every layer, which destroys the clean identity gradient path residual connections are meant to provide — through 70 stacked layers, gradients can still misbehave early in training, hence the need for careful warmup. Pre-norm (`x = x + Sublayer(LN(x))`) normalizes only inside the branch, leaving the residual stream unnormalized and an unbroken identity path from input to output, which is dramatically more stable at depth and typically removes the need for extensive warmup. The tradeoff: the residual stream's norm grows with depth (each layer adds to it), so a final LayerNorm is required before the output head, and pre-norm can slightly underperform a stable post-norm model at small scale — but at 70+ layers, stability wins, and pre-norm is what's used in production (GPT-2/3, LLaMA, PaLM)."
+    },
+    {
+      "q": "Why do modern open-weight LLMs like LLaMA and Mistral use RMSNorm instead of LayerNorm, and what exactly differs?",
+      "a": "RMSNorm drops mean-centering: instead of `(x - mean)/std * gamma + beta`, it computes `x / sqrt(mean(x**2) + eps) * gamma` — no mean subtraction, no bias term. Empirically this matches LayerNorm's quality in large transformers, since the rescaling (not the centering) does most of the useful work, while being cheaper: one reduction (sum of squares) instead of two (mean, then variance), fewer parameters, and less memory traffic. Since normalization kernels are memory-bandwidth-bound rather than compute-bound on GPUs/TPUs, this is a real training and inference throughput win at trillion-token scale."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "transformer-overview"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "f1a52714e2a83419",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T13:37:47Z"
+  }
+}

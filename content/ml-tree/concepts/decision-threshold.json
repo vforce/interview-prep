@@ -1,0 +1,100 @@
+{
+  "id": "decision-threshold",
+  "title": "Decision Threshold",
+  "definition": "A decision threshold is the cutoff score `t` such that a classifier predicts the positive class whenever its continuous output `s(x) ≥ t`, converting a score into a hard label and fixing the model's precision/recall operating point without any retraining.",
+  "summary": "Most classifiers emit a continuous score, and where you cut it is a separate, tunable decision made after training — not something the optimizer learns. Moving the threshold trades precision against recall along the model's fixed score distribution, so the \"right\" value depends on the relative cost of false positives vs. false negatives, not on model accuracy. In production this value must be periodically re-derived, since precision shifts when the deployed class balance drifts even if the model itself hasn't changed.",
+  "objectives": [
+    "Explain what a decision threshold is and why 0.5 is an arbitrary default, not a law.",
+    "Compute precision/recall at a given threshold from raw confusion counts.",
+    "Derive a cost-optimal threshold from the relative cost of false positives vs. false negatives.",
+    "Recognize the base-rate gotcha: precision at a fixed threshold moves with prevalence, recall doesn't.",
+    "Distinguish threshold tuning (post-hoc, cheap) from model retraining and from calibration."
+  ],
+  "lesson": "A score `s(x)` — a logistic regression probability, a GBM leaf average, a logit — isn't a classification until you pick `t` and predict positive when `s(x) ≥ t`. The threshold is applied *after* the model is frozen: sweeping `t` from 0 to 1 traces out every point on that model's ROC and PR curves. At `t=0` everything is flagged (recall=1, precision=base rate); at `t=1` nothing is (recall=0). In between, raising `t` generally buys precision at the cost of recall, because you're keeping only the examples the model is most confident about.\n\n**Worked example.** Score 10 transactions for fraud (3 are truly fraud). At `t=0.5`, 5 transactions are flagged, 3 of them true fraud → precision 0.60, recall 1.00. At `t=0.8`, only 2 are flagged, both true fraud → precision 1.00, recall 0.67. Same model, same scores — two very different operating points. Neither is \"more correct\"; which one you want depends on what a false positive (blocked legitimate card) costs against a false negative (uncaught fraud).\n\n**Key gotcha.** Threshold tuning is base-rate-sensitive in a way accuracy — and the model — is not. Recall depends only on the score distribution of true positives, so it's roughly stable if the class-conditional distributions don't change. Precision at a *fixed* threshold depends heavily on how common positives are at serving time: if fraud drops from 2% to 0.5% of traffic with the model untouched, a threshold that gave 90% precision in validation can quietly give 60% in production — no code change, no model drift, just a shifted prior. Engineers who tune a threshold once on a static validation set and never revisit it get burned by exactly this. Treat the threshold as a monitored, re-derivable config value, not a training artifact.",
+  "examples": "**1. Reading precision/recall off a threshold sweep**\n\n```python\nimport numpy as np\n\nscores = np.array([.92, .85, .70, .60, .55, .45, .35, .25, .15, .05])\nlabels = np.array([  1,   1,   0,   0,   1,   0,   0,   0,   0,   0])\n\ndef confusion(t):\n    pred = scores >= t\n    tp = int(((pred == 1) & (labels == 1)).sum())\n    fp = int(((pred == 1) & (labels == 0)).sum())\n    fn = int(((pred == 0) & (labels == 1)).sum())\n    precision = tp / (tp + fp) if (tp + fp) else float(\"nan\")\n    recall    = tp / (tp + fn) if (tp + fn) else float(\"nan\")\n    return tp, fp, fn, precision, recall\n\nfor t in (0.5, 0.8):\n    tp, fp, fn, p, r = confusion(t)\n    print(f\"t={t}: TP={tp} FP={fp} FN={fn}  precision={p:.2f}  recall={r:.2f}\")\n\n# t=0.5: TP=3 FP=2 FN=0  precision=0.60  recall=1.00\n# t=0.8: TP=2 FP=0 FN=1  precision=1.00  recall=0.67\n```\n\n**2. Deriving a cost-optimal threshold**\n\nFor a well-calibrated classifier, the Bayes-optimal threshold that minimizes expected cost is `t* = C_FP / (C_FP + C_FN)`:\n\n```python\nC_FP = 2      # cost of a false alarm (support ticket)\nC_FN = 500    # cost of a missed fraud\n\nt_star = C_FP / (C_FP + C_FN)\nprint(round(t_star, 4))   # 0.004\n```\n\nBecause a missed fraud is ~250x costlier than a false alarm, the cost-optimal cutoff sits near 0.004 — flag almost anything above baseline. This formula only holds if the scores are calibrated probabilities; otherwise derive `t` empirically off the validation PR curve.",
+  "tradeoffs": "Raising the threshold favors precision — right when false positives are expensive or high-volume (spam filtering, moderation queues). Lowering it favors recall — right when a missed positive is expensive or safety-critical (fraud, churn, disease screening), even at the cost of more false alarms. Per-segment thresholds (e.g., stricter for high-value accounts) match heterogeneous costs but add operational complexity and are easy to overfit on small segments. Threshold tuning isn't a substitute for calibration: if scores aren't calibrated probabilities, don't reason about the cutoff in absolute terms — pick it empirically off the validation PR/ROC curve, and re-derive it whenever the serving class balance or cost structure moves.",
+  "diagnosticQuiz": [
+    {
+      "q": "Which statement best describes a decision threshold in a binary classifier?",
+      "choices": [
+        "A hyperparameter tuned during training via gradient descent",
+        "The cutoff score above which a continuous model output is mapped to the positive class",
+        "A regularization parameter that controls the decision boundary's complexity",
+        "The minimum accuracy required before a model is deployed"
+      ],
+      "answer": 1,
+      "explanation": "The threshold is applied post-hoc to a frozen model's scores, not learned by the optimizer — conflating it with a trainable parameter (A) is the most common mix-up. It has no direct relationship to accuracy (C) or regularization (D)."
+    },
+    {
+      "q": "At threshold 0.7 a model yields TP=40, FP=10, FN=20, TN=930. What is recall (nearest %)?",
+      "choices": [
+        "80%",
+        "97%",
+        "67%",
+        "33%"
+      ],
+      "answer": 2,
+      "explanation": "Recall = TP/(TP+FN) = 40/60 ≈ 67%. 80% is precision (TP/(TP+FP)), a classic precision/recall mix-up. 97% is overall accuracy, inflated by the large true-negative class — high accuracy under imbalance says nothing about recall. 33% is the miss rate (FN/(TP+FN)), i.e., 1 − recall."
+    },
+    {
+      "q": "As you raise the decision threshold from 0.3 to 0.9, holding the model fixed, what typically happens?",
+      "choices": [
+        "Precision tends to increase, recall tends to decrease",
+        "Precision tends to decrease, recall tends to increase",
+        "Both precision and recall increase",
+        "Both stay constant since the model itself hasn't changed"
+      ],
+      "answer": 0,
+      "explanation": "A higher threshold keeps only the examples the model is most confident about, so predictions are fewer but more often correct — precision up, recall down. D reflects the misconception that the threshold isn't a real design lever: the scores are fixed, but which labels they produce — and every metric computed from those labels — changes completely with `t`."
+    },
+    {
+      "q": "A screening test for a serious, treatable disease feeds a classifier used to decide \"refer for biopsy.\" Missing a real case is far costlier than an unnecessary biopsy. How should the threshold be set relative to the default 0.5?",
+      "choices": [
+        "Lower it well below 0.5 to prioritize recall",
+        "Set it equal to the model's training accuracy",
+        "Raise it well above 0.5 to maximize precision",
+        "Keep it at 0.5 — thresholds shouldn't be tuned for medical models"
+      ],
+      "answer": 0,
+      "explanation": "When false negatives are far costlier than false positives, the cost-optimal threshold moves down, trading some precision (more unnecessary biopsies) for higher recall (fewer missed cases). A is the opposite of the cost structure; C denies that threshold is a legitimate, cost-driven lever; D confuses threshold with an unrelated metric."
+    },
+    {
+      "q": "A fraud threshold was tuned on a validation set with 2% fraud prevalence to hit 90% precision. In production the fraud rate drops to 0.5% (model and threshold unchanged). What most likely happens?",
+      "choices": [
+        "Precision stays about the same because the threshold is fixed",
+        "Both are unaffected — they depend only on the model, not the data",
+        "Recall drops sharply while precision stays at 90%",
+        "Precision drops well below 90% while recall stays roughly similar"
+      ],
+      "answer": 3,
+      "explanation": "Precision (PPV) is highly sensitive to prevalence — with a rarer positive class, false positives make up a larger share of flagged cases even though the model's true/false positive rates are unchanged, so precision falls sharply. Recall depends only on the score distribution of actual positives, so it stays roughly stable under a prior shift. D is the core misconception: precision and recall aren't pure model properties, they depend on the label distribution at evaluation time — this is the single biggest gotcha in production threshold tuning."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "How would you pick a decision threshold for a production fraud classifier, given asymmetric costs for false positives and false negatives?",
+      "a": "Don't default to 0.5. If the scores are well-calibrated, the Bayes-optimal cutoff is `C_FP / (C_FP + C_FN)`. Otherwise, sweep the threshold over a held-out validation set, plot precision/recall (or expected $ cost) vs. `t`, and pick the point satisfying the business constraint (e.g. \"precision ≥ 90%\" or \"minimize cost\"). Keep that validation slice distinct from whatever was used for model selection, and revisit the choice whenever the deployed positive rate shifts — precision at a fixed threshold moves with the base rate even when the model doesn't."
+    },
+    {
+      "q": "Your model reports 95% accuracy but the product team says it's useless in production. What do you check first?",
+      "a": "Class balance — if positives are ~2% of traffic, \"always predict negative\" already scores ~98% accuracy, so 95% can be a genuinely bad classifier. Check precision/recall at the *actual deployed* threshold (often left at the framework default of 0.5) instead of accuracy, which is the wrong metric under imbalance. Often the real bug isn't the model — it's that nobody deliberately chose the threshold; re-plot the PR curve and pick one against the stakeholders' cost tradeoffs."
+    },
+    {
+      "q": "Why doesn't a fixed threshold transfer safely across deployments or over time, and how would you detect that it needs re-tuning?",
+      "a": "A threshold is only optimal for the calibration and cost structure it was chosen under, and both drift. Precision at a fixed threshold depends on live prevalence via `PPV = sens·prior / (sens·prior + (1−spec)·(1−prior))`, while recall is far more prior-invariant — a pure class-balance shift can tank live precision with zero model change. Detect it by monitoring live precision/recall against delayed ground-truth labels, tracking the served positive rate and score distribution (e.g. PSI) over time, and alerting when live precision diverges from its validation-time value at the same threshold — that's the signature of base-rate drift, and a signal to re-derive (not necessarily retrain)."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "calibration",
+    "precision-and-recall"
+  ],
+  "followUps": [
+    "calibration"
+  ],
+  "metadata": {
+    "inputHash": "bcf222bb1e2a3979",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T09:42:55Z"
+  }
+}

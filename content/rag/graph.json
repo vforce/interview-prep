@@ -1,0 +1,45 @@
+{
+  "rag-overview": {
+    "requires": []
+  },
+  "chunking": {
+    "requires": []
+  },
+  "embeddings": {
+    "requires": []
+  },
+  "tf-idf": {
+    "requires": []
+  },
+  "bm25": {
+    "requires": []
+  },
+  "hybrid-search": {
+    "requires": [
+      "bm25",
+      "embeddings"
+    ]
+  },
+  "hnsw": {
+    "requires": [
+      "embeddings"
+    ]
+  },
+  "reranking": {
+    "requires": [
+      "embeddings"
+    ]
+  },
+  "graphrag": {
+    "requires": [
+      "chunking",
+      "rag-overview"
+    ]
+  },
+  "similarity-at-scale": {
+    "requires": [
+      "hnsw",
+      "tf-idf"
+    ]
+  }
+}

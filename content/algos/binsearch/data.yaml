@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: binsearch
+fam: arrays
+label: Binary Search
+order: 3
+trigger: sorted or rotated array, find a boundary / first-true
+insight: lo<hi with hi exclusive; lower_bound returns first index ≥ target. Watch the off-by-one
+probs:
+- {n: Binary Search, slug: binary-search, d: E}
+- {n: Search in Rotated Sorted Array, slug: search-in-rotated-sorted-array, d: M}
+- {n: Median of Two Sorted Arrays, slug: median-of-two-sorted-arrays, d: H}

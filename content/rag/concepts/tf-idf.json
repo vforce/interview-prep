@@ -1,0 +1,99 @@
+{
+  "id": "tf-idf",
+  "title": "TF-IDF",
+  "definition": "TF-IDF (Term Frequency–Inverse Document Frequency) is a sparse term-weighting scheme that scores a term in a document by how often it occurs there, discounted by how common that term is across the whole corpus, yielding a vector suited to lexical document retrieval.",
+  "summary": "TF-IDF converts documents into sparse vectors where each vocabulary term is weighted by local frequency (informative repetition) times global rarity (discriminative power). It's the classical baseline for lexical/keyword retrieval — BM25 is its production-grade refinement — and today it typically shows up as the \"sparse\" half of a hybrid RAG retrieval stack alongside dense embeddings.",
+  "objectives": [
+    "Derive the TF, IDF, and TF-IDF formulas and compute a score by hand on a small corpus.",
+    "Explain why IDF suppresses corpus-wide-common terms without a hand-built stopword list.",
+    "Compare TF-IDF/BM25 (lexical) retrieval against dense embedding retrieval and know when to hybridize.",
+    "Identify TF-IDF's core failure mode — vocabulary mismatch / no synonymy — and its production mitigations.",
+    "Implement TF-IDF retrieval in Python (`scikit-learn`) and reason about index freshness at scale."
+  ],
+  "lesson": "Intuition: a word repeated often in a document is probably important to that document — that's term frequency (TF). But if the word also appears in almost every other document (\"the,\" \"system,\" \"data\"), it's not discriminative; inverse document frequency (IDF) down-weights it for being corpus-wide common.\n\nClassic formulas:\n```\nTF(t,d)  = count(t in d) / total tokens in d\nIDF(t)   = ln(N / df(t))        N = total docs, df(t) = docs containing t\nTFIDF(t,d) = TF(t,d) × IDF(t)\n```\n\nWorked mini-example: in a 3-document corpus, \"sat\" appears in 2 of 3 docs → IDF = ln(3/2) ≈ 0.41 (low weight — common). \"mat\" appears in only 1 of 3 docs → IDF = ln(3/1) ≈ 1.10 (high weight — distinctive). Even if \"sat\" and \"mat\" have identical TF within a document, \"mat\" contributes far more to that document's vector — exactly the retrieval signal you want: rare, on-topic words dominate; ubiquitous words fade toward zero. Full table in `@@EXAMPLES`.\n\n**Gotcha #1 (implementation):** production libraries (scikit-learn, Lucene) typically skip \"divide by doc length,\" use raw counts, smooth IDF (`+1`, so terms in every document don't get IDF = ln(1) = 0 and vanish entirely), and L2-normalize the final vector instead. Same idea, different arithmetic — don't expect hand-derived numbers to match library output digit-for-digit.\n\n**Gotcha #2 (the one that matters for RAG):** TF-IDF is bag-of-words — no meaning, no word order, no synonymy. \"car\" and \"automobile\" are unrelated vector dimensions, so a query and its ideal matching document can score zero similarity if they phrase the same concept differently (vocabulary mismatch / lexical gap). This is exactly why production RAG pairs sparse retrieval (TF-IDF/BM25) with dense embeddings in a hybrid pipeline: sparse guarantees exact-term recall (IDs, jargon, names) that embeddings often blur; dense catches paraphrase sparse can't see at all. Neither alone is the default answer for open-domain retrieval.",
+  "examples": "**Example 1 — hand calculation** (classic formula, no smoothing), corpus:\n```\nd1: \"the cat sat on the mat\"\nd2: \"the dog sat on the log\"\nd3: \"cats and dogs are pets\"\nN = 3\n```\n\n| term | df | idf = ln(N/df) | TF in d1 | TF-IDF(term, d1) |\n|------|----|----------------|----------|-------------------|\n| the  | 2  | 0.405          | 2/6=0.333| 0.135             |\n| cat  | 1  | 1.099          | 1/6=0.167| 0.183             |\n| sat  | 2  | 0.405          | 1/6=0.167| 0.068             |\n| mat  | 1  | 1.099          | 1/6=0.167| 0.183             |\n\n\"cat\" and \"mat\" (df=1, rare) dominate d1's vector; \"the\" and \"sat\" (df=2, common) are suppressed — the vector correctly says \"this doc is about a cat and a mat.\"\n\n**Example 2 — retrieval with scikit-learn** (raw counts + smoothed IDF + L2 norm, sklearn's actual defaults):\n```python\nfrom sklearn.feature_extraction.text import TfidfVectorizer\nfrom sklearn.metrics.pairwise import cosine_similarity\n\ndocs = [\n    \"the cat sat on the mat\",\n    \"the dog sat on the log\",\n    \"cats and dogs are pets\",\n]\nvec = TfidfVectorizer()\nX = vec.fit_transform(docs)                    # (3 x vocab) sparse, L2-normalized rows\n\nquery = vec.transform([\"a cat on a mat\"])       # note: single-char \"a\" tokens are dropped\nscores = cosine_similarity(query, X).flatten()\nfor i in scores.argsort()[::-1]:\n    print(f\"{scores[i]:.2f}  {docs[i]}\")\n# ~0.69  the cat sat on the mat        <- shares \"cat\",\"on\",\"mat\" (incl. two high-IDF terms)\n# ~0.15  the dog sat on the log        <- shares only \"on\" (a low-IDF, common term)\n#  0.00  cats and dogs are pets        <- shares nothing (\"cats\" != \"cat\" — a token, not a concept)\n```\nd3 scoring exactly zero despite the obvious topical overlap (\"cats\") is the vocabulary-mismatch gotcha in miniature — TF-IDF never \"knows\" `cats` and `cat` are the same word without stemming/lemmatization.",
+  "tradeoffs": "Use TF-IDF/BM25 when you need cheap, fast, interpretable retrieval that's strong on exact matches — no training, no GPU, incremental index updates, and you can literally point at which terms drove a hit. It's the right (or only) choice for IDs, product codes, rare proper nouns, and jargon that embedding models frequently mis-embed. Avoid relying on it alone when queries are paraphrased, conceptual, or cross-lingual — it cannot bridge \"reduce logging costs\" to \"cut observability spend.\" In practice, raw TF-IDF has mostly been superseded by BM25 for production sparse search (term-frequency saturation + explicit document-length normalization), and both are commonly run alongside a dense embedding retriever in a hybrid pipeline with score fusion and optional cross-encoder reranking, rather than as a standalone retriever for open-domain RAG.",
+  "diagnosticQuiz": [
+    {
+      "q": "What does the IDF component of TF-IDF measure?",
+      "choices": [
+        "How rare or common a term is across the whole corpus, down-weighting ubiquitous terms",
+        "The total number of documents in the corpus",
+        "How many times a term appears in one specific document",
+        "The cosine similarity between two document vectors"
+      ],
+      "answer": 0,
+      "explanation": "IDF = ln(N/df(t)) captures corpus-wide rarity — terms present in nearly every document get IDF near 0, canceling their contribution regardless of local TF. The distractors describe TF (in-doc frequency), corpus size alone, and a downstream similarity metric — none of which is what IDF itself measures."
+    },
+    {
+      "q": "Corpus has N=100 documents; \"kubernetes\" appears in 5 of them. Using IDF = ln(N/df), what is IDF(\"kubernetes\")?",
+      "choices": [
+        "5/100 = 0.05",
+        "ln(100/5) = ln(20) ≈ 3.0",
+        "ln(100 − 5) = ln(95) ≈ 4.55",
+        "ln(5/100) ≈ -3.0"
+      ],
+      "answer": 1,
+      "explanation": "IDF = ln(N/df) = ln(100/5) = ln(20) ≈ 3.0. The classic mistake is inverting the ratio to df/N (option A), which produces a negative weight and would rank rare terms as *less* important — exactly backwards from IDF's purpose."
+    },
+    {
+      "q": "Why does TF-IDF multiply TF by IDF instead of just ranking on raw term frequency?",
+      "choices": [
+        "IDF removes the need to normalize the vector afterward",
+        "Cosine similarity is mathematically undefined without an IDF term",
+        "Raw TF alone can't tell informative repetition from a term that's just common everywhere and uninformative",
+        "Multiplication is computationally cheaper than addition"
+      ],
+      "answer": 2,
+      "explanation": "A document repeating \"the\" 50 times isn't \"more about 'the'\" in any useful sense; TF alone has no corpus-level context to know that. IDF supplies exactly that context, suppressing universally common terms — the entire reason TF-IDF beats raw bag-of-word counts for ranking. Cosine similarity and normalization work fine with any nonnegative weights, so the last two options are false."
+    },
+    {
+      "q": "In a production RAG pipeline, when is sparse (TF-IDF/BM25) retrieval most clearly preferable to dense embeddings alone?",
+      "choices": [
+        "When queries are long, conversational paraphrases of the source text",
+        "When the corpus is small enough to fit in memory",
+        "When queries contain exact identifiers, error codes, SKUs, or rare proper nouns that must match verbatim",
+        "When the retriever needs to generalize across languages"
+      ],
+      "answer": 2,
+      "explanation": "Embedding models compress text for semantic similarity and routinely blur or drop rare, out-of-distribution exact tokens like `ERR_504B` or a specific SKU; sparse lexical matching guarantees the exact-term hit. Paraphrase handling and cross-lingual generalization (A, D) are precisely where dense embeddings win instead, and corpus size (B) isn't the deciding factor."
+    },
+    {
+      "q": "A query \"car insurance quotes\" scores zero TF-IDF similarity against a document about \"automobile insurance,\" even though a human would call it a perfect match. What's the most likely cause?",
+      "choices": [
+        "The documents weren't L2-normalized before computing cosine similarity",
+        "TF-IDF is bag-of-words with no notion of synonymy, so \"car\" and \"automobile\" are unrelated dimensions",
+        "The IDF values were computed incorrectly",
+        "The vectorizer's vocabulary size was too large"
+      ],
+      "answer": 1,
+      "explanation": "Each distinct token is an independent vector dimension with no embedding or co-occurrence model linking related words, so synonyms share zero dimensions and produce zero overlap — the textbook vocabulary-mismatch/lexical-gap failure that motivates hybrid retrieval or query expansion. A miscalculated IDF or missing normalization (A, C) would distort scores, not cause this specific synonym blindness, and vocabulary size (D) doesn't cause false zeros."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Why has BM25 largely replaced raw TF-IDF as the production standard for sparse/lexical retrieval?",
+      "a": "BM25 keeps TF-IDF's core idea but fixes two things that matter at scale: **term-frequency saturation** — a term occurring 20× isn't 20× as relevant as occurring once, so BM25's TF term saturates via a `k1` parameter — and **explicit document-length normalization** via parameter `b`, so a document isn't scored higher purely for being longer and containing more term instances. Same training-free, interpretable, incrementally-updatable profile as TF-IDF, better ranking quality — which is why Elasticsearch/OpenSearch/Lucene/Pyserini all default to BM25 rather than raw TF-IDF today."
+    },
+    {
+      "q": "IDF is a global corpus statistic. How do you keep it usable in a production index that's ingesting new documents continuously, without recomputing document frequencies over the whole corpus on every write?",
+      "a": "Treat IDF as slowly-changing rather than always-exact: recompute corpus-wide `df` counts in batch (e.g., nightly, or every N ingested documents) instead of per-write, accepting brief staleness — safe because term rarity shifts slowly relative to ingestion rate. Search engines implement this under the hood with segment-based inverted indexes: each new segment carries local stats and segments merge periodically, giving \"correct enough\" IDF without a full-corpus scan on every insert."
+    },
+    {
+      "q": "When would you choose TF-IDF/BM25 alone, without a dense embedding retriever, given the extra infra and latency cost of running two retrievers plus fusion?",
+      "a": "When the query distribution is dominated by exact-match signals — IDs, ticket/log lookups, citation numbers, structured jargon — and paraphrase is rare; lexical match alone already gets near-ceiling recall, so a second retriever and fusion step buys little for the added cost and latency. I'd add dense retrieval once query phrasing diverges from document phrasing (support bots, open-domain Q&A over prose), which is exactly where TF-IDF's no-synonymy limitation causes real recall misses. The decision should follow the query/document phrasing gap, not a blanket \"always hybrid\" default."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "similarity-at-scale"
+  ],
+  "followUps": [
+    "similarity-at-scale"
+  ],
+  "metadata": {
+    "inputHash": "bfee3dfe3f99a9e9",
+    "model": "sonnet",
+    "generatedAt": "2026-07-08T11:04:23Z"
+  }
+}

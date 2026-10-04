@@ -1,0 +1,111 @@
+{
+  "id": "pretraining",
+  "title": "Pretraining",
+  "definition": "Pretraining is the initial self-supervised stage in which a randomly-initialized transformer learns general language competence and world knowledge by predicting tokens (typically the next token) across a massive, broad text/code corpus, producing a \"base model\" before any instruction-tuning or alignment.",
+  "summary": "Pretraining trains the whole network end-to-end with a simple causal language-modeling loss, which is why it scales to trillions of unlabeled tokens of web text, code, and books. It is the most expensive stage of the LLM lifecycle — often thousands of GPUs for weeks — and its output is fluent but not yet instruction-following or safe. Every downstream stage (SFT, RLHF, RAG, fine-tuning) builds on the representations this stage bakes in.",
+  "objectives": [
+    "Explain the causal (autoregressive) LM objective and how teacher forcing turns it into one parallel forward pass per sequence.",
+    "Apply compute-optimal scaling (Chinchilla: C ≈ 6ND, ~20 tokens/parameter) to reason about model-size vs. token-count under a fixed compute budget.",
+    "Describe what the data pipeline does — collection, filtering/dedup, mixing — and why data quality now drives capability as much as architecture.",
+    "Distinguish what pretraining produces (a base model) from what SFT/RLHF add (instruction-following, safety, alignment).",
+    "Identify production failure modes of large training runs (loss spikes, hardware failures, contamination) and their standard mitigations."
+  ],
+  "lesson": "Pretraining is where an LLM gets its raw capability. Concretely: take a decoder-only transformer, feed it token ids, and train it to predict each next token from everything before it — loss = mean cross-entropy of `-log P(x_t | x_<t)` over the sequence and batch. Do this over trillions of tokens and the model is forced to internalize grammar, facts, style, and multi-step patterns — not because anything was labeled, but because accurately predicting the next token in arbitrary human text requires an internal model of whatever produced that text. This is the \"prediction is compression\" intuition.\n\nMechanically, training uses **teacher forcing**: ground-truth previous tokens are fed as input, not the model's own predictions, and the causal attention mask ensures position `t` only attends to positions `≤ t`. That means one forward pass scores every position of a sequence at once — training is parallel across the sequence, even though inference is inherently sequential (one token at a time, fed back in).\n\nWorked example: for \"the cat sat on the mat\", the loss at the position after \"on the\" is `-log P(\"mat\" | \"the cat sat on the\")`. Sum (or average) these per-token losses across the sequence and batch, backprop, update every parameter — repeat for trillions of tokens.\n\nKey gotcha: a falling pretraining loss only means the model is getting better at modeling the *training distribution* — it says nothing about instruction-following, factual reliability, or safety. Teams that watch loss curves drop and conclude \"the model is getting smarter as an assistant\" are conflating pretraining with alignment; those behaviors come from SFT/RLHF on top and need separate evals. A related gotcha: parameter count alone doesn't determine quality — a model undertrained relative to its size (too few tokens per parameter) wastes capacity, which is exactly what compute-optimal scaling laws are for.",
+  "examples": "**1. The causal LM loss in code**\n\n```python\nimport torch.nn.functional as F\n\ndef causal_lm_loss(logits, input_ids):\n    # logits: (batch, seq_len, vocab_size); input_ids: (batch, seq_len)\n    shift_logits = logits[:, :-1, :].contiguous()   # predictions at t\n    shift_labels = input_ids[:, 1:].contiguous()    # actual token t+1\n    return F.cross_entropy(\n        shift_logits.view(-1, shift_logits.size(-1)),\n        shift_labels.view(-1),\n        ignore_index=-100,  # padding\n    )\n```\n\n**2. Compute-optimal sizing (Chinchilla)**\n\nGiven `C ≈ 6ND` (N=params, D=tokens) and the ~20 tokens/parameter rule (`D ≈ 20N`):\n\n```\nC ≈ 6N(20N) = 120N²  →  N ≈ sqrt(C / 120)\n```\n\n```python\ndef chinchilla_optimal(compute_flops, tokens_per_param=20, c=6):\n    n = (compute_flops / (c * tokens_per_param)) ** 0.5\n    return n, tokens_per_param * n  # params, tokens\n\nn, d = chinchilla_optimal(1.2e22)\nprint(f\"{n:.2e} params, {d:.2e} tokens\")  # 1.00e+10 params, 2.00e+11 tokens\n```\n\nA 1.2×10²² FLOP budget is best spent on a ~10B-parameter model trained on ~200B tokens — not a 100B model starved of data (the mistake GPT-3-era models made).",
+  "tradeoffs": "Pretraining from scratch buys full control over data provenance and behavior but costs hundreds of thousands to tens of millions of dollars plus distributed-training infra — justify it only when you need a base capability (language, modality, license) no existing model provides. For almost every other case, continued/domain-adaptive pretraining, fine-tuning, or RAG on an existing base model gets most of the benefit far cheaper. Within pretraining itself: Chinchilla-optimal sizing minimizes *training* compute for a target loss, but production pays *inference* cost on every request forever — so families like Llama/Mistral deliberately overtrain smaller models on more tokens than compute-optimal, trading one-time training compute for cheaper serving. Skimping on data curation (dedup, filtering, contamination checks) to save time is rarely worth it — it silently degrades quality and invalidates your eval benchmarks.",
+  "diagnosticQuiz": [
+    {
+      "q": "Which objective best describes standard pretraining for a decoder-only LLM (e.g., GPT-style)?",
+      "choices": [
+        "Predict a randomly masked token using bidirectional context (masked language modeling)",
+        "Classify each input sequence into a fixed set of labeled categories",
+        "Predict the next token given only the preceding tokens (causal/autoregressive language modeling)",
+        "Learn a scalar reward from pairwise human preference comparisons"
+      ],
+      "answer": 2,
+      "explanation": "Decoder-only LLMs use a causal LM objective — cross-entropy on predicting token t from tokens < t, enforced by a causal attention mask. The top wrong answer is BERT-style masked LM, an encoder objective that sees future context; both are self-supervised on raw text, which is why they're easy to conflate, but masked LM isn't used for autoregressive generation. The other two describe later, labeled stages (SFT, RLHF reward modeling)."
+    },
+    {
+      "q": "Using the Chinchilla compute-optimal heuristic (~20 training tokens per parameter), what's the approximate optimal token count for a 50B-parameter model?",
+      "choices": [
+        "~10T tokens",
+        "~1T tokens",
+        "~50B tokens",
+        "~250B tokens"
+      ],
+      "answer": 1,
+      "explanation": "50B × 20 ≈ 1T tokens, per Hoffmann et al. (2022). ~50B and ~250B tokens (1x and 5x per parameter) are the classic undertraining mistake that models like GPT-3 fell into, wasting parameter capacity. ~10T tokens (200x/param) overshoots into \"overtraining,\" which can be a deliberate choice for cheaper inference but isn't the compute-optimal answer."
+    },
+    {
+      "q": "Why does plain next-token prediction over a huge, broad corpus produce a model that appears to reason and know facts, with no labels for either?",
+      "choices": [
+        "The model memorizes and retrieves matching documents verbatim at inference time",
+        "Predicting the next token accurately over a broad enough distribution requires implicitly modeling the syntax, semantics, and world knowledge that generated the text",
+        "The transformer architecture hard-codes grammar rules into its attention heads before training",
+        "Next-token prediction is mathematically identical to supervised training on human-labeled reasoning traces"
+      ],
+      "answer": 1,
+      "explanation": "This is the \"prediction as compression\" argument — to keep minimizing loss on diverse, information-dense text, the model must internalize the regularities that generated it, not just surface statistics. Verbatim memorization happens for some duplicated content but doesn't explain generalization to novel prompts. There are no labels or hard-coded rules; all structure comes from the objective and data alone."
+    },
+    {
+      "q": "You have a strong general-purpose pretrained base model but weak performance on your company's proprietary internal API, barely present in public pretraining data. What's the most compute-efficient fix?",
+      "choices": [
+        "Rely on prompt engineering only, and never touch the model's weights",
+        "Pretrain a brand-new model from scratch on your internal codebase alone",
+        "Continue pretraining (domain-adaptive pretraining) or fine-tune the existing base model on your internal code and docs",
+        "Discard the base model and answer purely via retrieval, with no model adaptation"
+      ],
+      "answer": 2,
+      "explanation": "Continued pretraining/fine-tuning reuses the general competence the base model already paid full pretraining compute for, adapting it for a small fraction of that cost. Training from scratch throws that investment away. Prompting and pure retrieval can help and are often used alongside adaptation, but neither teaches the model the API's patterns the way weight updates on real examples do."
+    },
+    {
+      "q": "A team sees pretraining loss steadily decreasing over a multi-week run and concludes their model is becoming a better assistant. What's the flaw?",
+      "choices": [
+        "Pretraining loss on held-out data directly and fully measures instruction-following and safety, so the conclusion is valid",
+        "Pretraining loss and downstream benchmark accuracy are mathematically the same quantity",
+        "Loss can only decrease because of a bug in the data loader, so a decreasing loss is itself a red flag",
+        "Lower next-token-prediction loss reflects better modeling of the pretraining distribution, not alignment with instructions or safety — those need SFT/RLHF and dedicated evals"
+      ],
+      "answer": 3,
+      "explanation": "Pretraining loss measures only how well the model predicts held-out text from the pretraining distribution; a base model can have excellent loss and still ignore instructions or produce unsafe output, since it was never optimized for those behaviors. The flawed answer treats \"good at pretraining\" as synonymous with \"good at being an assistant\" — those are separate stages with separate objectives and must be measured with separate evals."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Walk me through what happens, mechanically, during one pretraining step of a GPT-style model.",
+      "a": "Tokenize a chunk of text → forward pass through the causal transformer produces a vocab distribution at every position → cross-entropy loss between each position's prediction and the actual next token, using **teacher forcing** (ground-truth tokens as input, not the model's own outputs) → backprop through the whole network → optimizer step (AdamW, warmup+decay LR) → repeat, sharded across GPUs with data/tensor/pipeline parallelism. The causal mask blocks future-token leakage, so this single pass scores every position in the sequence at once."
+    },
+    {
+      "q": "Given a fixed compute budget, how do you decide the split between model size and dataset size?",
+      "a": "Use compute-optimal scaling laws: with `C ≈ 6ND`, Chinchilla shows loss-optimal training uses `D ≈ 20N` — scale both roughly with `sqrt(C)`. But that's optimal for *training* compute only; production also pays *inference* cost on every request, which scales with N. So teams often deliberately train a smaller-than-Chinchilla-optimal model on more tokens (Llama/Mistral-style), trading extra one-time training compute for cheaper, faster lifetime inference."
+    },
+    {
+      "q": "What are the most common failure modes when running a large pretraining job, and how do you mitigate them?",
+      "a": "- Loss spikes/divergence (numeric instability, bad batch) → gradient clipping, LR warmup, bf16 over fp16, z-loss regularization.\n- Hardware failures over multi-week runs at scale → frequent checkpointing with fast resume.\n- Data pipeline can't keep GPUs fed → profile and pipeline/prefetch loading so compute, not I/O, is the bottleneck.\n- Train/eval contamination → rigorous dedup, or benchmark scores become meaningless.\n- Blind spots from watching only the loss number → also track gradient norms and sample generations throughout the run."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "hallucination",
+    "lora-and-fine-tuning",
+    "quantization-and-qlora",
+    "rlhf-and-instruction-tuning",
+    "sampling-and-decoding",
+    "scaling-laws",
+    "tokenization",
+    "transformer-overview"
+  ],
+  "followUps": [
+    "hallucination",
+    "lora-and-fine-tuning",
+    "quantization-and-qlora",
+    "rlhf-and-instruction-tuning",
+    "sampling-and-decoding",
+    "scaling-laws"
+  ],
+  "metadata": {
+    "inputHash": "e14da7bfff6ae9f7",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T13:44:29Z"
+  }
+}

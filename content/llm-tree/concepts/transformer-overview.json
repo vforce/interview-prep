@@ -1,0 +1,112 @@
+{
+  "id": "transformer-overview",
+  "title": "Transformer Overview",
+  "definition": "A Transformer is a neural sequence architecture that builds context-aware token representations purely through self-attention and position-wise feed-forward layers — no recurrence, no convolution — stacked with residual connections and layer normalization to make deep, fully parallel training practical.",
+  "summary": "Introduced in \"Attention Is All You Need\" (Vaswani et al., 2017), the Transformer alternates multi-head self-attention (every token gathers information from every other token in one step) with position-wise feed-forward sublayers, wrapped in residual connections and layer norm for stable, deep training. Because attention is permutation-invariant, position must be injected explicitly (sinusoidal or learned position embeddings added to the token embeddings). Nearly every modern LLM (GPT, Llama, Claude, etc.) uses only the decoder half — a single causal self-attention stack — trained to predict the next token.",
+  "objectives": [
+    "Explain how self-attention turns static token embeddings into context-aware representations via Q/K/V projections and softmax weighting.",
+    "State why dot products are scaled by `√d_k`, and what silently breaks if you skip it.",
+    "Contrast encoder-decoder vs. decoder-only Transformers and why LLMs standardized on decoder-only.",
+    "Reason about self-attention's `O(n²)` time/memory cost and its production consequences (context-length limits, KV-cache growth).",
+    "Spot common production bugs: causal-mask errors and their (non-obvious) symptoms."
+  ],
+  "lesson": "Token embeddings give each token a fixed vector — \"bank\" gets the same vector whether it means a riverbank or a financial institution. Self-attention's job is to make that vector *contextual* by letting every token pull information from every other token, weighted by relevance.\n\nMechanically, each embedding `x_i` is projected through three learned matrices:\n\n```\nq_i = W_Q x_i      k_i = W_K x_i      v_i = W_V x_i\nattn(i,j) = softmax_j( (q_i · k_j) / sqrt(d_k) )\noutput_i  = Σ_j attn(i,j) * v_j\n```\n\nEvery token does this simultaneously — that's the structural break from RNNs, which update a hidden state one token at a time. Because any two tokens interact in a single attention step (`O(1)` path length), Transformers don't suffer the vanishing-gradient decay that makes RNNs weak at long-range dependencies (RNN path length is `O(n)`).\n\nMulti-head attention runs several of these projections in parallel, each into a smaller subspace (`d_model / h` per head), so different heads can specialize — one might track syntax, another coreference — then concatenates and linearly projects back to `d_model`. Each attention sublayer sits inside a residual connection with layer norm (`x + Sublayer(LayerNorm(x))` in most modern models) — this is what makes stacking dozens of blocks trainable at all; without the residual path, gradients through that many layers of attention and feed-forward math would vanish or blow up. A position-wise feed-forward network (expand ~4x, nonlinearity, project back) follows each attention sublayer, adding per-token nonlinear capacity — it holds most of the parameters in a typical Transformer.\n\n**Key gotcha:** the `√d_k` scaling isn't cosmetic. Dot products of two random `d_k`-dimensional vectors grow in magnitude with `d_k`; unscaled, they push softmax into a saturated regime where gradients vanish and training stalls — easy to break silently if you ever hand-roll attention. The second common production gotcha is an off-by-one in the causal mask: it won't crash or NaN, and may even look fine in training loss, but it either leaks future tokens (making the task artificially easy) or blocks legitimate self-attention (degrading quality) — always unit-test a hand-rolled mask against a tiny known sequence.",
+  "examples": "**Example 1 — attention by hand** (2 tokens, `d_k=2`, identity projections so `q=k=v=x`):\n\n```\ntokens: \"the\" -> x1 = [1, 0]      \"cat\" -> x2 = [0, 1]\n\nscore(the, the) = q1·k1 = 1\nscore(the, cat) = q1·k2 = 0\nscaled by 1/sqrt(2) ≈ 0.707:      [0.707, 0]\n\nsoftmax([0.707, 0]) ≈ [0.670, 0.330]\n\noutput_the = 0.670*v1 + 0.330*v2\n           = 0.670*[1,0] + 0.330*[0,1]\n           = [0.670, 0.330]\n```\n\n\"the\"'s new representation is 67% itself + 33% \"cat\" — that blend *is* contextualization.\n\n**Example 2 — verify it in code:**\n\n```python\nimport torch\nimport torch.nn.functional as F\n\nx = torch.tensor([[1.0, 0.0],    # \"the\"\n                   [0.0, 1.0]])  # \"cat\"\nq = k = v = x                    # identity projections, for illustration\nd_k = q.shape[-1]\n\nscores  = q @ k.T / d_k ** 0.5\nweights = F.softmax(scores, dim=-1)\nout     = weights @ v\n\nprint(weights)\n# tensor([[0.6698, 0.3302],\n#         [0.3302, 0.6698]])\n```\n\nMatches the hand calculation. In practice `W_Q/W_K/W_V` are learned (not identity), everything is batched over `(batch, heads, seq_len, d_k)`, and production code runs a fused kernel (`F.scaled_dot_product_attention`, FlashAttention) instead of materializing the full `seq × seq` score matrix.",
+  "tradeoffs": "Self-attention is `O(n²)` in time and memory in sequence length `n` — every token scores against every other token — versus an RNN's `O(n)` but strictly sequential compute. You trade extra FLOPs/memory for full parallelism during training and `O(1)` path length between any two tokens (better long-range modeling, no recurrent gradient decay). At inference, autoregressive decoding needs a growing KV cache (memory ∝ `sequence_length × layers × heads × d_k`), which — not attention's FLOPs — is usually the real production bottleneck for long-context serving; mitigations include grouped/multi-query attention (fewer KV heads), FlashAttention-style fused kernels (less memory traffic, same FLOPs), or sparse/sliding-window attention (fewer than `n²` pairs) for very long context. For short sequences, tight latency budgets, or streaming with little need for long-range context, a smaller architecture (RNN, CNN, linear attention) can beat a full Transformer on cost without losing much quality.",
+  "diagnosticQuiz": [
+    {
+      "q": "What best defines the mechanism that lets a Transformer build context-aware token representations from static token embeddings?",
+      "choices": [
+        "A convolution sliding over a fixed-size local window of embeddings",
+        "A larger embedding table that already encodes every possible context",
+        "Self-attention: each token computes a weighted sum over all tokens' value vectors, weighted by query–key similarity",
+        "A recurrent hidden state that updates sequentially, one token at a time"
+      ],
+      "answer": 2,
+      "explanation": "Self-attention is precisely this operation — project into queries/keys/values, then softmax-weighted mixing across all positions. Option A describes an RNN and option C a CNN; option D reflects the common misconception that embeddings themselves encode context, when in fact token embeddings are static and it's the attention layers built on top that make them contextual."
+    },
+    {
+      "q": "In scaled dot-product attention, `softmax(QKᵀ / √d_k)V`, why divide by `√d_k` specifically?",
+      "choices": [
+        "To counteract dot products growing in magnitude with `d_k`, which would otherwise push softmax into a low-gradient saturated regime",
+        "To implement the causal mask correctly",
+        "To make each token's attention weights sum to 1",
+        "To match the output dimension to the value vectors' dimension"
+      ],
+      "answer": 0,
+      "explanation": "For vectors with roughly unit-variance components, a dot product's variance scales with `d_k`, so larger `d_k` produces larger-magnitude scores that saturate softmax and shrink gradients — the `√d_k` divisor keeps scores in a well-behaved range. Softmax summing to 1 (A) holds regardless of scaling, and the scaling has nothing to do with value dimensions or masking."
+    },
+    {
+      "q": "Why does a Transformer typically handle long-range dependencies (e.g., agreement between words 60 tokens apart) better than a vanilla RNN?",
+      "choices": [
+        "Positional encodings memorize the exact word order during training",
+        "Any two tokens interact through a single attention step — an `O(1)` path length — versus an RNN's `O(n)` sequential path where signal decays",
+        "It uses a larger vocabulary",
+        "It has strictly more trainable parameters"
+      ],
+      "answer": 1,
+      "explanation": "The number of computation steps information must cross between two tokens drives long-range performance: attention connects any pair directly in one step, while an RNN propagates signal through every intermediate step, where it's prone to vanishing/exploding gradients. Parameter count and vocabulary size (A, C) aren't the mechanism, and positional encodings (D) convey word order, not long-range dependency resolution."
+    },
+    {
+      "q": "Your production system must serve 100k+-token documents, and full self-attention's `O(n²)` cost is the main latency/memory bottleneck. What's the most directly relevant fix?",
+      "choices": [
+        "Use sparse/sliding-window attention or an IO-aware exact kernel (e.g., FlashAttention) to cut the effective attention cost",
+        "Remove layer normalization to speed up each forward pass",
+        "Add more attention heads at the same total dimension",
+        "Switch the training loss from cross-entropy to MSE"
+      ],
+      "answer": 0,
+      "explanation": "Sparse/windowed attention reduces the number of token pairs scored, and FlashAttention reduces memory traffic (not FLOPs) by avoiding materializing the full `n×n` score matrix — both are standard, targeted responses to the quadratic-cost bottleneck. Changing the loss function or head count doesn't touch attention's asymptotic cost, and removing LayerNorm destabilizes training/inference while barely denting the real bottleneck."
+    },
+    {
+      "q": "In a decoder-only LLM, what's the most likely symptom of an off-by-one bug in the causal attention mask?",
+      "choices": [
+        "Training immediately produces NaN loss",
+        "The model trains more slowly but reaches the same final quality",
+        "Training loss looks normal (or artificially low) but generation quality degrades, because the model learned to use information — like future tokens — that won't exist at inference time",
+        "Positional encodings are silently set to zero"
+      ],
+      "answer": 2,
+      "explanation": "Causal-mask bugs are dangerous precisely because they're silent: leaking a future token makes next-token prediction artificially easy (loss looks great) while generation breaks, since future tokens genuinely don't exist at inference time; the reverse bug (blocking legitimate self-attention) just quietly degrades quality. It doesn't reliably crash training with NaNs (A), doesn't just slow convergence with no quality impact (C), and has no direct relation to positional encodings (D)."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Walk me through what happens inside one Transformer block, and why each piece (attention, residual, LayerNorm, FFN) needs to be there.",
+      "a": "Input is token embeddings + positional encoding. Then: LayerNorm → multi-head self-attention → add residual; LayerNorm → position-wise FFN (expand ~4x, nonlinearity, project back) → add residual. Attention mixes information across positions (context); the FFN adds per-token nonlinear capacity and holds most of the parameters; residual connections are what make 30–100+ stacked layers trainable at all — without them, gradients through that many sublayers vanish or explode; LayerNorm keeps activation scales stable layer to layer so the residual stream stays well-conditioned as depth grows."
+    },
+    {
+      "q": "Why does the KV cache matter for LLM inference cost, and how does it connect to attention?",
+      "a": "Generating token `t` needs attention over keys/values for every token `< t`. Recomputing K/V for the whole prefix at each new token would cost `O(n²)` total; caching each layer's K/V per generated token turns that into `O(n)` — the standard optimization in every production LLM server. This shifts the cost from compute to memory: cache size grows with `sequence_length × layers × heads × head_dim`, and at long context or large batch size that memory footprint — not attention's FLOPs — is usually the real serving bottleneck, which is why grouped/multi-query attention (shared KV heads) and cache quantization are common production levers."
+    },
+    {
+      "q": "Why do essentially all modern LLMs use a decoder-only Transformer instead of the original encoder-decoder design?",
+      "a": "Decoder-only with causal self-attention directly matches the pretraining objective that made LLMs scale: next-token prediction over raw, unpaired text. The original encoder-decoder split existed for supervised sequence-to-sequence tasks (e.g., translation) needing a separate \"read the full input first\" pass. A decoder-only model still handles translation-like or conditional tasks fine — the \"input\" just goes in the prompt, and causal self-attention conditions on it (in-context learning) — while simplifying the architecture to one attention type and one stack, which scales more simply."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "encoder-vs-decoder",
+    "feed-forward-network",
+    "logits-and-the-lm-head",
+    "positional-encodings",
+    "pretraining",
+    "residual-and-layer-norm",
+    "self-attention",
+    "token-embeddings"
+  ],
+  "followUps": [
+    "encoder-vs-decoder",
+    "feed-forward-network",
+    "logits-and-the-lm-head",
+    "positional-encodings",
+    "pretraining",
+    "residual-and-layer-norm",
+    "self-attention"
+  ],
+  "metadata": {
+    "inputHash": "64b81eb69efa61aa",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T13:23:07Z"
+  }
+}

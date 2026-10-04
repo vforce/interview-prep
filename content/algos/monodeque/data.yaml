@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: monodeque
+fam: hard
+label: Monotonic Deque
+order: 30
+trigger: window min/max in O(n)
+insight: deque of indices kept sorted; pop the back while dominated, pop the front when it falls out of the window
+probs:
+- {n: Longest Subarray ≤ Limit, slug: longest-continuous-subarray-with-absolute-diff-less-than-or-equal-to-limit, d: M}
+- {n: Sliding Window Maximum, slug: sliding-window-maximum, d: H}
+- {n: Shortest Subarray with Sum ≥ K, slug: shortest-subarray-with-sum-at-least-k, d: H}

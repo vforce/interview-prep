@@ -1,0 +1,26 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: l-scaling-laws
+type: concept
+area: Training & Alignment
+order: 6
+front: What do scaling laws / Chinchilla say?
+back: |-
+  Test loss falls as a smooth power law in parameters, data, and compute.
+
+  Chinchilla's finding: for a fixed compute budget, most large models were UNDER-trained — compute-optimal is roughly ~20 training tokens per parameter. Scale data and parameters together, not parameters alone.
+more: |-
+  ## Compute rule
+  Training FLOPs ≈ **6·N·D** (N params, D tokens; the 6 = 2 for multiply-add × 3 for forward+backward).
+
+  **Iso-compute comparison:**
+  | model | N | D | tok/param | C≈6ND |
+  |----|----|----|----|----|
+  | GPT-3 | 175B | 300B | 1.7 | 3.1e23 |
+  | Chinchilla | 70B | 1.4T | 20 | 5.9e23 |
+
+  Chinchilla's recipe (~**20 tokens/param**) let a 70B model *beat* 175B GPT-3 and 280B Gopher at comparable compute. The earlier giants were badly **under-trained** — too many params, too little data.
+
+  **The law:** `L(N,D) = E + A/N^α + B/D^β` — loss is a power law; scale N and D *together*, not N alone.
+
+  **Modern twist — deliberate overtraining:** Chinchilla optimizes *training* compute and ignores serving. Llama-3 8B saw 15T tokens ≈ **1875 tokens/param**, ~90× past "optimal." Why? A small model is cheap to serve to millions — overpay once in training to save forever at inference.

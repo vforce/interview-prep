@@ -1,0 +1,97 @@
+{
+  "id": "accuracy-and-class-imbalance",
+  "title": "Accuracy and Class Imbalance",
+  "definition": "Accuracy — the fraction of all predictions that are correct — becomes a misleading, sometimes dangerous, evaluation metric under class imbalance, because a trivial model that always predicts the majority class can score high accuracy while catching none of the minority class that actually matters.",
+  "summary": "When one class vastly outnumbers the other, true negatives (or true positives) dominate accuracy's denominator, so a model can completely fail the rare class and still post a near-perfect score. In production the rare class — fraud, churn, disease, hardware failure — is usually the one with real cost, so accuracy alone can hide the exact failure mode you're trying to prevent. The fix is evaluating with per-class metrics (recall, precision, F1) and imbalance-aware scores (PR-AUC, balanced accuracy) chosen around the actual cost of a false positive vs. a false negative.",
+  "objectives": [
+    "Explain the accuracy paradox and why it emerges specifically under class imbalance",
+    "Compute accuracy, precision, and recall from a confusion matrix and show how they diverge under imbalance",
+    "Pick a metric (F1, PR-AUC, balanced accuracy, cost-weighted score) appropriate to a stated production scenario",
+    "Reason about the FP/FN cost asymmetry that should drive threshold choice, not accuracy",
+    "Spot the \"accuracy went down, model got worse\" fallacy in a live discussion"
+  ],
+  "lesson": "Accuracy is defined as:\n\n```\nAccuracy = (TP + TN) / (TP + TN + FP + FN)\n```\n\nIt's the first metric everyone reaches for, and it silently weights every class by how often it appears in the test set — not by how much you care about it.\n\nTake fraud detection: 10,000 transactions, 100 fraudulent (a 1% base rate). A model that predicts \"not fraud\" for every transaction gets `TP=0, FN=100, FP=0, TN=9900`, so accuracy = `9900/10000 = 99%`. It looks excellent and is completely useless — recall is 0%, it catches zero fraud. This is the accuracy paradox: under a 99:1 imbalance you have to beat 99% just to prove you're better than doing nothing, and \"doing nothing\" already sits at a deceptively high bar.\n\nNow compare an actual model: `TP=70, FN=30, FP=200, TN=9700` → accuracy = `9770/10000 = 97.7%`. Its accuracy is *lower* than the naive baseline's, but it catches 70% of fraud (recall = 70/100) at the cost of 200 false alarms. In production this model is almost certainly worth shipping and the \"baseline\" is worth deleting — yet a dashboard that only tracks accuracy says the opposite.\n\nThe key gotcha: accuracy can move in the *opposite direction* from usefulness. Catching more of the rare class typically means accepting more false positives, and every false positive hurts accuracy exactly as much as every true positive helps it — so a model that's actually doing its job can score lower than one silently doing nothing. Accuracy quietly rewards conservatism.\n\nThe production fix has two parts: report metrics computed *on the class you care about* (recall and precision on the positive class, not blended across both), and pick one comparison number that isn't dominated by the majority class — F1, PR-AUC, or balanced accuracy. None of these substitute for the real conversation about what a missed fraud costs versus what a false alarm costs — that conversation should set your decision threshold, not the default 0.5.",
+  "examples": "**Example 1 — same data, two models**\n\n| Model                | TP | FP  | FN  | TN   | Accuracy | Precision | Recall |\n|----------------------|----|-----|-----|------|----------|-----------|--------|\n| \"Always predict no\"  | 0  | 0   | 100 | 9900 | 99.0%    | —         | 0.0%   |\n| Real model           | 70 | 200 | 30  | 9700 | 97.7%    | 25.9%     | 70.0%  |\n\nThe naive model wins on accuracy and loses on everything that matters.\n\n**Example 2 — same numbers, via sklearn**\n\n```python\nfrom sklearn.metrics import (\n    accuracy_score, precision_score, recall_score,\n    f1_score, balanced_accuracy_score,\n)\n\ny_true       = [0]*9900 + [1]*100                    # 1% positive rate\ny_pred_naive = [0]*10000                              # always predicts \"not fraud\"\ny_pred_real  = [1]*200 + [0]*9700 + [1]*70 + [0]*30   # TN=9700 FP=200 FN=30 TP=70\n\nfor name, y_pred in [(\"naive\", y_pred_naive), (\"real\", y_pred_real)]:\n    print(name,\n          \"acc=%.3f\"       % accuracy_score(y_true, y_pred),\n          \"precision=%.3f\" % precision_score(y_true, y_pred, zero_division=0),\n          \"recall=%.3f\"    % recall_score(y_true, y_pred, zero_division=0),\n          \"f1=%.3f\"        % f1_score(y_true, y_pred, zero_division=0),\n          \"bal_acc=%.3f\"   % balanced_accuracy_score(y_true, y_pred))\n\n# naive  acc=0.990 precision=0.000 recall=0.000 f1=0.000 bal_acc=0.500\n# real   acc=0.977 precision=0.259 recall=0.700 f1=0.378 bal_acc=0.840\n```",
+  "tradeoffs": "Accuracy is fine — even preferable for its simplicity — when classes are roughly balanced and all errors cost about the same (e.g., balanced multi-class image labeling). It breaks down whenever one class dominates or errors are asymmetric in cost, which describes most real production problems: fraud, churn, spam, intrusion detection, rare-disease screening, failure prediction. Prefer recall/precision/F1 on the class you care about, or PR-AUC, when the positive class is rare — PR-AUC is more honest than ROC-AUC under heavy imbalance, since ROC's false-positive rate (FP/(FP+TN)) is also diluted by a huge TN, so a curve can look strong while precision is terrible. Balanced accuracy (macro-averaged per-class recall) is a decent sanity-check single number, but like accuracy it still doesn't know the dollar cost of an FN vs. an FP — for that you need a cost-weighted metric or an explicit operating point on the precision-recall curve. Resampling/class-weighting fix the imbalance during *training*; that's a separate lever from which *metric* you use to *evaluate* — you need the latter regardless of what you do for the former.",
+  "diagnosticQuiz": [
+    {
+      "q": "What does the \"accuracy paradox\" describe?",
+      "choices": [
+        "Accuracy scores that mathematically decrease as a training set grows larger",
+        "Precision and recall summing to more than one",
+        "A high overall accuracy score that masks near-zero performance on the minority class",
+        "The fact that accuracy cannot be computed once classes are imbalanced"
+      ],
+      "answer": 2,
+      "explanation": "The paradox is that a trivial model favoring the majority class can score deceptively high accuracy while catching almost none of the minority class — e.g., 99% accuracy while missing all fraud. The best distractor (\"cannot be computed\") reflects a common misconception that imbalance breaks the formula itself; it doesn't — accuracy is always computable, it's just uninformative on its own here."
+    },
+    {
+      "q": "A fraud model scores TP=70, FP=200, FN=30, TN=9700 out of 10,000 transactions (100 actually fraudulent). What is its accuracy?",
+      "choices": [
+        "99%",
+        "97.7%",
+        "70%",
+        "25.9%"
+      ],
+      "answer": 1,
+      "explanation": "Accuracy = (TP+TN)/total = (70+9700)/10000 = 97.7%. The best distractor, 70%, is actually this model's recall (70/100) — confusing recall with accuracy is the most common mix-up when reading a confusion matrix under imbalance. The other numbers are real too: 25.9% is precision (70/270), and 99% is the naive \"always predict negative\" baseline's accuracy, which has 0% recall."
+    },
+    {
+      "q": "Why does severe class imbalance make raw accuracy an unreliable standalone metric?",
+      "choices": [
+        "Imbalance makes the confusion matrix non-square",
+        "Accuracy is undefined whenever class counts differ",
+        "The majority class's true negatives dominate the denominator, so misclassifying nearly all of the minority class barely moves the score",
+        "Imbalanced training data always causes the model to overfit"
+      ],
+      "answer": 2,
+      "explanation": "With severe imbalance (say 99:1), true negatives alone can fill most of the denominator, so a model can misclassify nearly every minority-class example and barely move accuracy — exactly why accuracy needs a per-class companion metric like recall. The best distractor conflates class imbalance with overfitting; they're different problems — a model can be perfectly well-fit and accuracy can still tell you nothing useful under imbalance."
+    },
+    {
+      "q": "You're deploying a classifier to catch rare hardware failures (0.2% base rate) before they cause outages. What should drive model evaluation and comparison?",
+      "choices": [
+        "Overall accuracy, since it's the simplest metric to report to stakeholders",
+        "Recall on the failure class (at a fixed precision/cost budget) and PR-AUC, not accuracy",
+        "ROC-AUC alone, since it's threshold-independent and unaffected by imbalance",
+        "Upsampling the model's predicted labels after inference to rebalance them"
+      ],
+      "answer": 1,
+      "explanation": "At a 0.2% failure rate, accuracy is trivially ~99.8% for a model that never predicts failure, so it can't separate useful models from useless ones — you need recall on the failure class (against a precision or cost budget) plus PR-AUC, which isn't inflated by the huge true-negative count. The best distractor claims ROC-AUC is \"unaffected by imbalance\" — it's threshold-independent, but its x-axis (FP/(FP+TN)) is diluted by the same huge TN pool, so ROC-AUC can look strong even when precision is poor."
+    },
+    {
+      "q": "Your team's new fraud model shows lower accuracy than the old one (97.7% vs. 99.0%) and wants to roll it back. What's the flaw in that reasoning?",
+      "choices": [
+        "Lower accuracy necessarily implies lower precision too",
+        "Accuracy must always increase between model versions, or something is broken",
+        "The models can't be compared unless the test set is perfectly balanced",
+        "The 99.0% model likely predicts \"not fraud\" almost always and catches little real fraud, while the 97.7% model likely has far higher recall on the fraud class"
+      ],
+      "answer": 3,
+      "explanation": "This mirrors the worked example: a model that mostly predicts the majority class racks up high accuracy while barely catching any fraud, while a genuinely improved model gains recall by accepting some false positives — which lowers accuracy even though it's doing its job better. The best distractor states the fallacy outright (\"accuracy must always increase\"), which is exactly the flawed assumption driving the rollback; the fix is comparing recall/precision/F1 on the fraud class, not raw accuracy."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "A stakeholder says your fraud model is 99.5% accurate and asks why you're not celebrating. How do you respond?",
+      "a": "I'd ask what the base rate of fraud is first — if fraud is under 0.5% of transactions, a model that predicts \"not fraud\" for everything is already at or above 99.5% accuracy while catching zero fraud. I'd redirect to recall on the fraud class (how much fraud we actually catch) and precision (how many flagged transactions are real, since that drives investigator workload), and propose F1 or PR-AUC as the number we track model-over-model, with the operating threshold set from a precision-recall curve against the cost of a missed fraud vs. a false alarm."
+    },
+    {
+      "q": "How would you choose the decision threshold for an imbalanced classifier going into production, instead of the default 0.5?",
+      "a": "Plot the precision-recall curve on held-out data, then pick the threshold from the business constraint, not the middle of the curve — e.g., \"maximum recall subject to precision ≥ 90%\" if reviewer capacity is the constraint, or minimize expected cost = `FN_cost×FN + FP_cost×FP` if both costs are known in dollars. I'd re-validate that threshold periodically since the positive rate and score distribution drift over time, and monitor precision/recall at the live threshold on the dashboard, not just accuracy."
+    },
+    {
+      "q": "What's the difference between accuracy and balanced accuracy, and does balanced accuracy fully solve the class-imbalance problem?",
+      "a": "Balanced accuracy is the average of per-class recall — in binary terms, `(TPR + TNR) / 2` — so each class contributes equally regardless of how many examples it has, unlike plain accuracy where the majority class dominates. It fixes the \"trivial baseline scores 99%\" problem, but it still treats a false positive and a false negative as equally bad, which usually isn't true in production. I'd use it as a quick sanity metric during model comparison, then finalize on a cost-weighted metric or a fixed-precision recall target for the actual go/no-go decision."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "confusion-matrix"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "fd07d6f421c821fc",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T09:40:02Z"
+  }
+}

@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: design
+fam: design
+label: Design
+order: 29
+trigger: '''implement a class that…'''
+insight: LRU = hashmap + doubly linked list (or OrderedDict.move_to_end); time-KV = dict of lists + bisect on timestamp
+probs:
+- {n: Design Parking System, slug: design-parking-system, d: E}
+- {n: LRU Cache, slug: lru-cache, d: M}
+- {n: LFU Cache, slug: lfu-cache, d: H}

@@ -1,0 +1,97 @@
+{
+  "id": "roots-and-logging",
+  "title": "Roots and Logging",
+  "definition": "Roots are client-advertised `file://` URI boundaries that tell a server where it should operate, and logging is a server capability for emitting leveled, structured `notifications/message` events back to the client — both are optional capabilities negotiated at `initialize`, and neither enforces anything on its own.",
+  "summary": "Roots solve scoping: a server calls `roots/list` to learn which directories (or other URI-rooted locations) the client considers in-play, and reacts to `notifications/roots/list_changed` as the workspace changes. Logging solves observability: the client sets a minimum severity with `logging/setLevel`, and the server streams `notifications/message` at or above that level instead of printing to stdout or a private log file. Together they let a server stay correctly scoped and debuggable across arbitrary clients with no server-specific configuration.",
+  "objectives": [
+    "Explain what a root is and how a server retrieves the current list via `roots/list`.",
+    "Describe how `notifications/roots/list_changed` keeps a server's scope in sync with the client's workspace.",
+    "Emit leveled `notifications/message` logs and honor a client's `logging/setLevel` threshold.",
+    "Explain why roots are advisory, not an access-control mechanism, and what a server must still enforce itself.",
+    "Avoid corrupting a stdio server's JSON-RPC stream with ad hoc stdout logging."
+  ],
+  "lesson": "Two capabilities round out the lifecycle you already know: once `initialize` negotiates who supports what, roots and logging are how a long-running server stays scoped and observable while it works.\n\nRoots answer \"where am I allowed to look?\" A client — say, an IDE with three open workspace folders — advertises `roots: {\"listChanged\": true}` in its `initialize` capabilities. At any point a server can send `roots/list` and get back entries like `{\"uri\": \"file:///Users/me/project-a\", \"name\": \"project-a\"}`; this is how a filesystem or code-search server learns workspace boundaries without hardcoding paths or reading a config file. If the user adds or removes a folder mid-session, the client fires `notifications/roots/list_changed`, and a well-behaved server re-lists rather than operating on a stale set.\n\nLogging answers \"what is the server doing right now?\" A server declares `logging: {}` in its capabilities; the client can then call `logging/setLevel` with one of the eight RFC 5424 severities (`debug` through `emergency`), and from then on the server should only emit `notifications/message` at or above that threshold. This is structured, filterable telemetry the host can surface in its own debug console — not ad hoc print statements.\n\nWorked example: a code-indexing tool call requests roots first, emits a `debug` notification per file it scans, and an `error` if a root path 404s. A client running at `setLevel: \"warning\"` only ever sees the error — the debug spam never crosses the wire.\n\nThe key gotcha, and a favorite interview trap: roots are advisory, not enforcement. The spec says servers should respect them, but nothing stops a buggy or malicious server from reading outside the advertised set — the process still has whatever OS-level permissions it was launched with, so a path like `../../etc/passwd` slipping past a naive check still resolves. Production servers must independently validate every path (resolve it, then prefix-check against the root) rather than treating the client's list as access control. Runner-up bug: on stdio transport, stdout is reserved for JSON-RPC frames, so a stray `print()` used \"for logging\" corrupts the stream — use the logging capability, or stderr, instead.",
+  "examples": "**1. Enforcing roots yourself instead of trusting them (Python, FastMCP-style):**\n\n```python\nfrom pathlib import Path\nfrom mcp.server.fastmcp import FastMCP, Context\n\nmcp = FastMCP(\"safe-fs\")\n\n@mcp.tool()\nasync def read_file(path: str, ctx: Context) -> str:\n    \"\"\"Read a file, but only inside a client-advertised root.\"\"\"\n    roots = (await ctx.session.list_roots()).roots\n    target = Path(path).resolve()\n\n    # Don't trust roots as an ACL - re-validate the resolved path ourselves.\n    allowed = any(\n        str(target).startswith(str(Path(r.uri.path).resolve()))\n        for r in roots\n    )\n    if not allowed:\n        await ctx.error(f\"Rejected out-of-root access: {target}\")\n        raise ValueError(\"path is outside all advertised roots\")\n\n    await ctx.debug(f\"Reading {target}\")\n    return target.read_text()\n```\n\n**2. Wire trace of level-filtered logging:**\n\n```\n--> {\"jsonrpc\": \"2.0\", \"id\": 7, \"method\": \"logging/setLevel\", \"params\": {\"level\": \"warning\"}}\n<-- {\"jsonrpc\": \"2.0\", \"id\": 7, \"result\": {}}\n\n...later, mid tool call...\n<-- {\"jsonrpc\": \"2.0\", \"method\": \"notifications/message\",\n     \"params\": {\"level\": \"error\", \"logger\": \"safe-fs\",\n                \"data\": \"Rejected out-of-root access: /etc/passwd\"}}\n```\nA `debug`-level notification logged earlier in the same call is never sent — it's below the client's `warning` threshold.",
+  "tradeoffs": "Roots buy portability: one server works correctly across however many workspaces a client has open, with zero per-deployment config — but they're advisory only, so they cost you nothing in actual security, and you still need your own path validation. Skip implementing roots for servers with no folder-like scope (a single fixed API, a calculator tool) — there's nothing to bind them to.\n\nLogging buys cheap, structured, transport-agnostic observability with no extra infrastructure — but it's session-scoped and ephemeral: nothing persists once the client disconnects, and a chatty server that ignores `setLevel` just trades one noise problem for another. Use it for interactive debugging visible inside the host app; keep a durable server-side log/metrics pipeline for anything you need after the session ends (audits, alerts, postmortems).",
+  "diagnosticQuiz": [
+    {
+      "q": "In MCP, what does a \"root\" represent?",
+      "choices": [
+        "A cryptographic trust anchor used to verify a server's identity",
+        "The top-level JSON-RPC method namespace for a server",
+        "A directory on the server's filesystem that the client is permitted to browse",
+        "A client-advertised URI boundary, typically a `file://` path, that suggests where a server should operate"
+      ],
+      "answer": 3,
+      "explanation": "Roots flow client → server: the client advertises URI boundaries (usually `file://` directories) so the server knows where it's expected to operate, retrieved via `roots/list`. The best distractor (\"a directory on the server's filesystem that the client is permitted to browse\") reverses that direction — it's the common mix-up of treating roots as a server-exposed listing rather than a client-supplied scope."
+    },
+    {
+      "q": "The eight MCP log levels, from most to least severe, are emergency, alert, critical, error, warning, notice, info, debug. If a client sends `logging/setLevel` with `level: \"notice\"`, which notifications should the server still deliver?",
+      "choices": [
+        "All eight levels, regardless of severity",
+        "Only `debug` and `info`",
+        "Only messages logged at exactly the `notice` level",
+        "`notice`, `warning`, `error`, and every level more severe than notice"
+      ],
+      "answer": 3,
+      "explanation": "`logging/setLevel` sets a minimum-severity floor, not an exact match: once set to `notice`, the server should deliver `notice` and anything more severe while suppressing less-severe `info`/`debug` chatter. The tempting wrong answer (\"only debug and info\") inverts the filter — it assumes the threshold picks the least-severe levels instead of gating out everything below it."
+    },
+    {
+      "q": "Why does a code-indexing MCP server bother calling `roots/list` instead of just accepting a directory path as a tool argument?",
+      "choices": [
+        "Because `roots/list` must be called before any tool can execute",
+        "Because it lets the server discover the client's current workspace boundaries generically, instead of hardcoding or re-deriving them per deployment",
+        "Because tool arguments cannot contain file paths",
+        "Because `roots/list` replaces the need for the `initialize` handshake"
+      ],
+      "answer": 1,
+      "explanation": "The point of `roots/list` is portability: one server binary works correctly across however many workspace folders a given client has open, because the client — not a config file or a guess — is the source of truth for current scope. The strongest distractor (\"must be called before any tool can execute\") is wrong because roots is an independent, optional capability, not a lifecycle gate."
+    },
+    {
+      "q": "You're building an MCP server that only ever calls one fixed third-party weather API and touches no local files. Should you implement the roots capability?",
+      "choices": [
+        "Yes, but only to satisfy the client's logging requirements",
+        "No — roots and logging are mutually exclusive capabilities",
+        "Yes — every MCP server must implement roots for spec compliance",
+        "No — roots exist to scope filesystem/workspace-like access, and a server with no notion of \"which folder(s)\" has nothing to scope"
+      ],
+      "answer": 3,
+      "explanation": "Roots is opt-in and only useful when a server's work is actually scoped to client-defined locations; a weather-API server has no \"which folder\" concept to scope, so implementing roots would be speculative complexity with nothing to attach it to. The best wrong answer claims roots is mandatory for spec compliance — it isn't; capabilities are advertised only when relevant."
+    },
+    {
+      "q": "A developer writes `print(f\"processing {path}\")` for debugging inside a tool handler on a **stdio**-transport MCP server. What's the production risk?",
+      "choices": [
+        "It is silently rerouted into a `notifications/message` at debug level",
+        "None — stdout is unused by MCP over stdio, so it's safe for ad hoc prints",
+        "It causes the client to disconnect and re-negotiate capabilities",
+        "It corrupts the JSON-RPC message stream, since stdout is reserved for protocol frames on stdio transport"
+      ],
+      "answer": 3,
+      "explanation": "On stdio transport, MCP frames JSON-RPC messages over stdout, so any stray `print()` mixes plain text into that stream and breaks the client's parser — this is why debug output must go through the logging capability or stderr instead. The tempting wrong answer (\"stdout is unused... so it's safe\") is exactly the misconception that causes this outage in practice."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "How would you stop an MCP server from reading files outside the directories a client says are in scope?",
+      "a": "Treat `roots/list` as a hint for *what to offer*, never as access control. Resolve every incoming path, canonicalize it (follow symlinks, collapse `..`), and prefix-check the result against each advertised root — or your own independent allow-list — before touching disk, rejecting on no match. Re-run `roots/list` whenever `notifications/roots/list_changed` fires so the check stays current, and run the server process itself with least-privilege OS permissions as a backstop in case the application-level check has a bug."
+    },
+    {
+      "q": "Your MCP server is unusually chatty and the client complains about noisy debug output — how do you fix it without ripping logging out?",
+      "a": "Emit at the correct severities (`debug` for per-item chatter, `info`/`notice` for milestones, `warning`/`error` for real problems) and actually honor the client's `logging/setLevel` instead of always sending everything. If no level has been set yet, default conservatively rather than firehosing debug. Don't rely on protocol logging as your only telemetry either — pair it with a durable server-side log/metrics pipeline for anything you'll need after the session ends, since notifications don't persist past disconnect."
+    },
+    {
+      "q": "Why can't a stdio-transport MCP server just use Python's standard `logging` module with its default handler?",
+      "a": "The default handler writes to stdout, and on stdio transport stdout is reserved for newline-delimited JSON-RPC frames — interleaving plain-text log lines corrupts the stream the client is parsing. In production, route Python's `logging` (and any stray `print`) to stderr at minimum, or better, wire it into MCP's own logging capability (`notifications/message`) so output is structured, leveled, and visible inside the host application rather than just a local file descriptor."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "lifecycle-and-capability-negotiation"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "542b20e4198affa2",
+    "model": "sonnet",
+    "generatedAt": "2026-07-06T07:11:19Z"
+  }
+}

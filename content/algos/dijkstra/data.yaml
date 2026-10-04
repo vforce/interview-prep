@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: dijkstra
+fam: graphs
+label: Dijkstra / MST
+order: 18
+trigger: weighted min-cost path, K-stop, connect-all-points
+insight: heap of (cost,node); Dijkstra pops cheapest; Prim grows tree by cheapest edge; Bellman-Ford for hop limits
+probs:
+- {n: Network Delay Time, slug: network-delay-time, d: M}
+- {n: Cheapest Flights Within K Stops, slug: cheapest-flights-within-k-stops, d: M}
+- {n: Swim in Rising Water, slug: swim-in-rising-water, d: H}

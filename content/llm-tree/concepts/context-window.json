@@ -1,0 +1,100 @@
+{
+  "id": "context-window",
+  "title": "Context Window",
+  "definition": "The context window is the maximum number of tokens — prompt plus generated output — that a language model can attend to and condition on in a single forward pass, fixed by its positional-encoding scheme and serving configuration.",
+  "summary": "Context window sets the hard ceiling on how much text an LLM can consider at once, shaped by the positional encoding it was trained with (RoPE, ALiBi, learned absolute embeddings) and by inference-time costs — chiefly the growing KV cache. Exceeding it forces truncation or an API error, and even well within it, the model doesn't use every position equally (the \"lost in the middle\" effect). In production it's a cost/latency/quality dial, not just a spec-sheet number to maximize.",
+  "objectives": [
+    "Define context window and separate it from persistent memory across requests.",
+    "Explain the two hard constraints: positional-encoding range, and attention/KV-cache compute and memory.",
+    "Compute an approximate KV cache memory footprint for a given model config and sequence length.",
+    "Recognize the \"lost in the middle\" gotcha and when long context beats — or loses to — RAG.",
+    "Evaluate vendor \"extended context window\" claims (RoPE scaling) with production-grade skepticism."
+  ],
+  "lesson": "Every transformer call has a hard token budget: the context window — the number of tokens (prompt + system/few-shot text + generated output) the model attends over in one forward pass. Nothing persists across calls; if you want turn 5 to \"remember\" turn 1, you resend it as part of turn 5's context. Context window and memory are different concepts, even though chat products blur them with hidden history management.\n\nTwo things set the ceiling. First, positional encoding — you already know absolute vs. relative schemes. Absolute learned embeddings (original BERT/GPT-2) hard-cap at the trained max length: position 4097 simply has no embedding if training stopped at 4096. Relative schemes (RoPE, ALiBi) generalize better past the trained length because they encode relative offsets, not fixed slots — but that generalization isn't free. Quality degrades past the trained range unless you apply scaling (position interpolation, NTK-aware scaling, YaRN), and those tricks trade off some accuracy even inside the extended range.\n\nSecond, compute and memory. Vanilla self-attention is O(n²) in FLOPs and in attention-matrix memory for sequence length n, so \"just raise the context window\" isn't free even when the positional scheme supports it. The other dominant serving-time cost is the KV cache: every token stores a key and value vector per layer, per head, growing linearly with sequence length — often the single largest consumer of GPU memory for long-context requests, bigger than the model weights themselves at long enough lengths.\n\nThe key production gotcha: **lost in the middle**. Empirically, models recall information near the start and end of a long context far more reliably than information buried in the middle — even though nothing is truncated and every token is technically \"in the window.\" A 128K-context model doesn't use all 128K positions uniformly; a bigger number on a spec sheet doesn't guarantee the model finds what you need at position 60,000. That's why senior engineers validate long-context claims with needle-in-a-haystack-style evals instead of trusting the advertised max length.",
+  "examples": "**Example 1 — KV cache memory scales linearly with context length**\n\n```python\ndef kv_cache_bytes(n_layers, n_heads, head_dim, seq_len, batch=1, dtype_bytes=2, n_kv_heads=None):\n    n_kv_heads = n_kv_heads or n_heads  # MHA default; smaller for GQA/MQA\n    return 2 * n_layers * n_kv_heads * head_dim * seq_len * batch * dtype_bytes  # 2 = K and V\n\n# Llama-2-7B-shaped: 32 layers, 32 heads, head_dim 128, fp16, batch=1\nkv_cache_bytes(32, 32, 128, seq_len=4096) / 2**30   # -> 2.0 GiB per sequence\nkv_cache_bytes(32, 32, 128, seq_len=2048) / 2**30   # -> 1.0 GiB per sequence\n```\n\nDouble the context, double the KV cache. This is why long-context serving is memory-bound, and why GQA/MQA (fewer `n_kv_heads`) exist — dropping to 8 KV heads instead of 32 cuts this 4x for free.\n\n**Example 2 — Budgeting the window in production**\n\n```python\nimport tiktoken\n\ndef fits(prompt: str, context_window: int, max_new_tokens: int, model=\"gpt-4o\") -> bool:\n    used = len(tiktoken.encoding_for_model(model).encode(prompt))\n    return used + max_new_tokens <= context_window  # reserve room for the answer\n\nfits(big_prompt, context_window=8192, max_new_tokens=512)\n```\n\nA common production bug: sizing the prompt to the full context window and forgetting to reserve `max_new_tokens`, so generation gets cut off mid-answer once the prompt is long.",
+  "tradeoffs": "A bigger context window enables joint reasoning across many documents or turns with no retrieval infrastructure, but it costs more per request (prefill and KV cache both scale with tokens), raises latency, and doesn't guarantee recall — lost-in-the-middle means quality can degrade well before the token limit is hit. Long context via RoPE scaling extends the nominal limit but typically trades off some quality even inside the new range, so validate rather than trust the spec sheet. A smaller window plus RAG is cheaper, faster, and scales to corpora far larger than any context window, but adds retrieval-quality risk and pipeline complexity. Default to retrieval for large or frequently-changing corpora; reach for a large context window when the task genuinely needs joint reasoning over everything at once, and confirm recall at that length before shipping.",
+  "diagnosticQuiz": [
+    {
+      "q": "What does an LLM's \"context window\" refer to?",
+      "choices": [
+        "The maximum number of tokens (prompt + generation) it can attend to in a single forward pass",
+        "The size of the vocabulary the tokenizer supports",
+        "The number of training epochs applied to the model",
+        "The number of parameters the model was trained with"
+      ],
+      "answer": 0,
+      "explanation": "Context window counts every token the model must attend to in that call — prompt, system/few-shot text, and generated output — not the model's parameter count or vocabulary size. The common confusion (choice A) mixes up model *capacity* (parameters) with the *per-call* token budget; a 7B model and a 70B model can ship with the same context window."
+    },
+    {
+      "q": "A model has 32 layers, 32 heads, head_dim 128, runs in fp16, and uses standard multi-head attention (no GQA). Approximately what's the KV cache size for one 2048-token sequence (batch=1)?",
+      "choices": [
+        "~1 GB",
+        "~4 GB",
+        "~125 MB",
+        "~512 MB"
+      ],
+      "answer": 0,
+      "explanation": "KV cache bytes = 2 (K and V) × layers × heads × head_dim × seq_len × bytes/element = 2×32×32×128×2048×2 ≈ 1 GiB. The best distractor (~512MB) is what you get if you forget the factor of 2 for storing both K *and* V — a common off-by-2x mistake when sizing GPU memory for serving."
+    },
+    {
+      "q": "A model has a 128K-token context window and nothing in the prompt is truncated. Why might it still fail to recall a fact placed in the middle of that prompt?",
+      "choices": [
+        "The KV cache overwrites middle tokens once it fills up",
+        "Positional encodings are undefined for the middle of a sequence",
+        "Tokenization silently drops middle tokens",
+        "Attention/positional biases make models attend less reliably to mid-sequence content (\"lost in the middle\"), even though nothing is truncated"
+      ],
+      "answer": 3,
+      "explanation": "This is the empirically documented \"lost in the middle\" effect (Liu et al., 2023) — models are measurably better at using information near the start/end of context than the middle, independent of whether the window technically holds it. The other choices invent silent data-loss mechanisms that don't happen; the tokens are present and attended to, just used less reliably."
+    },
+    {
+      "q": "You're building a production chatbot over a 2,000-page internal wiki that changes daily. Which default design is better?",
+      "choices": [
+        "Truncate the wiki to fit the default context window, keeping only the first N tokens",
+        "Concatenate the entire wiki into every prompt using a 1M-token context model",
+        "Fine-tune a new checkpoint every day on the updated wiki",
+        "Retrieve the top-k relevant chunks via embedding search + rerank, and put only those in a moderate context window"
+      ],
+      "answer": 3,
+      "explanation": "Retrieval keeps per-query cost and latency low, scales past any context window, and picks up daily changes by re-indexing — no retraining, no reprocessing the whole wiki every call. Choice A is the tempting \"just use a bigger window\" answer, but it's expensive per request and still subject to lost-in-the-middle recall failures at that scale."
+    },
+    {
+      "q": "A vendor advertises a \"1M-token context window\" achieved by applying YaRN-style RoPE scaling to a model trained at 8K tokens. What should you do before relying on this in production?",
+      "choices": [
+        "Assume it's identical to training a model natively at 1M tokens from scratch",
+        "Trust the advertised number — scaling techniques guarantee equal quality at any length",
+        "Run needle-in-a-haystack / long-context recall evals at your target lengths before relying on it, since extrapolated context often degrades before the claimed limit",
+        "Ignore it — RoPE scaling never works in practice"
+      ],
+      "answer": 2,
+      "explanation": "RoPE-scaling methods (position interpolation, NTK-aware scaling, YaRN) extend the *nominal* context length, but published evals consistently show perplexity/recall degrading below native-length performance, sometimes well before the new claimed maximum. Choice A is the naive trust-the-spec-sheet answer; a senior engineer validates with task-representative long-context evals before shipping."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Your production LLM API costs and latency spiked after users started sending much longer prompts. Walk me through the mechanism and how you'd mitigate it.",
+      "a": "Prefill cost scales with prompt length (attention is O(n²) in the naive case), most vendors bill per input+output token, and the KV cache grows linearly with length — so longer prompts cost more, increase time-to-first-token, and pressure serving memory. Mitigations: cache repeated prefixes (system prompt, few-shot examples) instead of resending them every call; replace \"paste the whole doc\" patterns with retrieval (RAG) so only relevant chunks enter the context; enforce a hard token budget with truncation/summarization before the call; and prefer GQA/MQA models if you control the deployment, since they shrink the KV cache directly."
+    },
+    {
+      "q": "How do you decide between extending context window (long-context model) vs. building a RAG pipeline for a system that must reason over a large document set?",
+      "a": "Ask whether the task needs *joint* reasoning across the whole corpus — cross-referencing facts scattered across many documents — or needs to *find* a small relevant slice and answer from it. The former favors long context, since chunk-based retrieval can miss connections split across chunk boundaries. The latter favors RAG: cheaper, faster, updates without retraining, and avoids lost-in-the-middle degradation. Also weigh cost/latency budget and corpus churn, and validate long-context recall with real evals rather than trusting the advertised window size."
+    },
+    {
+      "q": "A teammate proposes skipping embeddings entirely and just stuffing the whole knowledge base into the model's context window on every call. Right or wrong call?",
+      "a": "Reasonable default for a small, mostly-static corpus with low query volume — it's simpler to operate, is a legitimate \"in-context RAG\" pattern, and prompt caching absorbs much of the repeated-prefix cost. It stops being right once the corpus exceeds the context budget, query volume makes the per-call token cost add up, or documents are large enough that lost-in-the-middle hurts recall — that's the point to switch to embeddings + retrieval."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "positional-encodings",
+    "rag-vs-fine-tuning"
+  ],
+  "followUps": [
+    "rag-vs-fine-tuning"
+  ],
+  "metadata": {
+    "inputHash": "2f434041c141c740",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T14:01:04Z"
+  }
+}

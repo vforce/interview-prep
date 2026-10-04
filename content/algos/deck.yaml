@@ -1,0 +1,60 @@
+# Algorithms roadmap config: node families (label + colour) and the prerequisite DAG.
+# Topics live one-per-dir as <id>/data.yaml. No `key` here on purpose — see load_roadmap().
+
+families:
+  arrays: {n: Arrays, c: '#4aa3ff'}
+  stackheap: {n: Stack & Heap, c: '#ff9f45'}
+  backtracking: {n: Backtracking, c: '#c084fc'}
+  trees: {n: Trees, c: '#4ade80'}
+  graphs: {n: Graphs, c: '#f472b6'}
+  triebits: {n: Trie & Bits, c: '#2dd4bf'}
+  dp: {n: Dynamic Programming, c: '#f59e0b'}
+  design: {n: Design, c: '#94a3b8'}
+  hard: {n: Hard / Advanced, c: '#fb7185'}
+edges:
+- [twoptr, sliding]
+- [twoptr, prefix]
+- [twoptr, binsearch]
+- [twoptr, intervals]
+- [twoptr, greedy]
+- [twoptr, monostack]
+- [twoptr, heap]
+- [twoptr, backtrack]
+- [twoptr, bits]
+- [monostack, stackeval]
+- [backtrack, backtrackgrid]
+- [backtrack, treedfs]
+- [backtrack, dplinear]
+- [treedfs, treebfs]
+- [treedfs, bst]
+- [treedfs, treebuild]
+- [treedfs, trie]
+- [treedfs, grid]
+- [treedfs, dptree]
+- [treebfs, grid]
+- [grid, topo]
+- [grid, unionfind]
+- [grid, dijkstra]
+- [heap, dijkstra]
+- [heap, design]
+- [dplinear, dpknap]
+- [dplinear, dp2seq]
+- [dplinear, dpgrid]
+- [dplinear, dpstock]
+- [dplinear, dplis]
+- [dp2seq, dpsubstr]
+- [sliding, monodeque]
+- [monostack, monodeque]
+- [heap, twoheaps]
+- [trie, triedfs]
+- [backtrackgrid, triedfs]
+- [dp2seq, intervaldp]
+- [dplinear, bitmaskdp]
+- [bits, bitmaskdp]
+- [dplis, dpbinsearch]
+- [binsearch, dpbinsearch]
+- [prefix, fenwick]
+- [monostack, histogram]
+- [grid, bfsstate]
+- [topo, advgraph]
+- [dijkstra, advgraph]

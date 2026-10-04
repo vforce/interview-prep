@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: treebfs
+fam: trees
+label: Tree BFS
+order: 12
+trigger: level-by-level, right-side view, max width
+insight: queue; loop `for _ in range(len(queue))` to peel exactly one level
+probs:
+- {n: Average of Levels in Binary Tree, slug: average-of-levels-in-binary-tree, d: E}
+- {n: Binary Tree Right Side View, slug: binary-tree-right-side-view, d: M}
+- {n: Vertical Order Traversal, slug: vertical-order-traversal-of-a-binary-tree, d: H}

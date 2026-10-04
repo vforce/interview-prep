@@ -1,0 +1,100 @@
+{
+  "id": "building-an-mcp-server",
+  "title": "Building an MCP Server",
+  "definition": "Building an MCP server means implementing the process that declares its Tool/Resource/Prompt capabilities, registers handlers for them, and serves JSON-RPC 2.0 requests over a transport (stdio or Streamable HTTP) to any compliant client.",
+  "summary": "An MCP server exposes tools, resources, and prompts through a small, fixed set of JSON-RPC 2.0 methods — either via the low-level `Server` API, where you construct every response object yourself, or the high-level `FastMCP` wrapper, where decorators infer JSON Schemas from your functions' type hints. Building one for production means owning what the framework doesn't: transport-correct I/O, capability negotiation, and distinguishing a tool that failed from a request that was malformed.",
+  "objectives": [
+    "Explain the `initialize` → `tools/list` → `tools/call` sequence and why capability negotiation precedes any capability use.",
+    "Build a minimal FastMCP server that registers a typed tool and runs over stdio.",
+    "Identify why stdout writes corrupt a stdio-transport server, and route logs to stderr or the MCP logging capability instead.",
+    "Choose stdio vs Streamable HTTP for a given deployment, and name what each choice requires you to build (sessions, auth, TLS).",
+    "Distinguish a tool-execution error (`isError: true`) from a protocol-level JSON-RPC error, and explain why the difference matters to the model."
+  ],
+  "lesson": "An MCP server isn't a web app with routes — it's a thin RPC shim around functions you already have, sitting behind a fixed JSON-RPC 2.0 method set. The protocol supplies discovery (`tools/list`, `resources/list`, `prompts/list`) and invocation (`tools/call`, `resources/read`, `prompts/get`); your job is only to register handlers and return well-typed results. Python gives you two levels: the low-level `Server` API, where you implement handlers yourself and hand back raw MCP result objects, and the high-level `FastMCP`, where a decorator introspects your function's type hints and docstring to generate the JSON Schema and route the call automatically. Senior engineers default to FastMCP for velocity, but still own what it hides: validation edge cases, error surfaces, and connection lifecycle.\n\nBefore any tool/resource/prompt call, client and server run an `initialize` handshake: the client states its protocol version and capabilities, the server replies with its own, then the client sends a one-way `notifications/initialized`. This is capability negotiation — it's why a server can simply omit \"prompts\" from its declared capabilities instead of the client discovering that by trial and error at call time.\n\nSee `@@EXAMPLES` for a two-tool FastMCP server run over stdio — no socket code, no routing table, just decorated functions.\n\nThe gotcha that catches almost everyone once: on stdio transport, **stdout is the wire**. Every JSON-RPC message the server emits is a line on stdout, and the client's parser reads it as protocol data. A stray `print()` anywhere in the call stack — yours, or a dependency's default logger — writes a non-JSON-RPC line into that stream, and the client throws a parse error or just hangs. The fix is discipline: send human-readable logs to `stderr`, and if you want the *client* to see them, use the MCP logging capability (`ctx.info()` / `ctx.error()`), which emits proper `notifications/message` JSON-RPC frames instead of raw text.\n\nA second, subtler production distinction: a tool that *fails* is not a *protocol* error. MCP's spec draws this line deliberately — a tool execution failure (bad API response, invalid business state) should come back as a normal `CallToolResult` with `isError: true` and the failure as content, so it round-trips to the model as something it can read and react to. FastMCP leans on this: an exception you raise inside a `@mcp.tool()` function is caught by the framework and converted into that `isError` result for you — \"just raise\" is the idiomatic way to signal failure. An actual protocol-level JSON-RPC error (unknown method, schema-invalid params) is different: it's a client-library-level failure the model typically never sees.",
+  "examples": "**1. Minimal FastMCP server over stdio**\n\n```python\n# server.py\nimport sys, logging\nfrom mcp.server.fastmcp import FastMCP\n\nlogging.basicConfig(stream=sys.stderr, level=logging.INFO)  # never stdout on stdio transport\n\nmcp = FastMCP(\"inventory\")\n\n@mcp.tool()\ndef get_stock(sku: str) -> dict:\n    \"\"\"Look up current stock count for a SKU.\"\"\"\n    if not sku.isalnum():\n        raise ValueError(f\"invalid sku: {sku}\")   # FastMCP converts this to an isError result\n    return {\"sku\": sku, \"qty\": 42}\n\nif __name__ == \"__main__\":\n    mcp.run(transport=\"stdio\")\n```\n\nThe decorator reads `sku: str -> dict` plus the docstring to build the tool's `inputSchema` — the client sees this at `tools/list` without you writing any JSON Schema by hand.\n\n**2. Same server, production HTTP deployment**\n\n```python\nfrom mcp.server.fastmcp import FastMCP, Context\n\nmcp = FastMCP(\"inventory\", stateless_http=True)  # safe behind a load balancer, no sticky sessions\n\n@mcp.tool()\nasync def get_stock(sku: str, ctx: Context) -> dict:\n    await ctx.info(f\"looking up {sku}\")          # sent as notifications/message, not a print()\n    row = await db.lookup(sku)\n    if row is None:\n        raise LookupError(f\"unknown sku: {sku}\")  # becomes isError=True, not a JSON-RPC error\n    return {\"sku\": sku, \"qty\": row.qty}\n\nif __name__ == \"__main__\":\n    mcp.run(transport=\"streamable-http\")  # framed over HTTP POST — put auth/TLS in front\n```",
+  "tradeoffs": "FastMCP vs the low-level `Server` API: FastMCP trades control for speed and is the right default for standard tool/resource/prompt servers; drop to low-level only when you need lifecycle hooks or response shaping FastMCP doesn't expose. stdio vs Streamable HTTP: stdio is simplest for a single local integration (a client spawning your process) — no auth needed because the OS process boundary *is* the trust boundary — but it's strictly 1:1 and unreachable over a network. Streamable HTTP is required the moment you have remote or concurrent clients, but that reach is a cost center: you now own auth, TLS, and (unless you set `stateless_http=True`) session affinity. Don't build auth machinery on top of stdio — there's no network boundary to protect — and don't ship stdio for something meant to serve multiple remote users.",
+  "diagnosticQuiz": [
+    {
+      "q": "What best describes what you build when you \"build an MCP server\"?",
+      "choices": [
+        "A vector database wrapper used for retrieval",
+        "A REST API with a CRUD route per tool",
+        "A process that registers Tool/Resource/Prompt handlers and serves JSON-RPC 2.0 requests over a transport",
+        "A client-side plugin that renders tool results as UI widgets"
+      ],
+      "answer": 2,
+      "explanation": "An MCP server is a JSON-RPC 2.0 method-dispatch process (`tools/call`, `resources/read`, …) exposed over stdio or Streamable HTTP — not a REST API. The REST framing is the common misconception: people expect a route per resource, but MCP has a small fixed method set and pushes identity into structured params/URIs, not the URL path. The other two options describe adjacent but different systems."
+    },
+    {
+      "q": "A fresh client spawns your stdio MCP server, sends `initialize`, gets a response, sends `notifications/initialized`, then calls `tools/list`, then `tools/call` once. How many full JSON-RPC request/response round trips complete before the tool result comes back?",
+      "choices": [
+        "1",
+        "4",
+        "3",
+        "2"
+      ],
+      "answer": 2,
+      "explanation": "`initialize`, `tools/list`, and `tools/call` are each one request/response round trip = 3; `notifications/initialized` is a one-way notification with no response, so it adds none. The common miscount of 2 comes from forgetting `initialize` counts as its own round trip, or mistakenly counting the notification as one."
+    },
+    {
+      "q": "Why does FastMCP derive a tool's JSON Schema from its Python type hints and docstring instead of requiring you to hand-write one?",
+      "choices": [
+        "JSON Schema can't express optional fields, so hints fill the gap",
+        "MCP requires client and server to be written in the same language",
+        "MCP forbids servers from declaring an inputSchema at all",
+        "The type hints/docstring are already the function's contract, so generating the schema from them keeps the two from drifting apart"
+      ],
+      "answer": 3,
+      "explanation": "The signature is a single source of truth — deriving the schema avoids hand-maintaining a duplicate that silently drifts out of sync. JSON Schema does support optional/nullable fields (first choice false), MCP is language-agnostic — a Python server routinely talks to a TypeScript client (second choice false), and declaring an `inputSchema` at `tools/list` is required by the protocol; FastMCP just automates producing it (fourth choice false)."
+    },
+    {
+      "q": "Your MCP server must be reachable by multiple remote users concurrently, behind enterprise auth. Which transport fits, and what does that choice put on you to build?",
+      "choices": [
+        "Streamable HTTP — no auth needed, MCP handles authentication internally",
+        "stdio — put a reverse proxy in front of the spawned child process to fan it out",
+        "stdio — nothing changes, stdio scales to any number of remote clients",
+        "Streamable HTTP — you now own session/auth handling (bearer/OAuth2.1 over TLS), since there's a real network boundary"
+      ],
+      "answer": 3,
+      "explanation": "stdio is a 1:1 parent-spawns-child pipe with the OS process boundary as the trust boundary — it can't serve remote or concurrent users, and a proxy can't fan a single stdin/stdout pipe out to many callers (rules out both stdio options). Streamable HTTP puts the server on a real network, so you must add your own auth/session/TLS — MCP defines the transport and message format, not an authentication system."
+    },
+    {
+      "q": "A library your tool handler calls internally does `print(...)` for its own debug logging, and your server runs over stdio transport. What breaks, and what's the fix?",
+      "choices": [
+        "The print() line is interleaved into the JSON-RPC stream on stdout, breaking the client's message framing; route logging to stderr or the MCP logging capability instead",
+        "The server crashes with a protocol-version mismatch",
+        "Nothing — stdout and the JSON-RPC channel are separate file descriptors on stdio",
+        "It's automatically exposed to the client as a new resource"
+      ],
+      "answer": 0,
+      "explanation": "On stdio transport, stdout *is* the wire — every line is expected to be a JSON-RPC message, so any raw `print()` corrupts framing for the client's parser. The fix is to send human-readable logs to stderr, or use the MCP logging capability (e.g., `ctx.info()`), which emits structured `notifications/message` frames instead of raw text. The first choice is the tempting misconception: on stdio there is no separation, stdout is the protocol channel."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Walk me through what happens, protocol-wise, between a client connecting to your MCP server and it successfully calling a tool.",
+      "a": "Client sends `initialize` (protocol version + capabilities); server replies with its own `InitializeResult`; client sends the one-way `notifications/initialized`. Client typically calls `tools/list` to fetch names and JSON Schemas, then `tools/call {name, arguments}`, which the server validates against that schema. The handler runs and the server replies with a `CallToolResult` (`content`, `isError`). This sequence is transport-independent — identical over stdio or Streamable HTTP; only the framing differs."
+    },
+    {
+      "q": "You need to move this server from a local stdio prototype to something three internal teams call over the network. What changes, and what do you now own?",
+      "a": "Switch `mcp.run(transport=...)` from `\"stdio\"` to `\"streamable-http\"`. You now own auth (bearer tokens/OAuth2.1, TLS terminated in front — MCP doesn't supply an identity system), whether the deployment is stateful or stateless (`stateless_http=True` behind a load balancer with no sticky sessions), and treating every input as untrusted network input rather than same-machine input — add timeouts and per-call rate limits, since the process is now long-lived and shared instead of spawned fresh per client."
+    },
+    {
+      "q": "A tool call fails because a downstream API 500s. Should your handler raise, or return normally — and why does the distinction matter?",
+      "a": "Return normally, as a `CallToolResult` with `isError=True` and the failure message as content — that's the spec-correct way to report a tool failure, and it's why FastMCP is built to catch a raised exception and convert it into exactly that result. It matters because an unhandled protocol-level JSON-RPC error is often invisible to the model — it just looks like the RPC call failed at the client library — whereas an `isError` result flows back as content the model can read, explain, or use to retry with different arguments. Keeping the model in the loop on failure is the entire point of the `isError` design."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "prompts",
+    "resources",
+    "tools",
+    "transports-stdio-vs-streamable-http"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "6ffd492e0789fef1",
+    "model": "sonnet",
+    "generatedAt": "2026-07-06T07:33:00Z"
+  }
+}

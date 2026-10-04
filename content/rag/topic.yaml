@@ -1,0 +1,23 @@
+# The ONLY human-authored file for a topic. `seed.py` reads this and generates
+# graph.json + curriculum.json + concepts/*.json around it (the AUTHOR phase of
+# specs/interactive_lesson.md). Runtime never regenerates — it just serves the output.
+#   uv run seed.py rag         # or: make seed TOPIC=rag
+id: rag
+title: Retrieval-Augmented Generation
+audience: Senior ML Engineer
+difficulty: Intermediate
+concepts:
+  - RAG Overview
+  - Chunking
+  - Embeddings
+  - TF-IDF
+  - BM25
+  - Hybrid Search
+  - HNSW
+  - Reranking
+  - GraphRAG
+  - Similarity at Scale
+constraints:
+  interview_style: production
+  explanation_style: concise
+  language: Python

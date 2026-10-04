@@ -1,0 +1,42 @@
+# The ONLY human-authored file for the 'llm-tree' topic. `seed.py` reads this and
+# generates graph.json + curriculum.json + concepts/*.json around it. graph.json is
+# hand-authored alongside this file so the prerequisite tree is the exact designed one
+# (seed reuses an existing graph.json rather than asking the model to guess edges).
+#   uv run seed.py llm-tree      # or: make seed TOPIC=llm-tree
+id: llm-tree
+title: LLM Tree
+audience: Senior ML Engineer
+difficulty: Intermediate
+concepts:
+  - What is a Language Model
+  - Logits and the LM Head
+  - Tokenization
+  - Byte-Pair Encoding
+  - Token Embeddings
+  - Transformer Overview
+  - Self-Attention
+  - Positional Encodings
+  - Multi-Head Attention
+  - Feed-Forward Network
+  - Residual and Layer Norm
+  - Encoder vs Decoder
+  - Pretraining
+  - Scaling Laws
+  - RLHF and Instruction Tuning
+  - Sampling and Decoding
+  - Context Window
+  - Hallucination
+  - Quadratic Attention Cost
+  - Prefill vs Decode
+  - KV Cache
+  - KV Cache Memory
+  - MQA and GQA
+  - KV Cache Tricks
+  - KV Cache Eviction
+  - LoRA and Fine-Tuning
+  - Quantization and QLoRA
+  - RAG vs Fine-Tuning
+constraints:
+  interview_style: production
+  explanation_style: concise
+  language: Python

@@ -1,0 +1,97 @@
+{
+  "id": "cross-entropy-loss",
+  "title": "Cross-Entropy Loss",
+  "definition": "Cross-entropy loss measures how well a model's predicted probability distribution matches the true label distribution: it's the negative log-likelihood the model assigns to the correct class, `L = -Σ_k y_k·log(ŷ_k)`.",
+  "summary": "Cross-entropy loss is the negative log-likelihood of the true class under the model's predicted distribution, and is the standard training objective for classifiers because minimizing it is equivalent to maximum likelihood estimation. It generalizes the binary log-loss used in logistic regression to K classes via softmax, and — unlike MSE — produces gradients that don't vanish when the model is confidently wrong.",
+  "objectives": [
+    "Derive categorical cross-entropy from logistic regression's binary log-loss and connect both to maximum likelihood estimation.",
+    "Compute cross-entropy loss and the combined softmax+cross-entropy gradient (`ŷ - y`) by hand for a small example.",
+    "Explain why cross-entropy trains classifiers faster than MSE (no vanishing gradient at saturation).",
+    "Identify and fix numerical-stability bugs: log(0) blowups, double softmax, and logits-vs-probabilities mismatches.",
+    "Adapt cross-entropy for production issues like class imbalance and label noise."
+  ],
+  "lesson": "You already know binary log-loss from logistic regression: `L = -[y·log(p) + (1-y)·log(1-p)]`. Cross-entropy is exactly that idea generalized to K classes. Given a one-hot true label `y` and predicted probabilities `ŷ = softmax(z)` over logits `z`:\n\n```\nL = -Σ_k y_k · log(ŷ_k)  =  -log(ŷ_correct)\n```\n\nBecause `y` is one-hot, every term except the true class's drops out — cross-entropy is just \"negative log of the probability you assigned to the right answer.\" That's the whole intuition: predict the true class confidently and the loss is near 0; predict it with low confidence and the loss explodes toward infinity, since `-log(p) → ∞` as `p → 0`.\n\n**Worked example.** A 3-class classifier (cat/dog/bird) outputs softmax probabilities `[0.7, 0.2, 0.1]` for a true label \"cat\": loss = `-log(0.7) ≈ 0.357`. If it had instead assigned only 0.1 to \"cat,\" loss = `-log(0.1) ≈ 2.303` — a jump from 0.36 to 2.30 for what looks like a modest probability shift. That steep, non-linear penalty near `p=0` is what makes cross-entropy such an effective training signal: it pushes hardest exactly where the model is most wrong.\n\n**The key gotcha — it's about gradients, not just values.** The real reason cross-entropy, not MSE, is the default classification loss is the gradient it produces. Pair softmax (or sigmoid) with cross-entropy and the gradient w.r.t. the logits collapses to the clean `ŷ - y` — no derivative-of-the-activation term in it. Pair sigmoid with MSE instead, and the chain rule reintroduces `σ'(z) = σ(z)·(1-σ(z))`, which is ≈0 exactly when the model is confidently *wrong* (saturated). That kills the gradient precisely when learning matters most — the classic vanishing-gradient trap. Cross-entropy sidesteps it entirely, which is why it's the near-universal choice for classification, and why swapping in MSE for a classifier is a subtle but real production bug.",
+  "examples": "**1. Manual computation:**\n\n```python\nimport numpy as np\n\nlogits = np.array([2.0, 0.5, -1.0])            # raw model outputs\nprobs  = np.exp(logits) / np.exp(logits).sum()  # softmax -> [0.786, 0.175, 0.039]\n\ntrue_class = 0                                  # \"cat\"\nloss = -np.log(probs[true_class])               # ≈ 0.241\n```\n\n**2. The double-softmax production bug:**\n\n```python\nimport torch, torch.nn.functional as F\n\nlogits = torch.tensor([[2.0, 0.5, -1.0]])\ntarget = torch.tensor([0])                  # class index, NOT one-hot\n\n# Correct: pass raw logits, the loss handles log-softmax internally\nloss = F.cross_entropy(logits, target)      # ≈ 0.241, matches the manual calc above\n\n# WRONG (common bug when softmax is already in the model's forward()):\nprobs = F.softmax(logits, dim=1)\nbad_loss = F.cross_entropy(probs, target)   # silently applies softmax AGAIN — flattens gradients\n```",
+  "tradeoffs": "Cross-entropy assumes labels are correct and one-hot; a single mislabeled example incurs unbounded loss as the probability assigned to the (wrong) \"true\" class goes to 0, so it's sensitive to label noise — label smoothing (e.g. soft targets like 0.9/0.05/0.05) is the standard fix. Under severe class imbalance, unweighted cross-entropy is dominated by the majority class's gradient; class weighting or focal loss corrects this, but recheck calibration afterward since reweighting distorts predicted probabilities. It's the right default whenever you're fitting a genuine probability distribution (softmax/sigmoid output) via maximum likelihood; prefer margin-based losses (hinge, ranking) when you only care about relative ordering, not calibrated probabilities.",
+  "diagnosticQuiz": [
+    {
+      "q": "What does cross-entropy loss fundamentally measure?",
+      "choices": [
+        "The number of misclassified examples in a batch",
+        "The variance of the predicted probability distribution",
+        "The Euclidean distance between predicted and true probability vectors",
+        "The negative log-likelihood of the true label under the predicted distribution"
+      ],
+      "answer": 3,
+      "explanation": "Cross-entropy is derived directly from maximum likelihood estimation: minimizing it is equivalent to maximizing the log-likelihood of the true labels under the model's predicted distribution. \"Euclidean distance\" is the most common wrong answer since MSE-style distance is the intuitive alternative, but cross-entropy has no geometric interpretation between the two distributions."
+    },
+    {
+      "q": "A binary classifier predicts p=0.8 for the true class (y=1). What is the cross-entropy loss (natural log)?",
+      "choices": [
+        "0.8",
+        "-0.223",
+        "0.223",
+        "1.609"
+      ],
+      "answer": 2,
+      "explanation": "Binary cross-entropy for a single example with y=1 reduces to -log(p), so -ln(0.8) ≈ 0.223. The common mistake (0.8) uses the raw probability instead of its negative log; 1.609 is -ln(0.2), the loss you'd get from plugging in the wrong class's probability."
+    },
+    {
+      "q": "Why does cross-entropy penalize confident wrong predictions so much more harshly than mean squared error?",
+      "choices": [
+        "Because cross-entropy always outputs values greater than 1",
+        "Because cross-entropy is not differentiable at p=0",
+        "Because MSE only applies to regression and can't be computed on probabilities",
+        "Because -log(p) diverges to infinity as p→0, growing far faster than MSE's flat quadratic penalty"
+      ],
+      "answer": 3,
+      "explanation": "As the predicted probability for the true class approaches 0, -log(p) grows unboundedly, producing both a huge loss and a large gradient. MSE on probabilities stays bounded and its gradient actually shrinks when the model is most confidently wrong (the sigmoid-derivative term saturates), which is why cross-entropy trains classifiers faster. \"MSE only applies to regression\" is a misconception — it can be computed on probabilities, it's just a far worse choice for classification."
+    },
+    {
+      "q": "In production, when would you reach for focal loss or class-weighted cross-entropy instead of plain cross-entropy?",
+      "choices": [
+        "When the model architecture uses convolutional layers",
+        "When you need faster inference latency",
+        "When the classes are severely imbalanced and the majority class dominates the gradient",
+        "When labels are one-hot encoded instead of integer-encoded"
+      ],
+      "answer": 2,
+      "explanation": "Plain cross-entropy weights every example equally, so under a 99:1 imbalance the loss and gradient are dominated by the majority class, letting the model ignore the minority class while still achieving low average loss. Class weighting or focal loss corrects this by up-weighting rare classes or down-weighting easy examples. The other options confuse loss choice with unrelated concerns — architecture and label encoding don't determine whether imbalance handling is needed."
+    },
+    {
+      "q": "A model applies `softmax` in its `forward()` and then trains with `nn.CrossEntropyLoss()`. What's wrong?",
+      "choices": [
+        "`CrossEntropyLoss` requires labels to be one-hot encoded, not integers",
+        "Nothing — this is the standard, correct setup",
+        "Softmax cannot be used before any loss function, only sigmoid can",
+        "`nn.CrossEntropyLoss` already applies log-softmax internally, so this double-applies softmax and destabilizes training"
+      ],
+      "answer": 3,
+      "explanation": "PyTorch's `nn.CrossEntropyLoss` expects raw logits and internally computes log-softmax + NLL for numerical stability, so applying softmax first means it gets applied twice, flattening gradients and hurting convergence. The one-hot option inverts the truth: `CrossEntropyLoss` actually wants integer class indices, not one-hot vectors — itself a frequent, separate source of bugs."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Why is cross-entropy loss preferred over MSE for classification in production models?",
+      "a": "Cross-entropy comes from maximum likelihood on the predicted distribution, and when paired with softmax/sigmoid its gradient w.r.t. the logits reduces to `ŷ - y` — clean and never saturates. MSE paired with a sigmoid reintroduces the `σ'(z)` term via the chain rule, which is near-zero exactly when the model is confidently wrong, stalling training. In practice this means models trained with MSE-for-classification converge slower and get stuck on hard/misclassified examples — a subtle bug if someone swaps loss functions without understanding why."
+    },
+    {
+      "q": "You're debugging a production training run where the loss goes to `NaN` after a few steps, using `nn.CrossEntropyLoss`. How do you diagnose it?",
+      "a": "First check for the double-softmax bug — the loss expects raw logits, not post-softmax probabilities, and `log(softmax(0))` produces `-inf`. Next check learning rate / logit magnitudes: an LR too high can blow up logits, sending softmax outputs to exactly 0 or 1 before the log. Also verify label indices are in range `[0, num_classes)` (an out-of-range index reads garbage), check for mixed-precision underflow in `log_softmax` (use the fused, numerically-stable op rather than `log(softmax(x))` by hand), and inspect the data for corrupted/duplicate labels feeding extreme logits."
+    },
+    {
+      "q": "How would you adapt cross-entropy for a production classifier with severe class imbalance, e.g. fraud detection at a 0.1% positive rate?",
+      "a": "Use class-weighted cross-entropy (weight inversely proportional to class frequency) or focal loss to down-weight easy negatives, and/or stratified batch sampling so the minority class isn't drowned out per step. Evaluate with PR-AUC or recall-at-precision rather than accuracy, since accuracy is trivially \"solved\" by predicting the majority class. Recheck calibration after reweighting — the weighting shifts predicted probabilities away from true frequencies, so if you need calibrated probabilities (not just a ranking/threshold), apply a post-hoc calibration step like Platt scaling."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "logistic-regression"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "7e0a600ec3284be9",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T10:54:22Z"
+  }
+}

@@ -1,0 +1,27 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: np_onehot
+type: kata
+area: NumPy
+order: 41
+title: One-hot encode labels (NumPy)
+prompt: 'Given a 1-D array of integer labels in [0, num_classes), return a 2-D one-hot array of shape (len(labels), num_classes): row i has a 1 in column labels[i], else 0. Vectorized.'
+sig: 'def one_hot(labels, num_classes):'
+stub: "import numpy as np\n\ndef one_hot(labels, num_classes):\n    \n    return oh\n"
+reference: |
+  import numpy as np
+
+  def one_hot(labels, num_classes):
+      labels = np.asarray(labels)                     # accept a list; asarray won't copy an array
+      # The whole trick in one line. np.eye(C) is the C x C identity matrix, and row k of the
+      # identity IS the one-hot vector for class k. So "one-hot the labels" == "look up those rows".
+      # Fancy indexing with an ARRAY of indices returns those rows, in that order, with repeats
+      # allowed — the output takes its length from the index array, not the thing being indexed.
+      return np.eye(num_classes, dtype=int)[labels]   # (C, C) indexed by (n,) -> (n, C)
+test: |
+  import numpy as np
+  oh = one_hot([0, 2, 1, 2], 3)
+  assert oh.shape == (4, 3), oh.shape
+  assert np.array_equal(oh, [[1,0,0],[0,0,1],[0,1,0],[0,0,1]]), oh
+  assert np.array_equal(oh.sum(axis=1), [1,1,1,1]), oh.sum(axis=1)
+  print("PASS - 3 checks")

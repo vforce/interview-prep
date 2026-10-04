@@ -1,0 +1,97 @@
+{
+  "id": "principal-component-analysis",
+  "title": "Principal Component Analysis",
+  "definition": "Principal Component Analysis is a linear dimensionality-reduction technique that projects data onto the orthogonal directions — the eigenvectors of its covariance matrix, ranked by eigenvalue — that successively capture the most variance in the data.",
+  "summary": "PCA re-expresses a set of correlated features as a smaller set of uncorrelated components ordered by how much variance each explains, computed via eigendecomposition of the covariance matrix (equivalently, SVD of the centered data). In production it's used to compress features, cut multicollinearity, denoise, and speed up downstream models and serving, at the cost of interpretability, since each component is a linear blend of the original features. It requires centered and (usually) standardized input, which is why feature scaling is a direct prerequisite.",
+  "objectives": [
+    "Explain what a principal component is and how it relates to variance and the covariance matrix.",
+    "Derive PCA via eigendecomposition of the covariance matrix or, equivalently, SVD of the centered data.",
+    "Choose the number of components using explained-variance ratio, a scree plot, or downstream cross-validation.",
+    "Recognize when PCA helps (compression, decorrelation, denoising, visualization) versus when it hurts (interpretability, nonlinear structure, discarding low-variance-but-predictive signal).",
+    "Wire PCA into a production pipeline correctly: fit scaler + PCA on train only, `transform` (never refit) on validation/test/serving data."
+  ],
+  "lesson": "**Intuition.** Picture a 2D cloud of points shaped like a stretched cigar. Most of the spread lies along the cigar's long axis; almost none lies across it. PCA finds that long axis first — the direction of maximum variance — and calls it the first principal component (PC1), then finds the next-best *orthogonal* direction (PC2), and so on. If nearly all the variance sits in the first few axes, you can keep only those and throw the rest away with little information loss.\n\n**Mechanics.** Center the data (mean 0 per feature) into matrix X. The covariance matrix is C = (1/(n-1)) XᵀX. Its eigenvectors are the principal component directions; its eigenvalues are the variance explained along each one, so components are ranked by eigenvalue. Equivalently — and this is what libraries actually do — take the SVD of the centered X = UΣVᵀ; the columns of V are the same components, and eigenvalue_i ∝ singular_value_i². SVD avoids ever forming C explicitly, which is both more numerically stable and cheaper when the number of features exceeds the number of samples. Projecting onto the top-k components, Z = X·V_k, gives the best possible rank-k linear approximation of X in squared-error terms (Eckart–Young) — variance-maximization and reconstruction-error-minimization are the same optimization viewed from two sides.\n\n**Worked intuition.** Height and weight are strongly correlated: taller people tend to weigh more. PC1 aligns with the shared \"overall size\" axis; PC2 captures the residual \"body-type\" variation independent of size. One PCA score often summarizes what two correlated raw features were saying.\n\n**The gotcha.** PCA is not scale-invariant — it maximizes *variance*, and variance depends entirely on units. A dollar-valued income feature (range: tens of thousands) will numerically dominate a covariance matrix next to an age feature (range: 0–100), and PCA will \"discover\" income as the top component purely because of its scale, not because it's more informative. This is exactly why standardizing first (z-scoring every feature) is close to mandatory — the direct link back to feature scaling as a prerequisite. A second, softer gotcha: components are linear combinations of all input features, so they trade interpretability for compression, and they only capture linear correlation structure — real nonlinear manifolds need kernel PCA, UMAP, or an autoencoder instead.",
+  "examples": "**1. Production pipeline — fit on train only, pick components by variance threshold:**\n\n```python\nimport numpy as np\nfrom sklearn.preprocessing import StandardScaler\nfrom sklearn.decomposition import PCA\n\n# fit scaler + PCA on TRAIN ONLY — avoids leaking test statistics\nscaler = StandardScaler().fit(X_train)\nX_train_s = scaler.transform(X_train)\nX_test_s  = scaler.transform(X_test)\n\npca = PCA(n_components=0.95, svd_solver=\"full\")   # keep enough PCs for 95% variance\npca.fit(X_train_s)\n\nZ_train = pca.transform(X_train_s)\nZ_test  = pca.transform(X_test_s)\n\nprint(f\"kept {pca.n_components_} of {X_train.shape[1]} features\")\nprint(\"cumulative variance:\", pca.explained_variance_ratio_.cumsum())\n```\n\n**2. What sklearn does under the hood — SVD, eigenvalues, and reconstruction:**\n\n```python\nimport numpy as np\n\nXc = X_train_s - X_train_s.mean(axis=0)          # PCA always centers first\nU, S, Vt = np.linalg.svd(Xc, full_matrices=False)\n\nk = 2\nV_k = Vt[:k].T                                    # top-k principal directions\nZ = Xc @ V_k                                      # same as pca.transform(...)\n\nexplained = (S**2 / (S**2).sum())[:k]             # matches pca.explained_variance_ratio_[:k]\nX_reconstructed = Z @ V_k.T                        # best rank-k linear approximation (Eckart–Young)\nreconstruction_error = np.linalg.norm(Xc - X_reconstructed)\n```",
+  "tradeoffs": "Use PCA when you have many correlated numeric features and need compression, decorrelation, denoising, or visualization, and some loss of interpretability is acceptable — it's cheap, deterministic, and has a clean out-of-sample `transform` for production serving. Avoid it when you need interpretable coefficients (e.g., regulated/explainable models), when the real structure is nonlinear (reach for kernel PCA, UMAP, or an autoencoder), or when features are already few and roughly independent. Remember PCA optimizes for variance, not predictive signal — a low-variance direction can still be the one your label depends on, so for a supervised task, treat the number of components (and whether to use PCA at all) as a hyperparameter validated against the downstream metric, not assumed from the variance-ratio curve alone. Tree-based models (random forests, GBMs) also rarely benefit from PCA, since they're insensitive to feature correlation and scale the way linear/distance-based models are.",
+  "diagnosticQuiz": [
+    {
+      "q": "What do the principal components in PCA actually correspond to?",
+      "choices": [
+        "The cluster centroids that minimize within-cluster variance",
+        "The k nearest neighbors of each point in feature space",
+        "A random orthogonal rotation of the input features",
+        "The eigenvectors of the data's covariance matrix, ordered by eigenvalue"
+      ],
+      "answer": 3,
+      "explanation": "Principal components are the eigenvectors of the (centered) data's covariance matrix, sorted by descending eigenvalue — equivalently, the right singular vectors from the SVD of the centered data matrix. Option B describes k-nearest-neighbors and D describes k-means, two different unsupervised techniques often confused with PCA since all three are core \"unsupervised ML\" basics; C is wrong because the rotation isn't random, it's specifically chosen to align with directions of maximum variance."
+    },
+    {
+      "q": "PCA on standardized data returns eigenvalues [4.0, 3.0, 2.0, 1.0] for its four principal components. What fraction of total variance do the first two components explain together?",
+      "choices": [
+        "90%",
+        "70%",
+        "80%",
+        "40%"
+      ],
+      "answer": 1,
+      "explanation": "Total variance is the sum of all eigenvalues: 4+3+2+1=10. The first two components account for 4+3=7, so 7/10 = 70%. The tempting wrong answer, 40%, comes from reading off only the largest eigenvalue's individual share (4/10) and forgetting that explained variance for a chosen number of components is a cumulative sum across all of them, not a single component's share."
+    },
+    {
+      "q": "Why does PCA pick the direction of maximum variance as its first component?",
+      "choices": [
+        "Because variance maximization is the only way to guarantee the components come out orthogonal",
+        "Because maximum-variance directions are guaranteed to align with the true class boundaries",
+        "Because with no labels available, spread is used as the proxy for how much information a direction carries, and it minimizes reconstruction error when dimensions are later dropped",
+        "Because it's required to make the covariance matrix invertible"
+      ],
+      "answer": 2,
+      "explanation": "PCA is unsupervised, information-preserving compression: variance is the proxy for \"informative\" in the absence of labels, and by the Eckart–Young theorem, maximizing captured variance is equivalent to minimizing average squared reconstruction error once you truncate to fewer dimensions. The most common misconception is option B — PCA has no notion of class labels, so nothing guarantees its components separate classes well; that guarantee belongs to supervised methods like LDA. C and D are also false: orthogonality falls out of eigendecomposing a symmetric covariance matrix regardless of the variance criterion, and PCA works fine even on rank-deficient (non-invertible) covariance matrices."
+    },
+    {
+      "q": "You're building a production fraud model with 300 mostly-correlated numeric features. Inference latency and serving cost matter, and no one needs to read individual feature coefficients. Where does PCA fit?",
+      "choices": [
+        "As a replacement for the classifier itself, since PCA can output fraud/not-fraud predictions directly",
+        "As a substitute for feature scaling, so scaling can be skipped entirely",
+        "As a way to guarantee the model becomes more interpretable to auditors",
+        "As a preprocessing step that compresses the 300 correlated features into far fewer decorrelated components before the classifier, cutting inference cost and multicollinearity"
+      ],
+      "answer": 3,
+      "explanation": "This is the standard production role for PCA — unsupervised compression feeding a downstream supervised model, reducing feature count (and serving cost) and removing multicollinearity. B is wrong because PCA has no notion of labels and can't classify anything on its own; C inverts the real tradeoff, since components are linear blends of the original features and are typically harder, not easier, to explain to auditors; D is a dangerous misconception, since PCA's variance-maximization depends on features already being on comparable scales — it depends on scaling, it doesn't replace it."
+    },
+    {
+      "q": "A colleague fits one StandardScaler and one PCA on the full dataset (train + test combined), then splits into train/test to train the model. What's wrong with this pipeline?",
+      "choices": [
+        "Nothing — this is the correct order of operations",
+        "StandardScaler and PCA are incompatible operations and can't be chained",
+        "PCA cannot mathematically be applied after standardization",
+        "It leaks test-set statistics into training — both the scaler's mean/variance and PCA's component directions were computed partly from test data"
+      ],
+      "answer": 3,
+      "explanation": "Fitting the scaler and PCA on the combined data lets test-set values influence the mean/variance used for scaling and the covariance structure used to derive the components — classic data leakage, since at serving time the model would never have access to future data to fit these. The correct pipeline fits both StandardScaler and PCA on the training split only, then calls `.transform` (never `.fit`) on validation, test, and production data. D is the tempting answer for anyone who has only ever run PCA once on a single static dataset without a train/test-split mindset."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "How do you decide how many principal components to keep in a production pipeline?",
+      "a": "Start from the explained-variance-ratio cumsum and pick a threshold (commonly 90-95%) or look for the \"elbow\" in a scree plot — that's a reasonable default. But for a supervised downstream task, treat the component count as a hyperparameter and cross-validate it against the actual task metric (AUC, F1, etc.), since variance retained isn't the same as predictive signal retained. In practice I also factor in the latency/memory budget for serving — sometimes I deliberately keep fewer components than the \"ideal\" variance threshold because the marginal accuracy gain isn't worth the added inference cost."
+    },
+    {
+      "q": "When would you use PCA versus t-SNE/UMAP in a production system?",
+      "a": "PCA is linear, deterministic, and gives an explicit `transform` you can cheaply apply to new points at serving time, so it's the right choice as a repeatable preprocessing/compression step feeding a downstream model. t-SNE and UMAP capture nonlinear manifold structure and are excellent for exploratory visualization, but they're stochastic, computationally heavier, and don't offer a clean out-of-sample transform (t-SNE especially essentially needs refitting on new data), so I wouldn't put them in an online inference path — I'd reserve them for offline analysis/visualization and use PCA, or a learned encoder, wherever new data needs a repeatable transform."
+    },
+    {
+      "q": "You add PCA before your classifier and accuracy gets worse, not better. How do you debug that?",
+      "a": "First I check the plumbing: was scaling applied before PCA, and is the pipeline fit only on train and `transform`-only on test? Then I check whether too many components were dropped — cross-validate accuracy against the number of components rather than trusting a variance-ratio cutoff blindly. Fundamentally, PCA optimizes for variance, not label-relevant signal, so it can discard a low-variance direction that happens to be exactly what the classifier needed, which is more likely when a few highly predictive features are buried among noisier high-variance ones. If that's the case, I'd compare against skipping PCA entirely (tree-based models rarely need it) or against a supervised alternative like LDA or plain feature selection, and only keep PCA if it wins on a held-out metric."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "feature-scaling"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "22c2124a5a65be56",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T10:40:05Z"
+  }
+}

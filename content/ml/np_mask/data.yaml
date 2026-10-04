@@ -1,0 +1,58 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: np_mask
+type: kata
+area: NumPy
+order: 52
+title: Boolean masking without mutating (NumPy)
+prompt: >-
+  Given a 1-D array `x` and a threshold `t`, return `(kept, cleaned, n_below)` — `kept` is the
+  elements >= t, `cleaned` is the same shape as `x` with everything below `t` replaced by 0, and
+  `n_below` counts them. `x` itself must come back untouched, and that's the trap: a boolean mask on
+  the *right* of an `=` (`x[mask]`) reads out a copy, but on the *left* (`x[mask] = 0`) it writes
+  straight through into the original. `np.where` always builds a new array. Bonus reflex: a mask is
+  a bool array, so `mask.sum()` is your count.
+sig: 'def mask_below(x, t):'
+stub: "import numpy as np\n\ndef mask_below(x, t):\n    \n    return kept, cleaned, n_below\n"
+reference: |
+  import numpy as np
+
+  def mask_below(x, t):
+      # A comparison is ELEMENTWISE and gives back a bool array of the same shape — not one bool.
+      # (Which is why `if x < t:` raises: numpy refuses to guess what a whole array's truth is.)
+      below = x < t                        # (n,) -> (n,) of True/False
+
+      # A mask on the RIGHT of '=' READS: it gathers the True positions into a fresh 1-D array.
+      # Result length = number of Trues, so the shape is data-dependent. Always a copy.
+      # `~` is elementwise NOT. Use ~ / & / | on arrays, never not / and / or.
+      kept = x[~below]                     # (n,) -> (n_true,)
+
+      # np.where(cond, a, b) picks elementwise from a or b and BUILDS A NEW ARRAY.
+      # The trap it avoids: x[below] = 0 puts the mask on the LEFT of '=', which writes
+      # straight through into x and silently mutates the caller's data.
+      cleaned = np.where(below, 0, x)      # (n,) -> (n,), same shape, x untouched
+
+      # True is 1 and False is 0, so .sum() COUNTS the Trues — and .mean() would give the
+      # fraction, which is the whole idiom behind df.isna().mean() over in Pandas.
+      return kept, cleaned, int(below.sum())
+test: |
+  import numpy as np
+
+  x = np.array([5, -2, 7, 0, -9, 3])
+  orig = x.copy()
+  kept, cleaned, n = mask_below(x, 1)
+
+  assert kept.tolist() == [5, 7, 3], kept.tolist()
+  assert cleaned.tolist() == [5, 0, 7, 0, 0, 3], cleaned.tolist()
+  assert n == 3, n
+
+  assert x.tolist() == orig.tolist(), "x was mutated — x[x < t] = 0 writes in place; use np.where"
+
+  # a mask is a bool array, not a list of positions
+  assert (x < 1).tolist() == [False, True, False, True, True, False]
+
+  # nothing below the threshold: keep everything, change nothing
+  k2, c2, n2 = mask_below(x, -100)
+  assert n2 == 0 and k2.tolist() == x.tolist() and c2.tolist() == x.tolist()
+
+  print("PASS - 6 checks")

@@ -1,0 +1,98 @@
+{
+  "id": "gradient-boosting",
+  "title": "Gradient Boosting",
+  "definition": "Gradient boosting builds an additive ensemble by sequentially fitting a weak learner (usually a shallow regression tree) to the negative gradient of a loss function evaluated on the current ensemble's predictions, then adding it in with a shrinkage-scaled step.",
+  "summary": "Unlike bagging (e.g., Random Forest), which trains independent trees in parallel and averages them to reduce variance, gradient boosting trains trees sequentially, each one correcting the ensemble's current errors — which primarily reduces bias. It's gradient descent performed in function space: each tree approximates the negative gradient of the loss, and a learning rate controls how much of that correction gets added at each round. Production implementations (XGBoost, LightGBM, CatBoost) extend this with second-order optimization, built-in regularization, and histogram-based training for speed at scale.",
+  "objectives": [
+    "Explain gradient boosting as function-space gradient descent, and derive why each new tree fits the negative gradient (pseudo-residual) of the loss.",
+    "Contrast gradient boosting (sequential, bias-reducing) with bagging/Random Forest (parallel, variance-reducing).",
+    "Reason about learning rate, tree depth, and number of estimators as an interacting regularization triad that guards against overfitting.",
+    "Explain second-order (Newton) boosting as used in XGBoost, and why it improves on plain gradient-based GBM.",
+    "Discuss production concerns: training/inference cost, monotonic constraints, and early stopping."
+  ],
+  "lesson": "Gradient boosting is functional gradient descent: instead of adjusting parameters of one model, you adjust a *function* by adding new terms to it. You can't take an analytic derivative of an arbitrary function space, so you approximate the step: fit a weak learner to the negative gradient of the loss at each training point, then add a shrunk copy of that tree to the ensemble.\n\n```python\n# one boosting round, iteration m\nresidual = -dL(y, F) / dF        # negative gradient, evaluated at F = F_{m-1}\nh_m = fit_tree(X, residual)      # weak learner approximates that gradient\nF = F + learning_rate * h_m(X)   # shrinkage-scaled step in function space\n```\n\nFor squared-error loss, the pseudo-residual is exactly `y - F_{m-1}(x)` — literally \"the residual,\" which is why early explanations describe boosting as \"each tree fits the previous tree's mistakes.\" That framing breaks for other losses (log-loss, Huber, quantile, ranking losses): the \"residual\" there is a generalized pseudo-residual (still the negative gradient), not `y - ŷ`. Keeping \"residual fitting is the squared-error special case of gradient fitting\" straight is the main conceptual gotcha.\n\n`F0`, the starting point, is a constant that minimizes the loss over the whole training set (the mean for squared error, the log-odds for log-loss). Each subsequent tree only has to explain what's still wrong, so the ensemble's bias drops steadily as rounds progress — in contrast to bagging, where trees are grown independently on bootstrap samples and averaging cancels variance, not bias.\n\nThe engineering gotcha is distinct from the math one: because `F_m` depends on `F_{m-1}`, trees must be trained in sequence — you cannot fit tree 50 until tree 49 exists. This is why gradient boosting scales worse across machines than Random Forest for a fixed tree count. XGBoost/LightGBM instead parallelize *within* a tree (histogram-based split finding across features/threads), not across trees.\n\nShrinkage (learning rate, typically 0.01–0.3) trades rounds for generalization: a smaller rate needs more trees to hit the same training loss but usually validates better, since it takes smaller, more cautious steps rather than letting one tree override the ensemble's current belief entirely.",
+  "examples": "**1. One boosting step by hand (squared loss)**\n\n```\nx:  [1, 2, 3]\ny:  [5, 7, 12]\n\nF0 = mean(y) = 8\nresidual = y - F0 = [-3, -1, 4]        # negative gradient for squared loss\n\nh1 fit on (x, residual) ≈ [-3, -1, 4]  # tree memorizes it (toy case)\nη = 0.1\nF1 = F0 + η * h1 = [7.7, 7.9, 8.4]\n\nnew residual = y - F1 = [-2.7, -0.9, 3.6]   # shrunk toward 0 by factor (1-η)\n```\n\nEach round the residual shrinks by roughly `(1 - η)`, which is exactly why small `η` needs many rounds to converge but tends to generalize better than one large step.\n\n**2. Production XGBoost with early stopping**\n\n```python\nimport xgboost as xgb\nfrom sklearn.model_selection import train_test_split\n\nX_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=0)\n\nmodel = xgb.XGBRegressor(\n    n_estimators=2000,        # upper bound; early stopping picks the real count\n    learning_rate=0.03,\n    max_depth=4,\n    subsample=0.8,             # row sampling per tree (stochastic GB)\n    colsample_bytree=0.8,      # feature sampling per tree\n    reg_lambda=1.0,            # L2 on leaf weights\n    early_stopping_rounds=50,\n    eval_metric=\"rmse\",\n)\nmodel.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)\nprint(model.best_iteration, model.best_score)\n```\n\n`n_estimators` is set deliberately high; `early_stopping_rounds` — not a hand-picked count — determines the actual ensemble size from validation performance.",
+  "tradeoffs": "Gradient boosted trees are frequently the strongest off-the-shelf model on structured/tabular data, handle mixed feature types and missing values natively, support arbitrary differentiable losses (regression, classification, ranking, quantile), and give monotonic constraints and feature importances for free. The cost: more hyperparameters than Random Forest (learning rate, depth, subsampling, regularization) with real overfitting risk if untuned, sequential training that resists cross-machine parallelism, worse handling of very high-dimensional unstructured data (images/audio/raw text, where deep nets dominate), and sensitivity to noisy labels since boosting keeps trying to fit whatever residual is left, including noise. Use it for tabular problems of small-to-large size where accuracy matters more than training-time parallelism or full interpretability; avoid it for unstructured inputs, for embarrassingly-parallel training-latency-constrained settings (favor bagging), or when a linear/GLM model's transparency is a hard requirement.",
+  "diagnosticQuiz": [
+    {
+      "q": "What does each new tree in gradient boosting fit to?",
+      "choices": [
+        "The predictions of the previous tree",
+        "The raw target values y",
+        "The negative gradient of the loss w.r.t. the current ensemble's predictions",
+        "A bootstrap resample of the training data"
+      ],
+      "answer": 2,
+      "explanation": "Gradient boosting is functional gradient descent — at each step you fit a weak learner to approximate `-∂L/∂F(x)` evaluated at the current ensemble F. Option A is what a single tree regresses on directly and reflects the misconception that boosting just repeatedly refits the same target rather than the ensemble's current error. Bootstrap resampling describes bagging (Random Forest), not boosting."
+    },
+    {
+      "q": "For squared-error loss, `F_{m-1}(x) = 10`, `y = 13`, learning rate `η = 0.1`, and a tree that perfectly fits the pseudo-residual. What is `F_m(x)`?",
+      "choices": [
+        "13",
+        "10.3",
+        "10.03",
+        "11.5"
+      ],
+      "answer": 1,
+      "explanation": "The negative gradient of squared error is `y - F = 3`; scaled by the learning rate that's `0.3`, giving `F_m = 10 + 0.3 = 10.3`. The tempting wrong answer is 13 — forgetting the learning rate and jumping straight to the full residual, which would make each round behave like a single unregularized tree and badly overfit/oscillate."
+    },
+    {
+      "q": "Why does gradient boosting primarily reduce bias while bagging (Random Forest) primarily reduces variance?",
+      "choices": [
+        "Boosting trains trees sequentially so each new tree targets the ensemble's current errors, while bagging trains independent trees on resampled data and averages them",
+        "Boosting uses deeper trees than bagging",
+        "Boosting simply uses more trees than bagging",
+        "Boosting only applies to classification, bagging only to regression"
+      ],
+      "answer": 0,
+      "explanation": "Sequential error-correction lets each new tree chip away at whatever systematic error remains, shrinking bias round over round. Bagging trains roughly i.i.d. trees in parallel on bootstrap samples and averages them, which cancels variance from any one tree but doesn't change the base learner's bias. Tree depth/count are tunable hyperparameters, not the structural reason, and both methods apply to regression and classification."
+    },
+    {
+      "q": "You're building a churn model on ~500K rows of tabular data with a weekly retraining SLA and a hard requirement that risk score decreases monotonically with tenure. Best fit?",
+      "choices": [
+        "A single, deep decision tree",
+        "Gradient boosted trees (XGBoost/LightGBM) with a monotonic constraint",
+        "k-nearest neighbors",
+        "A deep feedforward network with dropout"
+      ],
+      "answer": 1,
+      "explanation": "XGBoost/LightGBM support per-feature monotonic constraints directly, train fast enough on 500K structured rows to hit a weekly SLA, and typically beat single trees or KNN on tabular accuracy. A deep net usually needs far more data/tuning to match GBTs here and has no clean monotonicity mechanism; a single deep tree overfits and is high-variance; KNN scales poorly at inference and can't enforce monotonicity either."
+    },
+    {
+      "q": "A model trained with `n_estimators=5000` and no early stopping has near-zero training RMSE but validation RMSE that bottoms out around round 800 and then rises. Most likely cause and fix?",
+      "choices": [
+        "Learning rate is too high; increase max_depth to compensate",
+        "Overfitting from too many boosting rounds; use early_stopping_rounds or reduce n_estimators/learning_rate",
+        "The loss function is mismatched to the task",
+        "subsample is too high; set it to 0"
+      ],
+      "answer": 1,
+      "explanation": "Past round ~800 the extra trees are fitting training-set noise, so training error keeps falling while validation error climbs — textbook overfitting from an unconstrained round count. The standard production fix is early stopping on a validation metric, or simply capping rounds / lowering the learning rate. `subsample=0` leaves no data to fit and is nonsensical, and increasing depth would worsen overfitting rather than fix it."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "How does XGBoost/LightGBM differ from Friedman's original gradient boosting, and why do those differences matter in production?",
+      "a": "Three changes dominate: **(1) second-order (Newton) updates** — using both gradient and Hessian per leaf gives more accurate optimal leaf weights each round than gradient-only GBM, especially for non-squared losses; **(2) native regularization** — L1/L2 penalties on leaf weights plus a tree-complexity term in the split-gain formula, reducing manual tuning; **(3) histogram-based split finding** (core to LightGBM, adopted by XGBoost's `hist` method) — bucketing continuous features into a fixed number of bins turns split search from a sort-heavy `O(n log n)` operation into an `O(n)` scan over bins, which is what makes training on tens of millions of rows practical. Add to that native missing-value handling (a learned default direction per split) and parallel/GPU-accelerated split finding within each round. Net effect in production: faster training at scale, less manual regularization, and fewer preprocessing steps for missing/sparse data — boosting rounds are still sequential, only within-round work is parallelized."
+    },
+    {
+      "q": "How do you tune a gradient boosting model for production and avoid overfitting?",
+      "a": "Hold out a validation set (or use CV), fix a small learning rate (0.01–0.1), and let **early stopping** on a monitored validation metric pick the effective number of trees rather than fixing `n_estimators` up front — shrinkage plus early stopping is the primary regularizer. Next tune per-tree capacity (`max_depth`/`num_leaves`, `min_child_weight`/`min_data_in_leaf`), then add stochasticity (`subsample`, `colsample_bytree`) for bagging-style variance reduction on top of boosting, and `reg_alpha`/`reg_lambda` if leaf values look noisy. Search this space coarse-to-fine (random search or Bayesian optimization, e.g. Optuna) while tracking the train/validation gap, not just the validation score, since a widening gap is the earliest overfitting signal. In production, log validation metrics every retrain and alert on train/val divergence rather than re-tuning blind each cycle."
+    },
+    {
+      "q": "Your gradient boosting model's p99 inference latency is too high for a real-time path. What levers do you pull?",
+      "a": "First cut ensemble size — lower `n_estimators` (via earlier stopping) or post-hoc prune trees, since prediction cost scales roughly with `num_trees × tree_depth`; cap `max_depth`/`num_leaves` for the same reason. Serve through a compiled inference path (Treelite, ONNX, or the library's native fast-predict API) instead of the training-time Python API, and batch requests to amortize overhead. If still too slow, distill into a smaller model — a shallow tree or linear model trained to mimic the GBT's outputs — or cache predictions for repeated/identical inputs. Finally, profile before optimizing: GBT tree traversal itself is usually microseconds; feature computation/lookup upstream is the more common actual bottleneck."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "decision-trees",
+    "gradient-descent"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "14e144ffdaf60a50",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T10:32:47Z"
+  }
+}

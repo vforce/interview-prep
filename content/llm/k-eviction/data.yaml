@@ -1,0 +1,36 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: k-eviction
+type: concept
+area: Inference & KV Cache
+order: 21
+front: What is KV-cache eviction, and what are the common strategies?
+back: |-
+  The cache grows linearly with sequence length; eviction drops (or compresses) the cached K/V of some past tokens to cap memory for long / streaming contexts — trading a little quality for a bounded cache.
+
+  Strategies:
+  • Sliding window — keep only the last W tokens.
+  • Attention sinks / StreamingLLM — keep the first few tokens (attention heavily 'parks' on them) PLUS a recent window; fixes the quality collapse that pure sliding-window causes.
+  • Heavy-Hitter (H2O) / score-based — keep the tokens that have accumulated the most attention, evict the rest.
+
+  Note: GQA and quantization shrink the cache per-token; eviction shrinks the number of tokens kept.
+more: |-
+  ## Why naive sliding window collapses
+
+  The cache is O(*n*); eviction caps the **token count** kept (orthogonal to GQA/quant, which shrink *per-token* bytes). For Llama-2-7B (32 layers, 32 KV heads) that's ~**512 KB/token** — a 1M-token stream would need ~512 GB. A window of 4096 pins it at `512KB·4096` ≈ **2.1 GB**, constant forever.
+
+  But *pure* sliding window breaks. StreamingLLM (Xiao 2023) found softmax dumps huge attention mass on the **first few tokens** ("attention sinks") regardless of content. Evict those and perplexity **explodes** (≈5 → >1000). Keep just **4 sink tokens + recent window** and PPL returns to baseline, stable to 4M tokens.
+
+  ```
+  pos:  0 1 2 3 ............ 90 ... 99
+  slide(W=10):              ▓▓▓▓▓▓▓▓▓▓   ← drops sinks → collapse
+  sinks+W:   ▓▓▓▓ ......... ▓▓▓▓▓▓▓▓▓▓   ← stable
+  ```
+
+  | Strategy | Keeps |
+  |---|---|
+  | Sliding window | last *W* |
+  | StreamingLLM | first ~4 + last *W* |
+  | H2O | top accumulated-attention + recent |
+
+  **H2O** (Heavy-Hitter) ranks tokens by summed attention received; keeping ~20% retains most quality. Sinks are a positional heuristic; H2O is content-aware — both cap memory by *count*.

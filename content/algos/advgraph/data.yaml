@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: advgraph
+fam: hard
+label: Advanced Graph
+order: 39
+trigger: derive a graph from the input, then run a known algo
+insight: Alien Dictionary = adjacent words → ordering edges → topo sort; Hierholzer for Eulerian path; Floyd-Warshall for all-pairs
+probs:
+- {n: Find the City (Floyd-Warshall), slug: find-the-city-with-the-smallest-number-of-neighbors-at-a-threshold-distance, d: M}
+- {n: Alien Dictionary, slug: alien-dictionary, d: H}
+- {n: Reconstruct Itinerary, slug: reconstruct-itinerary, d: H}

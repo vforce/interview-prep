@@ -1,0 +1,98 @@
+{
+  "id": "k-nearest-neighbors",
+  "title": "k-Nearest Neighbors",
+  "definition": "k-Nearest Neighbors (k-NN) is a non-parametric supervised learning algorithm that predicts a query point's label (or value) by majority vote (or average) among the k training points closest to it under a chosen distance metric.",
+  "summary": "k-NN has no training phase — it just stores the data (\"lazy learning\") — and defers all computation to prediction time, when it searches for nearby points and aggregates their labels. Its behavior is entirely governed by three choices: k, the distance metric, and feature scale, making it a simple, assumption-free baseline that nonetheless scales poorly and weakens in high dimensions. In production it's rarely run brute-force; it's the algorithm underneath approximate nearest-neighbor search for embeddings, recommendations, and RAG retrieval.",
+  "objectives": [
+    "Explain how k-NN predicts and why it's called \"lazy\" learning (no explicit training step).",
+    "Reason about how k trades off bias and variance, and how to choose it via cross-validation.",
+    "Explain why feature scaling is mandatory before computing distances in k-NN.",
+    "Know why naive k-NN doesn't scale, and how ANN indexes (KD-tree, HNSW, IVF/FAISS) fix that in production.",
+    "Recognize the curse of dimensionality and when to embed/reduce dimensions before applying k-NN."
+  ],
+  "lesson": "k-NN is \"lazy learning\": there's no training step beyond storing the data (and, in production, building a search index over it). At prediction time it computes the distance from the query point to training points, takes the k closest, and returns their majority class (classification) or (weighted) mean (regression).\n\nThe only real hyperparameters are **k**, the **distance metric** (Euclidean, Manhattan, cosine), and the **vote weighting** (uniform vs. distance-weighted). k directly sets the bias-variance tradeoff: k=1 fits every quirk of the training data — a jagged boundary, low bias, high variance, and real sensitivity to a single mislabeled point. As k grows, the vote averages over a wider neighborhood, smoothing the boundary (more bias, less variance), until at k=n every query gets the same answer: the dataset's global majority class. In practice, k is picked by cross-validation, using an odd number for binary classification to avoid ties, or by using distance-weighted voting so the exact value of k matters less.\n\n**Worked intuition:** picture a query point sitting near the border between two class blobs. With k=1, the prediction flips depending on whichever single point happens to be nearest — noisy and outlier-prone. With k=15, the prediction reflects the local class density over a wider neighborhood — stable, but it can blur a genuinely sharp boundary if the two classes sit close together.\n\n**The key gotcha:** \"closeness\" is entirely defined by the distance metric, so k-NN inherits whatever scale your raw features happen to have. With \"age\" (range ~0-100) and \"annual income\" (range ~0-200,000), Euclidean distance is dominated almost completely by income — age becomes noise the model can't see. Nothing errors; it just quietly picks worse neighbors. This is exactly why standardizing features is a hard prerequisite here, not a nicety.\n\nA second, subtler gotcha at scale: in high dimensions, distances concentrate — the gap between the nearest and farthest neighbor shrinks — so raw k-NN over hundreds of unprocessed features often underperforms k-NN over a compact, learned embedding.",
+  "examples": "### Example 1 — manual vote (k=3, Euclidean, features already scaled)\n\n| Point | x1  | x2  | label |\n|-------|-----|-----|-------|\n| P1    | 1.0 | 2.0 | A     |\n| P2    | 1.5 | 1.8 | A     |\n| P3    | 5.0 | 8.0 | B     |\n| P4    | 6.0 | 9.0 | B     |\n| P5    | 4.5 | 7.5 | B     |\n| query | 2.0 | 2.0 | ?     |\n\n```\nd(query, P1) = sqrt((2-1.0)^2 + (2-2.0)^2) = 1.00\nd(query, P2) = sqrt((2-1.5)^2 + (2-1.8)^2) = 0.54\nd(query, P3) = sqrt((2-5.0)^2 + (2-8.0)^2) = 6.71\nd(query, P4) = sqrt((2-6.0)^2 + (2-9.0)^2) = 8.06\nd(query, P5) = sqrt((2-4.5)^2 + (2-7.5)^2) = 6.04\n\n3 nearest: P2 (0.54, A), P1 (1.00, A), P5 (6.04, B)\nVote: A=2, B=1 → predicted label = A\n```\n\n### Example 2 — production Python (sklearn pipeline)\n\n```python\nfrom sklearn.pipeline import Pipeline\nfrom sklearn.preprocessing import StandardScaler\nfrom sklearn.neighbors import KNeighborsClassifier\n\nmodel = Pipeline([\n    (\"scale\", StandardScaler()),           # mandatory: distances need comparable feature scales\n    (\"knn\", KNeighborsClassifier(\n        n_neighbors=15,\n        weights=\"distance\",                # closer neighbors count more; less brittle than uniform\n        n_jobs=-1,\n    )),\n])\nmodel.fit(X_train, y_train)\npreds = model.predict(X_test)\n```\n\nAt production scale (millions+ vectors), swap the brute-force search for an ANN index — e.g. `faiss.IndexHNSWFlat` or a managed vector DB — same nearest-neighbor idea, sub-linear query time, small recall tradeoff.",
+  "tradeoffs": "k-NN has no training cost and makes no distributional assumptions, so it naturally handles nonlinear, multi-class decision boundaries with zero feature engineering. The cost is pushed entirely to inference: it must retain the full training set (or an index over it) and, done naively, pays O(n·d) per query — too slow for large n under tight latency SLAs without an ANN index. It's also brittle to unscaled/irrelevant features and to high dimensionality, where distances stop discriminating well. Use it as a fast baseline on small-to-medium tabular data, or — via an ANN index — as the core of embedding-based retrieval and recommendation. Avoid it for very large datasets with strict latency budgets and no index, for high-dimensional raw features without a learned embedding, or when you need a small, portable, easily-versioned model artifact.",
+  "diagnosticQuiz": [
+    {
+      "q": "Which statement best defines k-Nearest Neighbors?",
+      "choices": [
+        "Iteratively reassigns points to the nearest of k centroids and updates the centroids until convergence",
+        "Finds the maximum-margin hyperplane separating classes using a small set of support vectors",
+        "Predicts a query's label by majority vote (or average) among the k training points closest to it under a distance metric",
+        "Recursively partitions the feature space using information-gain splits into a tree of decision rules"
+      ],
+      "answer": 2,
+      "explanation": "k-NN's entire mechanism is \"look up the k closest stored points, then vote/average\" — no explicit model is fit. The tempting wrong answer is the k-means description (option B): both algorithms have a \"k\" and both involve distances, but k-means is unsupervised clustering that learns centroids, while k-NN is supervised and never updates anything — it just looks things up."
+    },
+    {
+      "q": "Points A=(1,1,label 0), B=(2,1,label 0), C=(4,4,label 1), D=(5,4,label 1). For query q=(2,2) with k=3 and Euclidean distance, what's the predicted label?",
+      "choices": [
+        "Label 1",
+        "Tie — needs an explicit tiebreak rule",
+        "Cannot be determined without rescaling the features first",
+        "Label 0"
+      ],
+      "answer": 3,
+      "explanation": "distances from q are B=1.00, A=1.41, C=2.83, D=3.61, so the 3 nearest are B, A, C with labels 0, 0, 1 — majority is label 0. The tempting wrong answer is \"Label 1,\" which comes from eyeballing C and D as a tight, closer-looking cluster rather than actually computing distances from the query point."
+    },
+    {
+      "q": "Why does increasing k tend to smooth k-NN's decision boundary?",
+      "choices": [
+        "Averaging the vote over more neighbors dampens any single noisy or outlier point's influence, pulling predictions toward the local (and eventually global) class proportions",
+        "It reduces the number of distance computations needed per prediction",
+        "It automatically rescales features so distance comparisons become fair",
+        "It guarantees strictly higher validation accuracy than a smaller k"
+      ],
+      "answer": 0,
+      "explanation": "a larger neighborhood means one mislabeled or outlier point can't swing the vote alone, so the boundary becomes smoother (higher bias, lower variance) — at the extreme k=n it just predicts the global majority class every time. The tempting distractor is D: larger k does not monotonically improve accuracy, it's a bias-variance tradeoff that must be tuned via validation, not maximized."
+    },
+    {
+      "q": "Which production scenario is the best fit for k-NN?",
+      "choices": [
+        "A streaming fraud detector that must run with O(1) memory and never retain historical transactions",
+        "Real-time semantic search over document embeddings, backed by an ANN index like HNSW or IVF",
+        "An embedded model on a memory-constrained IoT sensor needing sub-millisecond inference",
+        "A regulated credit-scoring model where you must report global feature coefficients to an auditor"
+      ],
+      "answer": 1,
+      "explanation": "this is exactly how vector databases and RAG retrieval work — approximate k-NN over embeddings gives strong recall at sub-linear query cost, and the \"model\" is just the stored/indexed vectors. The other three scenarios all need a compact parametric summary (coefficients, a small tree, a fixed-size model) rather than the full dataset k-NN inherently requires to make a single prediction."
+    },
+    {
+      "q": "You train a k-NN classifier on raw \"age (years)\" and \"annual income ($)\" features without scaling them. What happens?",
+      "choices": [
+        "k automatically increases to compensate for the wider income range",
+        "Training throws an error because the feature ranges are incompatible",
+        "No effect — k-NN's distance calculations are scale-invariant by design",
+        "Income dominates the distance metric, so neighbor selection is driven almost entirely by income and age is effectively ignored"
+      ],
+      "answer": 3,
+      "explanation": "Euclidean distance sums squared differences across raw feature values, so a feature spanning 0-200,000 swamps one spanning 0-100 — neighbors end up chosen almost entirely by income. Nothing errors (distractor B is wrong because k-NN has no fitting step that could fail); it silently produces worse neighbors, which is why standardizing all features before computing distances is mandatory, not optional."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "How would you productionize k-NN for a service needing sub-100ms p99 latency over 100M embeddings?",
+      "a": "Brute-force k-NN is O(n·d) per query — infeasible at 100M scale — so use an ANN index instead: FAISS with IVF+PQ for compressed, memory-efficient search, or HNSW for a strong recall/latency tradeoff, or a managed vector DB (Pinecone, Weaviate, pgvector+HNSW). Tune the recall/latency knob (`nprobe` for IVF, `ef_search` for HNSW), shard the index across nodes if it doesn't fit in memory, and monitor recall@k against a brute-force ground-truth sample to catch drift."
+    },
+    {
+      "q": "Why is k-NN especially hurt by the curse of dimensionality, and how do you mitigate it?",
+      "a": "As dimensionality grows, the ratio of nearest- to farthest-neighbor distance tends toward 1 — points become nearly equidistant, so \"nearest\" stops being a meaningful signal and neighbor sets get noisy. Mitigate by reducing dimensionality first (PCA) or, better, replacing raw features with a learned embedding from a trained encoder, and use a metric suited to that space (cosine similarity for normalized embeddings)."
+    },
+    {
+      "q": "How do you choose k in a real pipeline, and how do you validate the choice?",
+      "a": "Treat k as a hyperparameter, tuned via cross-validation (or a time-based split if there's temporal structure) over a range of odd values for binary classification, selecting the one that optimizes the validation metric — watching for the bias-variance curve rather than assuming bigger is better. In production, also weigh latency/memory cost, since larger k means aggregating more retrieved neighbors, and consider distance-weighted voting so the exact choice of k is less brittle."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "feature-scaling",
+    "supervised-learning-basics"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "b1a581a80da2d271",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T10:17:00Z"
+  }
+}

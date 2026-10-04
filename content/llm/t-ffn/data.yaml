@@ -1,0 +1,30 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: t-ffn
+type: concept
+area: Transformer Block
+order: 14
+front: What is the feed-forward network (FFN/MLP) in a block?
+back: |-
+  A per-token 2-layer MLP applied identically at every position: up-project (typically ×4 d_model) → nonlinearity (GELU / SwiGLU) → down-project.
+
+  It holds most of the parameters and much of the stored 'knowledge'. Division of labour: attention MIXES information across tokens; the FFN TRANSFORMS each token.
+more: |-
+  Attention moves information **between** tokens; the FFN does the per-token computation — applied with the same weights at every position.
+
+  ## Param count (d_model=4096, 4× expand)
+  ```
+  W_1: 4096 × 16384 ≈ 67M
+  W_2: 16384 × 4096 ≈ 67M
+  total ≈ 134M  per layer
+  ```
+  Across 32 layers that's ~4.3B params — most of a 7B model lives here. Interpretable as **key-value memory**: W_1 rows detect input patterns, W_2 columns write associated facts.
+
+  ## SwiGLU (Llama/PaLM) — three matrices
+  ```
+  FFN(x) = (Swish(x W_gate) ⊙ x W_up) W_down
+  ```
+  The extra gate matrix means hidden dim is cut to **~8/3·d** (Llama-7B uses 11008, not 16384) to keep the param budget ≈ equal to the 2-matrix version, while the gating lifts quality.
+
+  ## MoE
+  Replace the single FFN with N experts + a router that sends each token to **top-k** (often 2). Mixtral-8×7B: 8 experts, ~47B total params but only ~13B active per token — more capacity at fixed inference FLOPs.

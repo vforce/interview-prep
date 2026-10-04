@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: bitmaskdp
+fam: hard
+label: Bitmask DP
+order: 34
+trigger: state is a subset, n ≤ ~20
+insight: dp[mask] = best over the visited set; transition by adding one unused bit
+probs:
+- {n: Partition to K Equal Sum Subsets, slug: partition-to-k-equal-sum-subsets, d: M}
+- {n: Beautiful Arrangement, slug: beautiful-arrangement, d: M}
+- {n: Shortest Path Visiting All Nodes, slug: shortest-path-visiting-all-nodes, d: H}

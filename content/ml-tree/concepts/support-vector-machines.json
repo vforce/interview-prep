@@ -1,0 +1,98 @@
+{
+  "id": "support-vector-machines",
+  "title": "Support Vector Machines",
+  "definition": "A Support Vector Machine is a max-margin linear classifier — it places a decision hyperplane to maximize the distance to the nearest training points (the support vectors) by minimizing hinge loss — extended to nonlinear boundaries through the kernel trick.",
+  "summary": "SVMs frame classification as a convex optimization: maximize the margin 2/‖w‖ while allowing controlled violations via slack variables and a penalty C. Because the dual formulation depends on the data only through pairwise dot products, kernels (RBF, polynomial) let this linear-margin optimizer draw nonlinear decision boundaries without ever computing the mapped coordinates. Only the points on or inside the margin — the support vectors — determine the final boundary, unlike logistic regression, where every point contributes.",
+  "objectives": [
+    "Explain the max-margin objective, hard vs. soft margins, and what the C hyperparameter trades off.",
+    "Contrast hinge loss vs. logistic regression's log loss, and explain why SVM solutions are sparse (support vectors) while logistic regression's are dense.",
+    "Explain the kernel trick and choose between linear and RBF kernels based on data shape/dimensionality.",
+    "Know why SVMs don't natively output calibrated probabilities, and how Platt scaling works around that.",
+    "Recognize the O(n²)–O(n³) scaling limits of kernel SVMs and the standard production workarounds."
+  ],
+  "lesson": "Among all hyperplanes separating two classes, an SVM picks the one farthest from both — the widest possible street between them. A wider margin generalizes better: it's more robust to noise near the boundary and less sensitive to exactly which points you happened to sample.\n\nFormally, the decision function is `f(x) = w·x + b`. In the hard-margin case, minimize `½‖w‖²` subject to `yᵢ(w·xᵢ+b) ≥ 1` for every point. That constraint puts each class's nearest points at distance `1/‖w‖` from the hyperplane, so the margin width is `2/‖w‖` — minimizing `‖w‖` maximizes the margin.\n\nReal data usually isn't perfectly separable, so the soft-margin version adds slack `ξᵢ ≥ 0` per point: minimize `½‖w‖² + C·Σξᵢ`. C is the knob: large C ≈ hard margin — tight fit, low bias/high variance, sensitive to outliers; small C tolerates more violations — more regularization, smoother boundary.\n\nThis is equivalent to hinge loss + L2 penalty: `Σ max(0, 1 − yᵢf(xᵢ)) + λ‖w‖²`. Compare to logistic regression's `log(1+exp(−yᵢf(xᵢ)))`: hinge loss is exactly zero once a point is correctly classified beyond the margin. Only points that are wrong or barely right — the support vectors — get nonzero dual coefficients. That's the structural difference from logistic regression: SVM's solution is sparse (a subset of points defines it); logistic regression's is dense (every point nudges the weights).\n\n**Kernel trick:** the dual objective only needs dot products `xᵢ·xⱼ`. Swap in `K(xᵢ,xⱼ)=φ(xᵢ)·φ(xⱼ)` for some feature map φ, and you get a nonlinear boundary in the original space without ever computing φ(x). RBF, `K(x,z)=exp(−γ‖x−z‖²)`, is the default nonlinear kernel; γ controls locality — large γ overfits (tight bumps per support vector, like small k in kNN), small γ underfits.\n\n**Key gotcha:** feature scaling isn't optional. Margin width and RBF similarity are both Euclidean-distance-based, so one unscaled feature on a 0–50,000 range silently dominates one on a 0–1 range. Always put `StandardScaler` before the SVM in the same pipeline, fit only on the training fold.",
+  "examples": "**Example 1 — production-style pipeline (no leakage, tune C and γ together)**\n\n```python\nfrom sklearn.pipeline import make_pipeline\nfrom sklearn.preprocessing import StandardScaler\nfrom sklearn.svm import SVC\nfrom sklearn.model_selection import GridSearchCV\n\npipe = make_pipeline(StandardScaler(), SVC(kernel=\"rbf\"))\ngrid = GridSearchCV(\n    pipe,\n    param_grid={\"svc__C\": [0.1, 1, 10, 100], \"svc__gamma\": [0.001, 0.01, 0.1, 1]},\n    cv=5, scoring=\"roc_auc\", n_jobs=-1,\n)\ngrid.fit(X_train, y_train)\nprint(grid.best_params_)                                              # e.g. {'svc__C': 10, 'svc__gamma': 0.01}\nprint(len(grid.best_estimator_.named_steps[\"svc\"].support_))          # # of support vectors → proxy for inference cost\n```\nScaling lives *inside* the pipeline so each CV fold fits its own scaler — no leakage. Support-vector count is a useful signal: it grows with overfitting and directly predicts inference latency.\n\n**Example 2 — margin and hinge loss by hand**\n\nSuppose a fitted linear SVM gives `w = [3, 4], b = -5` (features already scaled).\n\n```\n||w|| = sqrt(3² + 4²) = 5\nmargin width = 2 / ||w|| = 0.4\n```\n\n```\nx = (2, 2), y = +1:  f(x) = 3·2 + 4·2 − 5 = 9   → y·f(x) = 9   → hinge loss = max(0, 1−9) = 0   (not a support vector)\nx = (2, 0), y = +1:  f(x) = 3·2 + 4·0 − 5 = 1   → y·f(x) = 1   → hinge loss = 0, exactly on the margin (a support vector)\nx = (1, 0), y = +1:  f(x) = 3·1 + 4·0 − 5 = −2  → y·f(x) = −2  → hinge loss = max(0,1−(−2)) = 3   (misclassified, penalized by C·ξ)\n```",
+  "tradeoffs": "Use kernel SVM (RBF) on small-to-medium datasets (roughly up to ~100k rows) with genuinely nonlinear structure, where a strong, well-regularized baseline matters more than interpretability or training speed. Prefer linear SVM (liblinear/`SGDClassifier(loss=\"hinge\")`) for high-dimensional sparse data like TF-IDF text, where classes are usually already near-linearly separable and O(n²) kernel methods don't scale. Avoid kernel SVM when you need calibrated probabilities cheaply (Platt scaling is a post-hoc, CV-expensive approximation), when inference latency matters (cost scales with support-vector count, not a fixed weight vector like logistic regression), or at large n, where gradient-boosted trees or a small neural net typically win on both accuracy and training/serving cost.",
+  "diagnosticQuiz": [
+    {
+      "q": "What does an SVM maximize when fitting a linear separating hyperplane?",
+      "choices": [
+        "The margin between the hyperplane and the nearest points of each class",
+        "The log-likelihood of the labels given a sigmoid of the decision function",
+        "The average distance from the hyperplane to all training points",
+        "The total number of correctly classified points, regardless of distance"
+      ],
+      "answer": 0,
+      "explanation": "SVM's objective is exactly the margin between the hyperplane and the nearest point of each class. Option C is what logistic regression optimizes instead — a common mix-up since both are linear binary classifiers with different loss functions. Options A and D sound related to \"distance\" or \"accuracy,\" but SVM specifically cares about the closest points' margin, not an average distance or raw accuracy count."
+    },
+    {
+      "q": "A linear SVM has learned w = [3, 4]. What is the margin width?",
+      "choices": [
+        "25",
+        "5",
+        "0.2",
+        "0.4"
+      ],
+      "answer": 3,
+      "explanation": "‖w‖ = √(3²+4²) = 5, and margin width = 2/‖w‖ = 2/5 = 0.4. Option A (5) is ‖w‖ itself — forgetting to invert it. Option B (0.2) is the classic gotcha: using 1/‖w‖ (distance from the hyperplane to one side of the margin) instead of 2/‖w‖ (the full margin width across both classes). Option D (25) is ‖w‖², the quantity actually being minimized in the objective, not the margin itself."
+    },
+    {
+      "q": "Why do only a subset of training points (the support vectors) determine the final SVM decision boundary?",
+      "choices": [
+        "Because points far from the boundary are treated as outliers and removed during preprocessing",
+        "Because the RBF kernel assigns zero similarity to distant points",
+        "Because SVM randomly subsamples the training set before optimization for speed",
+        "Because hinge loss is exactly zero for points already correctly classified beyond the margin, so they don't affect the dual solution"
+      ],
+      "answer": 3,
+      "explanation": "Hinge loss `max(0, 1−yf(x))` is exactly zero for any point already correctly classified beyond the margin, so it contributes a zero dual coefficient (αᵢ=0) and drops out of the solution. This sparsity holds even with a linear kernel, so the RBF-specific explanation (option C) is a tempting but wrong mechanism — it's a property of the loss function's KKT conditions, not the kernel. SVM does neither subsampling nor outlier removal."
+    },
+    {
+      "q": "You're building a text classifier over ~200k documents as sparse TF-IDF vectors (50k features). Which SVM setup is the most practical production choice?",
+      "choices": [
+        "A precomputed full kernel matrix passed directly to SVC",
+        "RBF kernel SVC with grid-searched gamma",
+        "Polynomial kernel of degree 5",
+        "Linear kernel SVM (LinearSVC/liblinear, or SGDClassifier with hinge loss)"
+      ],
+      "answer": 3,
+      "explanation": "High-dimensional sparse text data is usually already close to linearly separable, so a linear SVM trains in roughly linear time and is the standard production choice for this regime. A precomputed/RBF/polynomial kernel requires an n×n kernel matrix — 200,000² ≈ 4×10¹⁰ entries — infeasible in memory and compute, for little to no accuracy gain here."
+    },
+    {
+      "q": "You train an RBF-kernel SVC without scaling features (one feature ranges 0–1, another 0–50,000). What's the most likely symptom?",
+      "choices": [
+        "Training will get noticeably faster because distances are more spread out",
+        "Training will throw a convergence exception and refuse to fit",
+        "The kernel trick mathematically requires unscaled raw features to work correctly",
+        "The decision boundary is dominated by the large-scale feature, and the model underperforms a properly scaled version"
+      ],
+      "answer": 3,
+      "explanation": "Both the margin and RBF similarity are computed from Euclidean distances, so a feature spanning 0–50,000 silently swamps one spanning 0–1, and the model effectively ignores the smaller-scale feature. Option C is a common misconception — kernels don't require unscaled data; the opposite is true. Options A and D just don't match reality: it's a silent accuracy bug, not a crash or a speed win."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "An RBF-kernel SVM performs great offline, but production inference latency is too high. What's happening and how do you fix it?",
+      "a": "Kernel SVM inference cost scales with **number of support vectors × kernel evaluations per prediction** (`O(#SV · d)`), unlike a linear model's fixed `O(d)` dot product — so a model with many support vectors (common with small γ / poorly-tuned C on noisy data) is inherently slow to serve. Fixes, roughly in order of effort: (1) tune C/γ or clean the training data to reduce support-vector count; (2) switch to a linear kernel plus an explicit kernel approximation (Nystroem or random Fourier features) so inference becomes one fixed-size dot product; (3) distill the SVM into a smaller/faster model trained on its soft outputs; (4) sanity-check whether the accuracy gain over a plain linear SVM/logistic regression actually justifies the extra latency budget."
+    },
+    {
+      "q": "How would you get calibrated probability estimates out of an SVM, and what are the pitfalls?",
+      "a": "`SVC` doesn't optimize a probabilistic objective — `decision_function` is a signed distance to the hyperplane, not a probability. `probability=True` fits **Platt scaling**: a 1-D logistic regression on the decision-function values, estimated via an internal 5-fold CV, which multiplies training cost and is only as good as that post-hoc fit — calibration can still be poor with few support vectors or heavy class imbalance. In practice: validate with a reliability diagram/Brier score before trusting it, budget for the extra training time, and default to logistic regression (or `CalibratedClassifierCV` around a linear model) when calibrated probabilities are a hard requirement."
+    },
+    {
+      "q": "Your dataset grew from 5k to 5M rows and the SVM training pipeline that used to take minutes now doesn't finish. What do you change?",
+      "a": "Kernel SVM (SMO-based solvers like libsvm) scales roughly `O(n²)`–`O(n³)` in training time and `O(n²)` in memory for the kernel matrix — 5M rows is simply out of reach. Production path: (1) switch to a solver built for scale — `liblinear` or `SGDClassifier(loss=\"hinge\")`, which is `O(n)` per epoch; (2) if the nonlinearity is essential, approximate the kernel feature map (Nystroem/`RBFSampler`) and run a linear solver on the transformed features; (3) reconsider the model class entirely — gradient-boosted trees or a small neural net often match or beat kernel SVM at this scale with far better training/inference cost curves. This is exactly why kernel SVMs faded from large-scale industry use in favor of linear models with engineered features, then deep learning."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "feature-scaling",
+    "logistic-regression"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "f6de0bf0027a2176",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T10:20:09Z"
+  }
+}

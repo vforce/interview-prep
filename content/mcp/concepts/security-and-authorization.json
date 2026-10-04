@@ -1,0 +1,100 @@
+{
+  "id": "security-and-authorization",
+  "title": "Security and Authorization",
+  "definition": "MCP secures Streamable HTTP servers by having them act as OAuth 2.1 resource servers that discover an Authorization Server via metadata and validate audience-scoped bearer tokens on every call, while stdio servers skip that handshake entirely and rely on the OS process boundary plus environment-supplied secrets.",
+  "summary": "For network-facing (Streamable HTTP) servers, MCP doesn't invent its own auth scheme — it layers OAuth 2.1 (PKCE, protected-resource metadata, optional dynamic client registration) on top of JSON-RPC. The production-critical failure mode is \"token passthrough\": accepting a bearer token not audience-scoped to your server and forwarding it downstream, which breaks revocation, auditing, and enables confused-deputy attacks. stdio servers need none of this — the process-spawn boundary is the trust boundary, and credentials come from the environment, not a token exchange.",
+  "objectives": [
+    "Explain why stdio needs no OAuth handshake while Streamable HTTP does, in terms of trust boundaries.",
+    "Name the OAuth 2.1 role an MCP HTTP server plays and the discovery chain clients follow (protected resource metadata → authorization server metadata → token).",
+    "Identify the token-passthrough / confused-deputy anti-pattern and why audience (`aud`) validation prevents it.",
+    "Implement bearer-token validation with expiry and audience checks in Python.",
+    "Apply least-privilege scoping and short-lived tokens when designing a production MCP deployment."
+  ],
+  "lesson": "MCP's authorization model tracks its two transports: stdio never crosses a network boundary — the client launches the server as a subprocess it already controls, so the OS process boundary *is* the trust boundary, and the server just reads credentials from the environment the way any local CLI tool would. Streamable HTTP does cross a network boundary, so MCP needs a real handshake — rather than inventing one, the spec (2025-06-18) bolts on OAuth 2.1.\n\nConcretely, an HTTP MCP server acts as an OAuth resource server. A client's first unauthenticated request gets a 401 with a `WWW-Authenticate` header pointing at the server's Protected Resource Metadata document (RFC 9728). That document names the Authorization Server; the client fetches its metadata (RFC 8414), optionally dynamically registers (RFC 7591), then runs the standard Authorization Code + PKCE flow, requesting a token whose audience/resource is that specific MCP server (RFC 8707 resource indicators). Only then does the client attach `Authorization: Bearer <token>` and call a tool.\n\nThe server's job on every request is to validate that token: signature, expiry, and — the step teams actually skip — the `aud` claim. Skipping audience validation is the core gotcha. Say an MCP server fronts an internal ticketing API. The lazy implementation takes the bearer token the client sent and forwards it verbatim to the ticketing API (\"token passthrough\"). It works in a demo because the ticketing API just checks the signature. But that token was never scoped or audienced for the ticketing API by its issuer — the ticketing API can no longer tell which MCP client or end user is really behind the call, can't revoke access per-client, and any party who can reach the MCP server can now replay whatever token flows through it. That's a textbook confused-deputy: the MCP server is tricked into spending authority it was never meant to hold on the caller's behalf.\n\nThe fix is one comparison — check `aud == <this server's resource identifier>` before trusting any claim in the token — but it's the single most load-bearing line in a production MCP HTTP deployment, and the one a code review should always ask about.",
+  "examples": "### Example 1 — Resource-server side: validating the token that actually matters\n\n```python\nimport time\nimport jwt  # PyJWT\n\nRESOURCE_ID = \"https://mcp.acme.com\"  # this server's own identifier\n\ndef authorize_request(auth_header: str | None, jwks_client) -> dict:\n    \"\"\"Run on every Streamable HTTP request before touching any tool.\"\"\"\n    if not auth_header or not auth_header.startswith(\"Bearer \"):\n        raise PermissionError(\n            '401 WWW-Authenticate: Bearer resource_metadata='\n            '\"https://mcp.acme.com/.well-known/oauth-protected-resource\"'\n        )\n    token = auth_header.removeprefix(\"Bearer \")\n    key = jwks_client.get_signing_key_from_jwt(token).key\n\n    claims = jwt.decode(\n        token, key, algorithms=[\"RS256\"],\n        audience=RESOURCE_ID,   # <-- stops confused-deputy abuse; skip this and any\n    )                           #     validly signed token from anywhere works here\n    if claims[\"exp\"] < time.time():\n        raise PermissionError(\"401: token expired\")\n    return claims  # claims[\"scope\"], claims[\"sub\"] now safe to use for tool checks\n```\n\n### Example 2 — Token passthrough: anti-pattern vs. fix\n\n```python\n# ANTI-PATTERN — forwards the caller's token, unscoped, to a downstream API\ndef get_tickets_bad(incoming_bearer: str):\n    return requests.get(\"https://tickets.internal/api/tickets\",\n                         headers={\"Authorization\": incoming_bearer})\n\n# FIX — exchange for a credential scoped to the downstream service; the\n# ticketing API only ever sees a token minted/audienced for itself.\ndef get_tickets(claims: dict):\n    downstream_token = token_exchange(subject=claims[\"sub\"],\n                                       audience=\"https://tickets.internal\")\n    return requests.get(\"https://tickets.internal/api/tickets\",\n                         headers={\"Authorization\": f\"Bearer {downstream_token}\"})\n```\n\nContrast with stdio, where there's no token at all — the process boundary already did the work:\n\n```python\nimport os\ndef get_upstream_credential() -> str:\n    return os.environ[\"ACME_API_KEY\"]\n```",
+  "tradeoffs": "Full OAuth 2.1 (discovery, DCR, PKCE, audience-scoped tokens) is the right default for any Streamable HTTP server reachable by more than one trusted party — it buys per-client revocation, auditing, and scoped access. It's overkill for a single-user stdio tool: a network-style handshake defends against an attacker who isn't in that threat model, so the spec lets stdio lean on env-var secrets instead. Shortcuts like a shared static API key or token passthrough are acceptable only behind a closed network with one trusted caller — they trade away exactly the properties (revocation, audience binding) that matter with external or multi-tenant clients. Also scope this correctly: OAuth secures *who* can call the server and with what token; it says nothing about whether a tool's description or output can be trusted (prompt injection, malicious tool metadata) — that's a separate, still-open slice of MCP security.",
+  "diagnosticQuiz": [
+    {
+      "q": "In the MCP Authorization spec, what role does an MCP server play when exposed over Streamable HTTP?",
+      "choices": [
+        "An OAuth Resource Server that validates bearer tokens and discloses where clients should authenticate via protected resource metadata",
+        "An OAuth client that logs into the end user's identity provider on the user's behalf",
+        "A transport with no defined relationship to OAuth",
+        "An OAuth Authorization Server that always issues its own access tokens"
+      ],
+      "answer": 0,
+      "explanation": "MCP HTTP servers are OAuth 2.1 resource servers: they publish OAuth 2.0 Protected Resource Metadata (RFC 9728) pointing at an Authorization Server and validate whatever bearer token the client returns with. The tempting wrong answer is \"it's the Authorization Server\" — a server *can* co-locate that role, but the spec doesn't require it, and conflating the two is a common design mistake."
+    },
+    {
+      "q": "A brand-new MCP client (no cached metadata, no token) wants to call a tool on a fresh Streamable HTTP server. Roughly how many separate HTTP requests happen before it even has an access token to send?",
+      "choices": [
+        "4+ — a 401 challenge, then protected-resource metadata, authorization-server metadata, and the authorization/token exchange",
+        "0 — the transport itself is treated as trusted",
+        "2 — fetch metadata, then request a token",
+        "1 — a single login redirect returns a usable token"
+      ],
+      "answer": 0,
+      "explanation": "Discovery is a chain, not one call: the initial request 401s with a `WWW-Authenticate` pointer, the client fetches Protected Resource Metadata (RFC 9728), fetches the Authorization Server's metadata (RFC 8414), then runs the Authorization Code + PKCE exchange. Engineers used to simple API keys tend to badly underestimate this, commonly guessing \"2.\""
+    },
+    {
+      "q": "Why doesn't the MCP spec require an OAuth handshake for the stdio transport?",
+      "choices": [
+        "OAuth can only be implemented over HTTP at the protocol level",
+        "stdio connections are automatically TLS-encrypted",
+        "stdio servers are always operated by Anthropic and are pre-trusted",
+        "The client launches the server as a local subprocess it already controls, so the OS process boundary plus environment-supplied secrets already establish trust — there's no network hop to authenticate across"
+      ],
+      "answer": 3,
+      "explanation": "Authorization exists to establish trust across a boundary you don't otherwise control. With stdio the \"boundary\" is just process spawning — whoever can launch the server already has that OS-level access, so a network-style handshake adds ceremony without defending against a real attacker. Assuming stdio is encrypted is a common confusion: encryption and authorization are orthogonal concerns."
+    },
+    {
+      "q": "You're building an MCP server that only ever runs on a developer's laptop, spawned directly by their IDE, wrapping a local SQLite file. What's the appropriate authorization approach?",
+      "choices": [
+        "mTLS between client and server",
+        "Full OAuth 2.1 with dynamic client registration and PKCE",
+        "A static shared API key checked on every JSON-RPC call",
+        "Nothing beyond the stdio process boundary, plus reading any upstream credential from an environment variable"
+      ],
+      "answer": 3,
+      "explanation": "The trust boundary is already the OS process/user account — the IDE spawning the server is the same principal that owns the SQLite file. Layering OAuth or mTLS on top defends against a network attacker who isn't in this picture, pure overhead for zero risk reduction. This flips the moment the same server is exposed over a network to others."
+    },
+    {
+      "q": "An MCP server wraps an internal ticketing API. To keep the integration simple, it takes the bearer token it received from the MCP client and forwards it as-is when calling the ticketing API. What's the main production risk?",
+      "choices": [
+        "Token passthrough: the ticketing API now trusts a token it never issued or scoped for this purpose, breaking per-client revocation/audit and enabling confused-deputy abuse",
+        "Bearer tokens can't be forwarded between services; the request would simply fail",
+        "It's technically correct but slightly slower than minting a fresh token",
+        "None — as long as the connection uses TLS, forwarding is safe"
+      ],
+      "answer": 0,
+      "explanation": "The MCP spec explicitly calls out token passthrough as a disallowed anti-pattern — a token audienced for the MCP server isn't authorization for a different downstream service, and relaying it removes that service's ability to tell which real client/user is acting or revoke access individually. The \"just use TLS\" distractor confuses transport confidentiality with authorization correctness; they're independent."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "You're about to expose an MCP server over Streamable HTTP to several external customers. Walk me through how you'd handle authorization.",
+      "a": "- Treat the server as an OAuth 2.1 **resource server**, not a place to invent a bespoke token scheme.\n- Publish Protected Resource Metadata (RFC 9728) for discovery; support Authorization Server Metadata (RFC 8414) and Dynamic Client Registration (RFC 7591) so new customers don't need manual setup.\n- Require PKCE on the Authorization Code flow.\n- Request tokens audience-restricted to this server (RFC 8707) — reject any token whose `aud` isn't you.\n- On every call: verify signature, expiry, and audience before trusting any claim; map scopes to minimum tool access.\n- Short-lived access tokens, TLS everywhere, exact-match redirect URIs, audit/rate-limit by `sub` so individual customers can be revoked."
+    },
+    {
+      "q": "What is \"token passthrough\" in MCP, and why is it explicitly disallowed?",
+      "a": "It's when a server takes the bearer token it received from a client and forwards it unchanged to a downstream API instead of exchanging it for a credential scoped to that API. It's dangerous because the downstream service ends up trusting a token it never issued or audienced for that purpose — it can no longer tell which real client/user is behind the call, can't revoke or rate-limit that caller individually, and anyone who can reach your MCP server can effectively replay tokens through it. The fix is a token-exchange / on-behalf-of step: mint or exchange for a new, downstream-scoped token per call, keeping the original token's authority contained to your server's own audience."
+    },
+    {
+      "q": "A teammate says: \"our MCP server is stdio-only, spawned by our internal CLI, so we don't need to think about authorization at all.\" Do you agree?",
+      "a": "Half right. No OAuth handshake is needed — the trust boundary is the OS process spawn, which the CLI already controls, so a token exchange would defend against an attacker outside that threat model. But \"no OAuth\" isn't \"no security work\": keep secrets out of argv (`ps` can leak them — use env vars), give the process the least-privileged upstream credential it needs rather than an admin key, and re-check this the moment that \"stdio\" server is ever bridged over a socket or shared across machines — at that point the trust boundary just became a network, and the Streamable HTTP authorization requirements apply again."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "mcp-vs-alternatives",
+    "transports-stdio-vs-streamable-http"
+  ],
+  "followUps": [
+    "mcp-vs-alternatives"
+  ],
+  "metadata": {
+    "inputHash": "ffb6270a2df62bbb",
+    "model": "sonnet",
+    "generatedAt": "2026-07-06T07:24:04Z"
+  }
+}

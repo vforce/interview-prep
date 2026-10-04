@@ -1,0 +1,32 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: t-multihead
+type: concept
+area: Attention Mechanics
+order: 11
+front: Why multi-head attention instead of one big attention?
+back: |-
+  Split d_model into h heads; each does attention in a d_model/h subspace, then concatenate and project.
+
+  Different heads specialise (local syntax, coreference, positional patterns). Roughly the same compute as a single head over d_model, but richer — it attends in multiple representation subspaces at once.
+more: |-
+  One big head over d_model would force a single similarity metric. Splitting lets heads specialize.
+
+  ## Shapes (d_model=512, h=8, d_k=64)
+  ```
+  X            : (n, 512)
+  per head i:
+    W_q^i      : (512, 64)   → Q_i (n, 64)
+    same for K_i, V_i
+    head_i = softmax(Q_iK_iᵀ/√64) V_i   # √64 = 8
+    head_i     : (n, 64)
+  concat 8 heads → (n, 512)
+  W_o (512,512)  → (n, 512)
+  ```
+
+  **Compute ≈ single head over d_model**: the per-head dims sum back to 512, so total projection FLOPs are unchanged — you get richer structure for free.
+
+  ## Why it matters
+  Heads learn distinct jobs: positional/previous-token, syntactic, coreference. **Induction heads** — a previous-token head feeding a copy head — implement the pattern `[A][B]...[A]→[B]`, the mechanistic basis of in-context learning.
+
+  **Gotcha:** GQA/MQA (Llama-2 70B, etc.) share K,V across query heads to shrink the KV-cache — e.g. 64 query heads but only 8 KV heads — trading a little quality for big inference-memory savings.

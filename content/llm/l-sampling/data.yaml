@@ -1,0 +1,34 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: l-sampling
+type: concept
+area: Decoding & Reliability
+order: 4
+front: Temperature, top-k, top-p — what do they control?
+back: |-
+  They reshape the next-token distribution at decode time.
+  Temperature scales logits before softmax (↑ = more random, →0 = greedy/argmax).
+  Top-k keeps only the k highest-probability tokens.
+  Top-p (nucleus) keeps the smallest set whose cumulative probability ≥ p.
+  Tune them to trade diversity vs coherence.
+more: |-
+  ## Same logits, three temperatures
+  Softmax over logits ÷ T:
+
+  | tok | logit | T=0.5 | T=1 | T=2 |
+  |----|----|----|----|----|
+  | A | 2.0 | .87 | .64 | .46 |
+  | B | 1.0 | .12 | .24 | .28 |
+  | C | 0.0 | .02 | .09 | .17 |
+  | D | −1.0 | .00 | .03 | .10 |
+
+  T=0.5 sharpens toward the top token; T=2 flattens toward uniform. (Check at T=1: P(A) = e² / (e²+e¹+e⁰+e⁻¹) = 7.39/11.48 = .64.)
+
+  **Top-k (k=2):** keep {A, B}, renormalize, zero the rest.
+
+  **Top-p (p=0.9):** at T=1, sort and accumulate — A .64, +B .88, +C .97 ≥ .9 → nucleus {A, B, C}, drop D. The set size *adapts* to how peaked the distribution is.
+
+  **Gotchas:**
+  - T=0 is division-by-zero in the formula; implementations define it as argmax (greedy, deterministic).
+  - Order matters: temperature is applied *first*, then top-k/top-p filtering, then renormalize.
+  - Greedy can loop/repeat — chat defaults sit near T=0.7, top-p≈0.9.

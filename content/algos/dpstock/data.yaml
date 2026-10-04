@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: dpstock
+fam: dp
+label: DP Stock
+order: 27
+trigger: buy/sell stock with states (cooldown, fee, k transactions)
+insight: "model states hold / sold / rest, one rolling var each, write the transitions\n\nfor question with k days cool down: \n1) use free and hold as 2 state variables, and it's for measuring the $ in the account, not the direct answer like in other dp problems\n2) free(i) = max(free(i-1), hold(i-1) + prices(i)) # free v/s sell to get money\n   hold(i) = max(hold(i-1), free(i-2) - prices[i]) # hold more v/s buy to spend money. i-2 when cooldown=1.\n3) hold(0) = -prices(0) as the anchor, because that's the only way you could hold"
+probs:
+- {n: Best Time to Buy and Sell Stock, slug: best-time-to-buy-and-sell-stock, d: E}
+- {n: Best Time w/ Cooldown, slug: best-time-to-buy-and-sell-stock-with-cooldown, d: M}
+- {n: Best Time IV (k transactions), slug: best-time-to-buy-and-sell-stock-iv, d: H}

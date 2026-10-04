@@ -1,0 +1,28 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: l-pretraining
+type: concept
+area: Training & Alignment
+order: 0
+front: How are LLMs pretrained?
+back: |-
+  Self-supervised next-token prediction (causal language modeling): maximise the likelihood of each token given the ones before it, over trillions of tokens — no human labels.
+
+  Loss = cross-entropy. This single objective yields broad capability; instruction-tuning + RLHF align it afterward.
+more: |-
+  ## The objective, precisely
+  For tokens x₁…x_T, minimize cross-entropy:
+  ```
+  L = −(1/T) Σₜ log P(xₜ | x₁ … xₜ₋₁)
+  ```
+  Perplexity = e^L (the effective branching factor over the vocab).
+
+  **Worked token:** context `The cat sat on the ___`. If the model puts P(`mat`) = 0.4 on the true next token, that token contributes loss −ln(0.4) ≈ **0.92 nats**.
+
+  **Why no labels are needed:** the text labels itself. A causal mask lets all T positions be supervised in ONE forward pass — a 4096-token document yields 4096 next-token targets for free.
+
+  **Real scale:** GPT-3 trained on ~300B tokens; Llama 3 on ~15T. Final train loss settles around **1.5–2.0 nats/token** on diverse web text.
+
+  **Gotcha — teacher forcing:** in training the model always conditions on the *true* previous tokens. At inference it conditions on its *own* samples, so an early mistake compounds (exposure bias).
+
+  This single objective scales to broad capability; SFT + RLHF mostly realign the existing distribution rather than inject new knowledge.

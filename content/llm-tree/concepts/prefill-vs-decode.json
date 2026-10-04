@@ -1,0 +1,100 @@
+{
+  "id": "prefill-vs-decode",
+  "title": "Prefill vs Decode",
+  "definition": "Prefill is the single, compute-bound forward pass that processes an entire input prompt in parallel to populate the KV cache, while decode is the sequential, memory-bandwidth-bound loop that generates output tokens one at a time by reading and extending that cache.",
+  "summary": "LLM inference splits into two phases with opposite performance profiles: prefill processes the whole prompt at once and is compute-bound, while decode generates tokens one-by-one and is memory-bandwidth-bound, needing many concurrent requests batched together to keep the GPU busy. This asymmetry drives most production LLM-serving engineering — continuous batching, chunked prefill, disaggregated prefill/decode clusters. It also defines the two latency metrics users actually feel: time-to-first-token (TTFT, prefill-dominated) and time-per-output-token (TPOT/ITL, decode-dominated).",
+  "objectives": [
+    "Explain why prefill is compute-bound and decode is memory-bandwidth-bound, using arithmetic intensity.",
+    "Describe what each phase reads/writes in the KV cache.",
+    "Map the two phases to production latency metrics: TTFT and TPOT.",
+    "Explain why decode throughput depends on cross-request batching while prefill doesn't.",
+    "Recognize when disaggregated or chunked-prefill serving architectures are justified."
+  ],
+  "lesson": "Every LLM request runs through two phases with opposite hardware profiles.\n\n**Prefill.** When a request arrives with N prompt tokens, the model runs one forward pass over all N simultaneously — nothing autoregressive yet, since every input token is already known. This is a matrix-matrix multiply (activations `[N, hidden]` times weight matrices): each weight read from HBM is reused across all N tokens, giving high arithmetic intensity (FLOPs per byte moved). Prefill is therefore compute-bound — tensor cores stay busy — and it produces the first token plus a fully populated KV cache for the prompt.\n\n**Decode.** After prefill, tokens are generated one at a time: each step feeds the single latest token through the model, attends over the cached K/V (no recomputing the prompt), appends its own K/V, and emits the next token. Structurally this is a matrix-vector multiply per sequence — the same weights stream from HBM but are now reused for only 1 token instead of N, so arithmetic intensity collapses. Decode is memory-bandwidth-bound: most of a decode step is spent waiting on weights (and the growing KV cache) to arrive from memory, with tensor cores mostly idle.\n\n**The gotcha:** decode throughput is fixed almost entirely by batching, not by making the model \"faster.\" Batch-size-1 decode wastes nearly the whole memory-bandwidth budget re-reading weights for one token; batching 32 sequences reads those weights once and reuses them across 32 tokens, pushing arithmetic intensity back up. That's the entire justification for continuous/in-flight batching (vLLM, TensorRT-LLM). It also explains why a long prompt's prefill and many concurrent decode steps compete for the same GPU: naively mixing them lets one long prefill stall everyone else's inter-token latency (head-of-line blocking) — which is why chunked prefill exists, slicing a long prefill into pieces interleaved with other sequences' decode steps.",
+  "examples": "**1. Roofline intuition, in code**\n\n```python\n# Rough roofline estimate: prefill vs decode for a ~7B model on an A100-class GPU.\n# Ignores attention FLOPs / KV-cache traffic — illustrative, not exact.\nP = 7e9                 # parameters\nBYTES_PER_PARAM = 2     # bf16\nPEAK_FLOPS = 312e12     # bf16 tensor-core FLOP/s (A100)\nPEAK_BW = 2.0e12        # HBM bytes/s (~2 TB/s, A100)\n\ndef phase_stats(n_tokens):\n    flops = 2 * P * n_tokens            # forward-pass FLOPs\n    bytes_moved = P * BYTES_PER_PARAM   # weights streamed once, shared across n_tokens\n    compute_time = flops / PEAK_FLOPS\n    memory_time = bytes_moved / PEAK_BW\n    bound = \"compute\" if compute_time > memory_time else \"memory\"\n    return flops / bytes_moved, compute_time, memory_time, bound\n\nfor name, n in [(\"prefill (1000-tok prompt)\", 1000), (\"decode (1 token, batch=1)\", 1)]:\n    intensity, ct, mt, bound = phase_stats(n)\n    print(f\"{name}: {intensity:.0f} FLOPs/byte, compute={ct*1e3:.2f}ms, memory={mt*1e3:.2f}ms -> {bound}-bound\")\n\n# prefill (1000-tok prompt): 1000 FLOPs/byte, compute=44.87ms, memory=7.00ms -> compute-bound\n# decode (1 token, batch=1): 1 FLOPs/byte, compute=0.04ms, memory=7.00ms -> memory-bound\n```\nSame weight-read cost (~7ms memory floor) either way — prefill just amortizes it over 1000 tokens, decode over 1.\n\n**2. What the shapes look like with a real KV cache API**\n\n```python\n# Prefill: one call over the whole prompt, builds the KV cache\nout = model(input_ids=prompt_ids, use_cache=True)   # prompt_ids: [batch, N]\npast = out.past_key_values                          # K/V for every prompt token\nnext_token = sample(out.logits[:, -1])\n\n# Decode: one call per generated token, reusing the cache\ngenerated = [next_token]\nfor _ in range(max_new_tokens - 1):\n    out = model(input_ids=next_token, past_key_values=past, use_cache=True)  # next_token: [batch, 1]\n    past = out.past_key_values                       # cache grows by 1 token\n    next_token = sample(out.logits[:, -1])\n    generated.append(next_token)\n```\n`[batch, N]` vs `[batch, 1]` is the whole reason the two phases have different compute profiles.",
+  "tradeoffs": "Longer prompts push more work into prefill — good GPU utilization even at batch size 1, but higher TTFT. Decode needs many concurrent requests batched to stay efficient, so low-concurrency serving wastes GPU capacity during generation, and KV-cache memory (not compute) is usually the real cap on how large that batch can get. Disaggregating prefill and decode onto separate pools lets each be scaled/hardware-tuned independently and stops long prefills from stalling other users' decode — but it adds KV-cache transfer and orchestration overhead, so it only pays off at real scale; for a small single-GPU deployment, chunked prefill on a shared pool is the simpler fix for head-of-line blocking. Also note the throughput/latency knob: bigger decode batches raise aggregate tokens/sec but raise each user's per-token latency (TPOT) too — tune to an SLA, not to raw throughput.",
+  "diagnosticQuiz": [
+    {
+      "q": "In LLM inference, what does the \"prefill\" phase do?",
+      "choices": [
+        "Quantizes model weights before serving",
+        "Generates output tokens one at a time using cached keys/values",
+        "Re-ranks candidate completions after decoding finishes",
+        "Processes the entire input prompt in one forward pass and populates the KV cache"
+      ],
+      "answer": 3,
+      "explanation": "Prefill is the single forward pass over all prompt tokens, run before any generation, that produces the first logits and populates the KV cache for the whole prompt. The tempting wrong answer is A, which is actually the definition of decode — mixing up the two terms is the most common confusion here."
+    },
+    {
+      "q": "A 7B-parameter model in bf16 streams ~14GB of weights per forward pass. On a GPU with ~2TB/s memory bandwidth, what is the approximate memory-bound time floor for a single batch-1 decode step?",
+      "choices": [
+        "~156ms",
+        "~7ms",
+        "~0.04ms",
+        "~45ms"
+      ],
+      "answer": 1,
+      "explanation": "14e9 bytes / 2e12 bytes/s ≈ 7ms — that's the time just to stream the weights once, which dominates decode since only 1 token's worth of compute reuses that read. ~0.04ms is the tempting wrong answer: it's the *compute*-bound time for that same token, and picking it reflects the misconception that FLOPs (not memory bandwidth) determine decode latency."
+    },
+    {
+      "q": "Why does decode throughput depend so heavily on batching multiple requests together, while a single prefill request already uses the GPU efficiently on its own?",
+      "choices": [
+        "The GPU cannot execute an autoregressive loop at all without batching multiple sequences",
+        "Decode kernels are implemented in a slower, unoptimized code path compared to prefill",
+        "Decode uses quadratic self-attention, so it needs batching to stay sub-quadratic",
+        "Decode reads the same weights but reuses them for only one token per sequence, so batching many sequences is the only way to raise arithmetic intensity back up"
+      ],
+      "answer": 3,
+      "explanation": "Prefill reuses one weight-read across every prompt token (high arithmetic intensity, compute-bound); a lone decode step reuses that same read across only one token (memory-bound, tensor cores idle). Batching sequences together lets one weight read serve many tokens at once — exactly what continuous batching exploits. The tempting wrong answer is A: attention's quadratic cost applies to both phases and isn't what specifically forces decode into cross-request batching."
+    },
+    {
+      "q": "A service handles huge-prompt/short-answer RAG traffic and short-prompt/long-answer chat traffic on the same GPUs at high QPS, and long prefills are visibly stalling other users' token streaming. Which change most directly targets this?",
+      "choices": [
+        "Switch to a smaller model to reduce FLOPs",
+        "Physically separate prefill and decode onto different GPU pools (\"disaggregated serving\"), transferring the KV cache between them",
+        "Increase the model's context window",
+        "Reduce sampling temperature to shorten outputs"
+      ],
+      "answer": 1,
+      "explanation": "Disaggregating compute-bound prefill from memory-bound decode lets each be scaled and tuned independently and stops long prefills from blocking other sequences' decode steps on a shared GPU (or chunked prefill can achieve similar fairness on one pool). The tempting wrong answer is A — shrinking the model lowers cost generally but doesn't resolve the scheduling conflict between the two phases competing for the same GPU."
+    },
+    {
+      "q": "A team raises the max decode batch size to increase total tokens/sec throughput. What side effect should they expect?",
+      "choices": [
+        "Time-to-first-token (TTFT) will improve for every request",
+        "Per-token latency (TPOT) for each individual user will increase, even as aggregate throughput rises",
+        "KV-cache memory usage will decrease",
+        "Prefill will become memory-bound instead of compute-bound"
+      ],
+      "answer": 1,
+      "explanation": "Bigger decode batches raise arithmetic intensity and aggregate throughput, but each forward pass now does more total work, so wall-clock time per decode step — and each user's per-token latency — goes up. The tempting wrong answer is D: it assumes batching is a uniform win, but TTFT is governed by prefill/queueing, not decode batch size, and can even worsen under contention; KV-cache memory also grows, not shrinks, with more concurrent sequences."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Why is decode typically the throughput bottleneck in LLM serving, and what's the standard production fix?",
+      "a": "Decode is memory-bandwidth-bound — each step streams the full weight set (plus the KV cache) from HBM to process just one new token per sequence, so tensor cores sit mostly idle. The standard fix is **continuous (in-flight) batching**: pack many concurrent requests' decode steps into the same forward pass so one weight read serves many tokens, raising arithmetic intensity and GPU utilization. This is usually memory-*capacity*-bound too, since batch size is capped by how much KV cache fits in HBM — which is why efficient KV-cache memory management (e.g. paged KV cache) is often the real lever, not just \"add more batching.\""
+    },
+    {
+      "q": "You're serving both long-document RAG queries and short chatty queries on shared GPUs, and users report inconsistent inter-token latency. How would you architect this?",
+      "a": "Diagnose first: a long prefill from a RAG request is likely monopolizing a batch iteration and stalling other users' decode steps (head-of-line blocking). Two standard fixes, in order of complexity: (1) **chunked prefill** — split long prompts into chunks interleaved with ongoing decode steps on the same pool, cheaper to operate; (2) at real scale, **disaggregated serving** — separate prefill and decode onto different GPU pools sized/tuned for their own bottleneck (compute vs memory), transferring the KV cache between them. I'd pick chunked prefill first unless traffic volume justifies the added transfer/orchestration cost of disaggregation."
+    },
+    {
+      "q": "How do you explain to a non-ML stakeholder why a long input document takes a while to return the *first* token, but tokens then stream out quickly and steadily?",
+      "a": "The first token requires reading the entire document in one pass to build context (prefill) — that's compute-bound work that scales with document length, so time-to-first-token grows with prompt size. Every token after that is a cheap incremental step reusing all that prior work (decode) — but each step still has a floor latency from having to stream the model's weights from memory, so once streaming starts, tokens arrive at a roughly constant, fairly fast rate independent of how long the document was."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "kv-cache",
+    "sampling-and-decoding"
+  ],
+  "followUps": [
+    "kv-cache"
+  ],
+  "metadata": {
+    "inputHash": "f90067575b045849",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T14:12:31Z"
+  }
+}

@@ -1,0 +1,30 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: k-kv-tricks
+type: concept
+area: Inference & KV Cache
+order: 20
+front: Ways to reduce KV-cache pressure?
+back: |-
+  • GQA/MQA — fewer K/V heads.
+  • KV-cache quantization — store K/V in int8/fp8.
+  • Sliding-window / local attention — cap attended history.
+  • PagedAttention (vLLM) — non-contiguous paged storage: less fragmentation, easy sharing/prefix-reuse.
+  • Evict or compress old tokens.
+more: |-
+  ## PagedAttention: KV as virtual memory
+
+  Naive serving reserves one **contiguous buffer per request at `max_seq_len`**. A request that uses 200 of 2048 slots wastes the rest (internal fragmentation), and leftover gaps can't be reused across requests (external). vLLM's paper measured **60–80% of KV memory wasted**.
+
+  PagedAttention stores KV in fixed **16-token blocks** via a block table (OS-style paging), so allocation tracks *actual* length:
+
+  | Storage | Reserve | Used | Waste |
+  |---|---|---|---|
+  | Contiguous (max 2048) | 2048 | 200 | ~90% |
+  | Paged (16-tok blocks) | 208 | 200 | <4% |
+
+  `ceil(200/16)·16 = 208` slots. Waste drops from ~90% to <4% → **several× more concurrent sequences** in the same HBM, plus free **prefix sharing** (one copy of a shared system prompt's KV across requests).
+
+  **Other levers:** GQA/MQA (fewer KV heads), **quantization** (int8/fp8 KV ≈ ½–¼ the bytes), sliding-window (Mistral's 4096), eviction.
+
+  **Quant gotcha:** K is more sensitive than V — keys feed the softmax, so key outliers distort attention scores. Methods like KVQuant quantize K **per-channel and pre-RoPE** while V tolerates coarser per-token quant.

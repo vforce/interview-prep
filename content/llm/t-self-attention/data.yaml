@@ -1,0 +1,31 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: t-self-attention
+type: concept
+area: Attention Mechanics
+order: 10
+front: How does self-attention work (Q, K, V)?
+back: |-
+  Each token is projected to Query, Key, Value vectors.
+  Scores = softmax(Q·Kᵀ / √d_k); output = scores · V.
+
+  The √d_k scaling keeps softmax gradients stable. Every token attends to every other → models long-range dependencies, at O(n²) cost in sequence length.
+more: |-
+  ## Why divide by √d_k
+  If q,k components are iid mean-0 var-1, then `q·k` sums d_k terms → variance **d_k**, std **√d_k**. Unscaled, logits grow with dimension and push softmax into saturation where gradients vanish. Dividing by √d_k restores unit variance.
+
+  ## Trace (1 query, d_k=2)
+  ```
+  q  = [1, 1]
+  k1 = [1, 1]   k2 = [1, -1]
+  raw   = q·kᵀ      = [2, 0]
+  scaled= /√2       = [1.41, 0]
+  softmax           = [0.80, 0.20]
+  out = 0.80·v1 + 0.20·v2
+  ```
+  The query "votes" 80/20 toward v1 because k1 aligns with q.
+
+  **Shapes:** Q,K,V are `(n, d_k)`; scores `(n, n)`; output `(n, d_k)`.
+
+  ## FlashAttention
+  The O(n²) score matrix is the memory bottleneck. FlashAttention tiles Q/K/V into blocks and computes softmax **online** (running max + sum), never materializing the n×n matrix → memory **O(n)** instead of O(n²), and faster via fewer HBM reads. Same exact result, no approximation.

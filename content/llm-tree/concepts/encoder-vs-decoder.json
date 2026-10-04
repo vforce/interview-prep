@@ -1,0 +1,96 @@
+{
+  "id": "encoder-vs-decoder",
+  "title": "Encoder vs Decoder",
+  "definition": "An encoder builds a representation of an entire input using bidirectional self-attention (every position attends to every position), while a decoder generates output autoregressively using causal self-attention (each position attends only to itself and earlier positions) — the two are used alone (BERT-style encoder, GPT-style decoder) or combined via cross-attention (T5-style encoder-decoder).",
+  "summary": "The only structural difference between an encoder block and a decoder block is the self-attention mask — full/bidirectional for encoders, causal for decoders — everything else (heads, FFN, residuals) is the same. That single difference dictates the pretraining objective (masked language modeling vs. causal next-token prediction), whether the model can generate at all, and its production fit: encoders for embeddings/classification, decoders for generation, encoder-decoders for fixed input→output transduction like translation. Decoder-only has become the default for general-purpose production LLMs because its training objective exactly matches what happens at inference.",
+  "objectives": [
+    "Explain the bidirectional-vs-causal attention-mask difference between encoders and decoders.",
+    "Connect each architecture to its pretraining objective (MLM vs. causal LM) and to a concrete production use case.",
+    "Recognize the future-token-leakage bug caused by missing or misapplied causal masking.",
+    "Justify why decoder-only architectures dominate current production LLMs, and when encoder-only or encoder-decoder is still the better choice."
+  ],
+  "lesson": "An encoder and a decoder differ only in what each position is *allowed to see* during self-attention — everything else (multi-head attention, FFN, residuals, layer norm) is identical. Encoder self-attention is bidirectional: position `i` computes attention scores against every position in the sequence, so its output representation is informed by both left and right context. Decoder self-attention is causal: position `i` is masked so it can only score against positions `≤ i`. That single masking difference determines the training objective, the use case, and the inference cost of everything built on top.\n\nBidirectional context is what makes encoders good at *understanding*: a token's final representation reflects the whole sentence, ideal for classification, NER, and embeddings (BERT-style masked language modeling — predict a randomly masked token from both directions — is only possible because of this). Decoders trade that away for the ability to *generate*: because position `i` never saw position `i+1..n`, the exact same forward pass used at training time (predict token `t+1` from tokens `1..t`) is what happens at inference, one token at a time. Encoder training and inference don't match this way — you can't ask a BERT-style model to sample text token-by-token, because at inference the \"future\" tokens genuinely don't exist yet, whereas at training they were visible through attention.\n\nThat mismatch is the classic gotcha: if you build or fine-tune a generative model and forget to apply the causal mask (or apply it only at inference, not during training), training loss will look *suspiciously good* — the model is peeking at the token it's supposed to predict through self-attention — and generation will then be incoherent, because at inference there's nothing left to peek at. Nothing crashes, the loss curve looks great, and only generation quality reveals the bug. The fix and the regression test are the same idea: verify that changing a token at position `j` never changes the logits at any position `i < j`.\n\nEncoder-decoder models (T5, BART, the original Transformer) use both: a bidirectional encoder reads the full input once, and a causal decoder generates the output, attending back to the encoder's output via a separate cross-attention sub-layer at every decoder layer.",
+  "examples": "### 1. Attention masks, side by side\n\nFor a 4-token sequence, `1` = attend allowed, `0` = blocked (before adding `-inf` and taking softmax):\n\n```\nEncoder (bidirectional)      Decoder (causal)\n      k1 k2 k3 k4                  k1 k2 k3 k4\nq1 [  1  1  1  1 ]           q1 [  1  0  0  0 ]\nq2 [  1  1  1  1 ]           q2 [  1  1  0  0 ]\nq3 [  1  1  1  1 ]           q3 [  1  1  1  0 ]\nq4 [  1  1  1  1 ]           q4 [  1  1  1  1 ]\n```\n\nEvery encoder query sees every key; each decoder query sees only keys at or before its own position.\n\n### 2. Implementing + regression-testing the causal mask\n\n```python\nimport torch\n\ndef causal_mask(n):\n    return torch.tril(torch.ones(n, n, dtype=torch.bool))  # True = allowed\n\ndef masked_attention(q, k, v, mask):\n    d_k = q.shape[-1]\n    scores = q @ k.transpose(-2, -1) / d_k ** 0.5\n    scores = scores.masked_fill(~mask, float(\"-inf\"))\n    return torch.softmax(scores, dim=-1) @ v\n\n# Production sanity check: a causal model's logits at position i must be\n# invariant to any change at position j > i. This catches a masking bug\n# that the loss curve won't show you.\nlogits_before = model(input_ids).logits[0, 2]\ninput_ids[0, 3] = other_token_id          # mutate a *future* token\nlogits_after = model(input_ids).logits[0, 2]\nassert torch.allclose(logits_before, logits_after), \"future tokens are leaking!\"\n```\n\n`torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)` builds this same mask internally — that's the version you'd actually ship.",
+  "tradeoffs": "Encoder-only: cheapest, single-forward-pass, genuinely bidirectional — the right default for embeddings, classification, and retrieval/reranking; it cannot generate. Decoder-only: one architecture covers both understanding (via prompting) and generation, which is why it dominates general-purpose production LLMs, but generation is inherently sequential (KV-cache, per-token latency) and its hidden states are left-context-only, so it's a weaker embedder unless specifically adapted. Encoder-decoder: still efficient for fixed, asymmetric input→output tasks (translation, summarization, structured extraction), but it's two stacks to serve and has largely lost general chat/agent use cases to decoder-only-plus-long-context. Default to decoder-only unless you have a narrow transduction task or a pure-embedding need.",
+  "diagnosticQuiz": [
+    {
+      "q": "What is the core architectural difference between encoder self-attention and decoder self-attention in a Transformer?",
+      "choices": [
+        "Encoder attention is bidirectional (every position attends to all positions); decoder attention is causal (a position attends only to itself and earlier positions)",
+        "Encoder blocks have more attention heads per layer than decoder blocks",
+        "Encoders are only used for images; decoders are only used for text",
+        "Encoder attention uses additive attention scores; decoder attention uses scaled dot-product scores"
+      ],
+      "answer": 0,
+      "explanation": "The distinction is entirely about the attention mask applied to the same scaled dot-product mechanism, not a different scoring function, head count, or modality. The misconception in the \"additive vs. dot-product\" distractor is assuming the two use fundamentally different math — in practice both compute identical `QKᵀ/√d` scores; only which entries get masked to `-inf` before the softmax differs."
+    },
+    {
+      "q": "A decoder processes a sequence of length 5 with a standard causal mask (a position may attend to itself and all earlier positions). Out of the 25 total (query, key) pairs, how many are allowed?",
+      "choices": [
+        "15",
+        "10",
+        "20",
+        "25"
+      ],
+      "answer": 0,
+      "explanation": "Query position `i` (1-indexed) may attend to `i` keys, so allowed pairs sum to 1+2+3+4+5 = 15 = n(n+1)/2. The distractor 10 (=1+2+3+4) is the classic off-by-one mistake of forgetting a token is allowed to attend to itself, not just to strictly earlier tokens."
+    },
+    {
+      "q": "Why can't a bidirectional encoder like BERT be fine-tuned to autoregressively generate free text without changing its attention pattern?",
+      "choices": [
+        "During training, every position can already attend to the future tokens it would be asked to predict, so it would learn to copy rather than predict from left context alone",
+        "It doesn't have enough parameters to produce coherent output",
+        "It lacks positional embeddings, so it can't track token order",
+        "Its tokenizer can only produce tokens in a fixed, non-sequential order"
+      ],
+      "answer": 0,
+      "explanation": "Bidirectional self-attention makes \"future\" tokens directly visible during training, so a naive next-token loss is trivially solved by attending straight to the answer — this never generalizes to inference, where those tokens don't exist yet. The parameter-count distractor reflects a common but wrong instinct that generation is a scale problem rather than a masking/objective problem."
+    },
+    {
+      "q": "You need to embed millions of documents offline and embed incoming queries with tight request-time latency for semantic search. Which architecture should you reach for by default?",
+      "choices": [
+        "Any autoregressive decoder model, using its last hidden state directly with no adaptation",
+        "A full encoder-decoder model, discarding the encoder and using only the decoder's output",
+        "A large decoder-only chat model, prompted to describe the text and using that description as the embedding",
+        "An encoder-only bidirectional model (e.g., a sentence-transformer) producing one pooled embedding per forward pass"
+      ],
+      "answer": 3,
+      "explanation": "Encoder-only models are built for exactly this: one forward pass yields a genuinely bidirectional, poolable representation, at a fraction of the compute of a generative LLM. The \"last hidden state\" distractor is a common misconception — a causal model's last-token state did see the whole sequence, but the model was never trained to make that state similarity-comparable, so using it raw typically underperforms a purpose-built encoder."
+    },
+    {
+      "q": "A custom decoder-only model's training loss drops much faster than expected and looks unusually good, but text generated at inference time is incoherent. What is the most likely cause?",
+      "choices": [
+        "The model was trained for too many epochs",
+        "The learning rate is set too high",
+        "The vocabulary size is too small for the dataset",
+        "The causal mask was not correctly applied during training, so the model could attend to the tokens it was supposed to predict"
+      ],
+      "answer": 3,
+      "explanation": "Suspiciously low loss paired with broken generation is the signature of information leakage through a missing or misapplied causal mask — the model \"solves\" training by peeking at future tokens, which don't exist at inference. A high learning rate is a plausible first guess many engineers reach for, but it typically produces unstable or high loss, not an artificially good-looking training curve."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Why do most modern general-purpose production LLMs (GPT, LLaMA, Mistral, and similar) use a decoder-only architecture instead of the original encoder-decoder Transformer?",
+      "a": "- Training/inference match: the causal next-token objective used in pretraining is exactly what happens at generation time, so there's no objective mismatch to work around.\n- One stack does both jobs: prompting lets the same weights \"understand\" (in-context learning) and generate, so you don't maintain a separate encoder for every task.\n- Simplest serving story: one attention pattern, one KV cache, weights reused across tasks via prompting instead of retraining task-specific heads.\n- Trade-off worth naming: you pay for this with strictly sequential, per-token generation and with hidden states that are inherently left-context-only, so decoder-only isn't automatically right for pure embedding/classification workloads."
+    },
+    {
+      "q": "How would you produce high-quality embeddings if the only model available is a decoder-only LLM?",
+      "a": "- Prefer swapping in a dedicated encoder-only/bi-encoder model — cheaper, and its hidden states are bidirectional by construction, which is what a similarity embedding wants.\n- If you must reuse the LLM, take the *last* token's hidden state (the one position that attended to the whole sequence under causal masking) and pool/normalize it — never an early or middle token's state.\n- For real quality, adapt the model with a contrastive fine-tuning objective specialized for embeddings (the approach behind e.g. E5-mistral / LLM2Vec-style methods) rather than using off-the-shelf hidden states.\n- Flag the cost trade-off: a full LLM forward pass per embedding is usually far more expensive than a small bi-encoder for equal or worse retrieval quality."
+    },
+    {
+      "q": "How would you debug a suspected masking bug (future-token leakage) in a decoder implementation, and prevent it from reaching production?",
+      "a": "- Run a forward pass, record logits at position `i`; mutate a token at position `j > i`; rerun and assert logits at `i` are unchanged (`torch.allclose`) — a leak shows up immediately, unlike in the loss curve.\n- Directly inspect the additive mask tensor fed into the softmax — it should be a large negative value everywhere above the diagonal, per batch and per head.\n- Treat \"training loss looks unusually good\" plus \"generation is bad\" as a leakage smell, and add the position-invariance check above as a permanent CI regression test so a future refactor can't silently reintroduce it."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "transformer-overview"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "faecc5f3f7f91dee",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T13:41:27Z"
+  }
+}

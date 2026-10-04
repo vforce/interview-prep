@@ -1,0 +1,87 @@
+{
+  "id": "lora-and-fine-tuning",
+  "title": "LoRA and Fine-Tuning",
+  "definition": "LoRA (Low-Rank Adaptation) fine-tunes a pretrained model by freezing its original weight matrices and training a small pair of low-rank matrices (B·A) whose product is added to each targeted weight as ΔW, instead of updating the full weight matrix directly.",
+  "summary": "LoRA is the dominant parameter-efficient fine-tuning (PEFT) method: freeze W, learn ΔW = BA where B and A are thin matrices of rank r ≪ d, and train only A/B. This cuts trainable parameters and optimizer memory by orders of magnitude, makes fine-tuning multi-billion-parameter models feasible on a single GPU (especially combined with 4-bit quantization as QLoRA), and lets one base model serve many cheap, swappable task/customer adapters in production.",
+  "objectives": [
+    "Explain what problem LoRA solves relative to full fine-tuning, RLHF, and instruction tuning.",
+    "Compute the trainable-parameter reduction from a weight matrix's low-rank decomposition.",
+    "Explain why B is zero-initialized and why a merged LoRA adapter adds zero inference latency.",
+    "Compare LoRA/QLoRA against full fine-tuning and classic adapters for a production serving decision.",
+    "Diagnose common failure modes (wrong target modules, rank too small, wrong LR) in an underperforming LoRA run."
+  ],
+  "lesson": "Full fine-tuning updates every entry of a weight matrix W. Empirically, the *update* a task needs (ΔW) tends to have low \"intrinsic rank\" — you can approximate it well with a low-rank matrix. LoRA exploits this directly: freeze W, and learn ΔW = BA, where B ∈ R^{d×r}, A ∈ R^{r×k}, r ≪ d,k. The forward pass becomes:\n\n```\nh = Wx + (alpha/r) * (B @ A) @ x\n```\n\nOnly A and B receive gradients — W never moves. Since Adam needs momentum + variance buffers per *trainable* parameter, shrinking the trainable set also shrinks optimizer memory, not just parameter count.\n\n**Worked example.** Take an attention projection W_q of shape 4096×4096 (a 7B-scale model). Full fine-tuning: 16,777,216 trainable params in that matrix alone. LoRA at r=8: B is 4096×8, A is 8×4096 → 8·(4096+4096) = 65,536 trainable params — **256× fewer**. Multiply that across ~200 linear layers in a real model, and the difference between \"fits on one GPU\" and \"needs a cluster\" often comes down to exactly this.\n\n**Key gotcha.** B is initialized to all zeros (A gets small random values), so ΔW = BA = 0 at step zero — training starts *exactly* at pretrained behavior, not a random perturbation. This is required for stability, not just convenience. The second, interview-favorite gotcha: LoRA shrinks trainable-parameter and optimizer memory, but the frozen base model still has to sit in GPU memory in full (fp16/bf16) for the forward/backward pass — LoRA alone doesn't shrink *that*. \"Fine-tune a 70B model on a laptop\" requires QLoRA (4-bit-quantized frozen base + LoRA adapters on top), not vanilla LoRA. Finally, because ΔW is purely additive and linear, you can fold it back in after training — `W' = W + (alpha/r)·B@A` — deleting A and B with zero added inference cost, unlike bottleneck adapters, which insert a nonlinearity mid-layer and can't be merged away.",
+  "examples": "**1. LoRA linear layer from scratch (PyTorch)**\n\n```python\nimport torch, torch.nn as nn\n\nclass LoRALinear(nn.Module):\n    def __init__(self, base: nn.Linear, r=8, alpha=16):\n        super().__init__()\n        self.base = base\n        for p in self.base.parameters():\n            p.requires_grad = False              # freeze pretrained weight\n        d_out, d_in = base.weight.shape\n        self.A = nn.Parameter(torch.randn(r, d_in) * 0.01)\n        self.B = nn.Parameter(torch.zeros(d_out, r))   # zero init -> ΔW=0 at start\n        self.scale = alpha / r\n\n    def forward(self, x):\n        return self.base(x) + self.scale * (x @ self.A.T @ self.B.T)\n\n    @torch.no_grad()\n    def merge(self):\n        self.base.weight += self.scale * self.B @ self.A   # zero-latency deploy\n```\n\n**2. Production framing: HF PEFT + quantized base (QLoRA-style) on Llama-2-7B**\n\n```python\nfrom peft import LoraConfig, get_peft_model\nfrom transformers import AutoModelForCausalLM\n\nmodel = AutoModelForCausalLM.from_pretrained(\n    \"meta-llama/Llama-2-7b-hf\", load_in_4bit=True)      # frozen base, quantized -> QLoRA\n\nconfig = LoraConfig(\n    r=16, lora_alpha=32,\n    target_modules=[\"q_proj\", \"v_proj\"],   # LoRA paper: q,v alone captures most of the gain\n    lora_dropout=0.05, task_type=\"CAUSAL_LM\",\n)\nmodel = get_peft_model(model, config)\nmodel.print_trainable_parameters()\n# trainable params: 8,388,608 || all params: 6,738,415,616 || trainable%: 0.12%\n```",
+  "tradeoffs": "LoRA trades a usually-small quality gap versus full fine-tuning for ~100–1000× fewer trainable parameters, far less optimizer/gradient memory, faster iteration, and cheap multi-tenant serving (swap a small adapter instead of hosting N full model copies). It does *not* shrink the frozen base model's own memory footprint — pair it with 4-bit quantization (QLoRA) if the base model itself doesn't fit. Reach for full fine-tuning instead when the task needs a large representational shift (new language, major domain change) that a low-rank constraint on ΔW caps, or when you want one merged artifact with zero adapter-management overhead and compute isn't the binding constraint.",
+  "diagnosticQuiz": [
+    {
+      "q": "What is LoRA, at its core, as a fine-tuning technique?",
+      "choices": [
+        "Insert a bottleneck adapter block with a nonlinearity after each transformer layer and train only that block",
+        "Replace fine-tuning entirely with prompt engineering and in-context examples",
+        "Freeze the pretrained weights and learn a low-rank update ΔW = BA that's added to the frozen weight matrix",
+        "Quantize all weights to 4-bit and continue training every parameter"
+      ],
+      "answer": 2,
+      "explanation": "LoRA's defining move is freezing W and learning an additive low-rank correction BA, training only A and B. The last option describes classic Houlsby-style adapters — a real, different PEFT method — and is the most common source of confusion, since adapters also freeze the base model but add sequential nonlinear blocks that (unlike LoRA) can't be merged away at inference."
+    },
+    {
+      "q": "A weight matrix is 4096×4096. With LoRA rank r=8, how many trainable parameters does the update introduce, versus full fine-tuning of that matrix?",
+      "choices": [
+        "LoRA: 4,096 vs. Full: 16,777,216",
+        "LoRA: 8,388,608 vs. Full: 16,777,216 (roughly half)",
+        "LoRA: 16,777,216 vs. Full: 16,777,216 (LoRA doesn't reduce parameter count)",
+        "LoRA: 65,536 vs. Full: 16,777,216"
+      ],
+      "answer": 3,
+      "explanation": "Trainable params = r·(d+k) = 8·(4096+4096) = 65,536, versus d·k = 16,777,216 for full fine-tuning — about 256× fewer. The common mistake is assuming LoRA cuts parameters by some fixed fraction like \"half\"; the reduction actually scales with the rank-to-dimension ratio, which is why r is such a consequential hyperparameter."
+    },
+    {
+      "q": "Why is the B matrix initialized to all zeros while A gets small random values?",
+      "choices": [
+        "Because zero-initialized matrices train faster due to an Adam-specific warm-start effect",
+        "Because both A and B must be zero for the low-rank decomposition BA to be mathematically valid",
+        "To guarantee the rank of BA is exactly r",
+        "So that ΔW = BA = 0 at initialization, meaning training starts exactly at the pretrained model's behavior with no destabilizing jump before the first gradient step"
+      ],
+      "answer": 3,
+      "explanation": "Zero-initializing B forces the adapted model to be identical to the pretrained model at step zero, which avoids destabilizing the model with a random ΔW before any learning has happened. The rank of BA is a structural property of the matrix shapes (r ≪ d,k), not of the initialization values — that's the misconception in the last option."
+    },
+    {
+      "q": "You need one base model to serve 50 enterprise customers with different fine-tuned behaviors, cheaply. When does plain LoRA (no quantization) fit, and when would you reach for something else?",
+      "choices": [
+        "LoRA is the wrong tool here; you should fully fine-tune and host 50 separate model copies",
+        "LoRA can't be used for multi-tenant serving because adapters can't be swapped at runtime",
+        "LoRA requires merging all 50 adapters into one weight matrix before serving, so per-customer behavior isn't actually possible",
+        "LoRA fits well here — train one small adapter per customer on a shared frozen base and hot-swap/batch adapters at serving time; reach for QLoRA instead only if the base model itself doesn't fit in available GPU memory"
+      ],
+      "answer": 3,
+      "explanation": "Cheap, swappable per-customer adapters on one shared base is exactly LoRA's headline production use case (e.g., vLLM/S-LoRA-style multi-adapter serving). QLoRA only becomes necessary when the *base model itself* doesn't fit in memory unquantized — it's an orthogonal axis (base precision), not a requirement for multi-adapter serving."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Walk me through how you'd serve 50 different enterprise customers' fine-tuned behavior on top of one 70B base model without hosting 50 full copies.",
+      "a": "Train one LoRA adapter per customer on a shared frozen base — each adapter is a few MB (just A/B matrices for the targeted layers), versus tens of GB for a full model copy. Serve with a multi-LoRA-aware stack (e.g., vLLM or S-LoRA) that keeps one copy of the base weights resident and dynamically batches requests against different adapters, applying each request's B·A on the fly. This gets near full-fine-tune quality per customer at a fraction of the storage and GPU footprint of 50 separate deployments."
+    },
+    {
+      "q": "Your team needs to fine-tune a 13B model on a single 24GB GPU. What's the plan, and what's the tradeoff?",
+      "a": "QLoRA: load the frozen base quantized to 4-bit (NF4, double quantization) and train LoRA adapters in bf16/fp32 on top, using paged optimizers to absorb memory spikes. Tradeoff: some quality loss from quantization noise (typically small per the QLoRA paper) and a small dequantize-on-the-fly compute overhead in the forward pass — in exchange for turning an otherwise-infeasible fine-tune into one that fits on commodity hardware."
+    },
+    {
+      "q": "A LoRA fine-tune isn't picking up a new output format even after many epochs — what do you check?",
+      "a": "In order: (1) target_modules — if LoRA is only on q_proj/v_proj, extend to k_proj/o_proj and the MLP layers, since format/style shifts often need MLP capacity, not just attention; (2) rank r — too small underfits the needed update, try scaling up (e.g., 8→32) with alpha scaled proportionally; (3) learning rate — LoRA runs typically need a noticeably higher LR than full fine-tuning since only a small parameter subset is moving; (4) data — confirm the training examples actually demonstrate the target format in sufficient quantity, since no PEFT config fixes a data problem."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "pretraining",
+    "rlhf-and-instruction-tuning"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "e82c735c55be4918",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T14:40:24Z"
+  }
+}

@@ -1,0 +1,97 @@
+{
+  "id": "naive-bayes",
+  "title": "Naive Bayes",
+  "definition": "Naive Bayes is a generative classifier that predicts a class by applying Bayes' theorem while assuming every feature is conditionally independent of the others given the class label.",
+  "summary": "It estimates P(y|x) by combining a class prior P(y) with per-feature likelihoods P(xᵢ|y), multiplying them instead of modeling the full joint distribution of x. That independence assumption is almost always technically false, but the model is still a fast, cheap, and surprisingly strong baseline for high-dimensional sparse problems like text classification. Fitting is a single pass of counting or averaging — no iterative optimization — so it's also a natural fit for streaming/online systems.",
+  "objectives": [
+    "Derive the Naive Bayes decision rule from Bayes' theorem plus the conditional-independence assumption.",
+    "Distinguish Multinomial, Bernoulli, and Gaussian Naive Bayes and know which data type each fits.",
+    "Explain Laplace/additive smoothing and why production systems can't skip it.",
+    "Work a small example by hand using log-probabilities.",
+    "Judge when Naive Bayes is a good production baseline vs. when correlated features will hurt it."
+  ],
+  "lesson": "Naive Bayes turns classification into one application of Bayes' rule:\n\n```\nP(y | x) ∝ P(y) · P(x | y)\n```\n\nThe hard part is `P(x|y)`: modeling the full joint distribution of n features needs enough data to cover every feature combination per class, which becomes infeasible fast (curse of dimensionality). Naive Bayes sidesteps this with the \"naive\" assumption that features are conditionally independent given the class:\n\n```\nP(x | y) = ∏ᵢ P(xᵢ | y)\n```\n\nThat turns one hard n-dimensional estimation problem into n easy 1-D ones. Each `P(xᵢ|y=c)` is estimated independently per class — from counts for word/token features (Multinomial NB), from presence/absence (Bernoulli NB), or from a per-class mean and variance for continuous features (Gaussian NB). Fitting is one pass over the data: no gradient descent, no convergence loop, trivially updatable online.\n\nAt inference, pick the class with the highest posterior, computed in log-space to avoid underflow from multiplying many small numbers:\n\n```\nscore(y) = log P(y) + sum(log P(x_i | y) for x_i in features)\npredict  = argmax_y score(y)\n```\n\n**Worked intuition:** classifying an email containing \"free\" and \"win\" as spam. If both words are individually more likely under spam than ham, their log-probabilities add up to a higher score for spam — Naive Bayes never looks at *how* \"free\" and \"win\" co-occur, it just sums independent contributions.\n\n**Key gotcha — zero frequency:** if \"win\" never appeared in the ham training set, `P(win|ham) = 0`, and multiplying by zero collapses the *entire* product to zero, discarding every other feature's evidence. Every production implementation applies Laplace/additive smoothing:\n\n```\nP(xᵢ | y) = (count(xᵢ, y) + α) / (count(y) + α · |vocab|)\n```\n\nso no probability is ever exactly zero. A subtler gotcha: correlated or duplicated features get double-counted — two near-identical features are each treated as independent confirming evidence, pushing posteriors toward overconfident 0/1 scores even when the predicted class is still correct.",
+  "examples": "### Example 1 — Multinomial NB by hand, with smoothing\n\nTraining set (vocabulary restricted to `{free, win, meeting}` for the arithmetic):\n\n| doc | words          | class |\n|-----|----------------|-------|\n| 1   | free win       | spam  |\n| 2   | free free win  | spam  |\n| 3   | win meeting    | spam  |\n| 4   | meeting free   | ham   |\n| 5   | meeting meeting| ham   |\n| 6   | meeting meeting| ham   |\n\nCounts: spam → free=3, win=3, meeting=1 (7 words total); ham → free=1, win=0, meeting=5 (6 words total). Priors: P(spam)=P(ham)=0.5.\n\nWith Laplace smoothing (α=1, vocab size=3):\n\n```\nP(free|spam)    = (3+1)/(7+3) = 0.400     P(free|ham)    = (1+1)/(6+3) ≈ 0.222\nP(win|spam)     = (3+1)/(7+3) = 0.400     P(win|ham)     = (0+1)/(6+3) ≈ 0.111\nP(meeting|spam) = (1+1)/(7+3) = 0.200     P(meeting|ham) = (5+1)/(6+3) ≈ 0.667\n```\n\nClassify a new doc \"free win\":\n\n```\nscore(spam) ∝ 0.5 × 0.400 × 0.400 = 0.080\nscore(ham)  ∝ 0.5 × 0.222 × 0.111 ≈ 0.012\nnormalize   → P(spam|x) ≈ 0.87, P(ham|x) ≈ 0.13   →  predict spam\n```\n\nWithout smoothing, `P(win|ham)` would be exactly 0 and the ham score would vanish outright instead of just losing.\n\n### Example 2 — same problem in scikit-learn\n\n```python\nfrom sklearn.feature_extraction.text import CountVectorizer\nfrom sklearn.naive_bayes import MultinomialNB\n\ndocs   = [\"free win\", \"free free win\", \"win meeting\",\n          \"meeting free\", \"meeting meeting\", \"meeting meeting\"]\nlabels = [\"spam\", \"spam\", \"spam\", \"ham\", \"ham\", \"ham\"]\n\nvec = CountVectorizer(vocabulary=[\"free\", \"win\", \"meeting\"])\nX = vec.fit_transform(docs)\n\nclf = MultinomialNB(alpha=1.0)        # alpha = Laplace smoothing\nclf.fit(X, labels)\n\nx_new = vec.transform([\"free win\"])\nprint(clf.classes_)                   # ['ham' 'spam']\nprint(clf.predict_proba(x_new))       # [[0.13 0.87]]  -- matches the hand calc\n```",
+  "tradeoffs": "Use it when features are high-dimensional and sparse (bag-of-words text), you need a fast/cheap baseline or an online model that updates with simple count increments, or training data is limited (few parameters vs. models that must learn feature interactions). Avoid it when features are strongly correlated or the signal lives in feature *interactions* — independence causes double-counting and overconfident, poorly calibrated probabilities. If downstream logic depends on trustworthy `predict_proba`, calibrate it (Platt/isotonic) or move to logistic regression/gradient boosting once you have enough data and latency budget.",
+  "diagnosticQuiz": [
+    {
+      "q": "What does the \"naive\" in Naive Bayes actually refer to?",
+      "choices": [
+        "The fact that it ignores the prior probability of each class",
+        "The assumption that every feature follows a Gaussian distribution",
+        "The fact that it can only produce a linear decision boundary",
+        "The assumption that every feature is conditionally independent given the class label"
+      ],
+      "answer": 3,
+      "explanation": "\"Naive\" names the conditional-independence assumption, `P(x|y) = ∏ P(xᵢ|y)`, which is what makes fitting tractable. The Gaussian option is the common misconception — people conflate the *general* naive-independence property with Gaussian NB, which is just one likelihood family (for continuous features); Multinomial and Bernoulli NB are equally \"naive\" with no Gaussian assumption at all."
+    },
+    {
+      "q": "Given P(y=1)=0.3, P(y=0)=0.7, P(x=1|y=1)=0.8, and P(x=1|y=0)=0.2, which class does Naive Bayes predict for an observation with x=1?",
+      "choices": [
+        "y=1, because its unnormalized score is 0.24",
+        "y=0, because its unnormalized score is 0.14",
+        "It cannot be determined without first computing P(x) to normalize",
+        "It's a tie — both unnormalized scores are equal"
+      ],
+      "answer": 0,
+      "explanation": "Naive Bayes predicts argmax_y P(y)·P(x|y): 0.3×0.8=0.24 for y=1 vs. 0.7×0.2=0.14 for y=0, so y=1 wins. P(x) is identical across classes so it cancels out of the argmax — you only need it if you want a calibrated probability, not for the MAP prediction itself."
+    },
+    {
+      "q": "Naive Bayes' independence assumption is almost never true, yet it's often a strong classifier. Why?",
+      "choices": [
+        "Because classification only needs the argmax to be right, and the same independence violation often biases every class's score in a similar direction, leaving the ranking intact even when the probabilities are off",
+        "Because Laplace smoothing corrects for the violated independence assumption",
+        "Because in practice most real-world features really are independent",
+        "Because Naive Bayes has a built-in prior that models feature correlations"
+      ],
+      "answer": 0,
+      "explanation": "This is the classic finding that NB's classification (0/1) loss can stay low even when its probability estimates are badly miscalibrated, because errors from ignoring correlations tend to shift all classes' scores together rather than flipping which one is largest. Smoothing only fixes zero-counts, not correlation, and standard NB has no correlation-aware prior."
+    },
+    {
+      "q": "In which situation is Naive Bayes the weakest choice?",
+      "choices": [
+        "A streaming pipeline that must update class statistics with O(1) work per new example",
+        "A real-time spam filter over a huge sparse bag-of-words vocabulary",
+        "A fraud-detection dataset containing two engineered features that are near-duplicates of each other",
+        "A quick baseline to sanity-check a new text-classification dataset before investing in a bigger model"
+      ],
+      "answer": 2,
+      "explanation": "Near-duplicate (highly correlated) features violate the independence assumption directly and get double-counted, since each is multiplied in as if it were separate confirming evidence — this skews the posterior and hurts calibration/accuracy more than in the other scenarios. The other three are exactly NB's strengths: sparse high-dimensional text, trivial online updates, and cheap baselining."
+    },
+    {
+      "q": "A production Multinomial Naive Bayes spam filter assigns P(spam|x)=0 to any email containing a word never seen during training. What's the standard fix?",
+      "choices": [
+        "Switch to Gaussian Naive Bayes",
+        "Apply Laplace/additive smoothing so every feature-class combination gets a small nonzero probability",
+        "Retrain the model from scratch every time a new word is observed",
+        "Drop the class prior P(y) from the scoring formula"
+      ],
+      "answer": 1,
+      "explanation": "This is the zero-frequency problem — one unseen word gives P(word|class)=0, and since NB multiplies likelihoods together, a single zero zeroes out the whole product regardless of other evidence. Additive smoothing (e.g. `alpha=1` in sklearn) adds a pseudocount so no likelihood is ever exactly zero. Retraining doesn't fix the underlying issue and Gaussian NB is for continuous features, not sparse discrete counts."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "How would you productionize a Naive Bayes text classifier, and what would you monitor to make sure it keeps working?",
+      "a": "Fit a `MultinomialNB` (or `ComplementNB`, which handles class imbalance better) over a `CountVectorizer`/`TfidfVectorizer` with a **fixed, persisted vocabulary** so training and serving tokenize identically, and tune `alpha` via cross-validation rather than leaving it at a default. In production, monitor: **vocabulary drift** (fraction of incoming tokens that are out-of-vocabulary and silently smoothed away), **class-prior drift** (real-world label ratio moving away from training), and **calibration** — log loss or Brier score, not just accuracy, since NB is prone to overconfident probabilities. Retraining is cheap (just recount), so refresh on a short cadence rather than letting drift accumulate."
+    },
+    {
+      "q": "Offline accuracy is 99%, but production complaints say the model's confidence scores are unreliable — why, and how do you fix it?",
+      "a": "This is expected of Naive Bayes: the independence assumption causes correlated features to be double-counted, pushing posterior probabilities toward 0 or 1 faster than true confidence warrants. Accuracy only needs the argmax right, so it stays high while `predict_proba` is badly miscalibrated. Fix by calibrating on a held-out set with Platt scaling or isotonic regression (`sklearn.calibration.CalibratedClassifierCV`), and evaluate calibration separately from accuracy using a reliability diagram or Brier score before trusting the scores for thresholds."
+    },
+    {
+      "q": "When would you choose Naive Bayes over logistic regression in production, and what's the real practical difference?",
+      "a": "NB is generative (models P(x|y)·P(y)) and fits in one pass over counts/means with no optimization loop, so it's cheap to train, trivial to update online, and reaches its best achievable error with fewer training examples than a discriminative model (the classic Ng & Jordan generative-vs-discriminative analysis). Logistic regression is discriminative, optimizes the decision boundary directly, handles correlated/interacting features far better, and is usually better calibrated and more accurate given enough data. In practice: reach for NB for extreme training speed, online/streaming learning, or a fast baseline over sparse high-dimensional text; move to logistic regression or GBMs once you have the data volume and latency budget, or once calibrated probabilities matter."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "supervised-learning-basics"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "1d8c09ef227c69f8",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T10:24:22Z"
+  }
+}

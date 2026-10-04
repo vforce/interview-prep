@@ -1,0 +1,97 @@
+{
+  "id": "f1-score",
+  "title": "F1 Score",
+  "definition": "F1 score is the harmonic mean of precision and recall, collapsing both into a single number that only stays high when neither is badly out of balance.",
+  "summary": "F1 = 2·P·R/(P+R), used as a default single-metric summary for imbalanced binary classification. It punishes lopsided precision/recall pairs harder than a plain average would, but it silently assumes false positives and false negatives cost the same — which is rarely true in production. Senior-level usage means knowing when to reach for F-beta or a cost model instead.",
+  "objectives": [
+    "Derive F1 from precision/recall and explain why harmonic mean (not arithmetic mean) is used.",
+    "Compute F1 by hand from a confusion matrix.",
+    "Identify when F1's equal-weighting of FP/FN is wrong for the business problem.",
+    "Know F-beta and when beta≠1 is the right call.",
+    "Choose correctly among macro/micro/weighted F1 in multi-class settings."
+  ],
+  "lesson": "Precision and recall move in opposite directions as you shift a decision threshold. F1 gives you one number to summarize that trade-off:\n\n```\nF1 = 2 * (precision * recall) / (precision + recall)\n```\n\nWhy harmonic mean and not arithmetic mean? Harmonic mean is dominated by the smaller of the two inputs. Take precision=1.0, recall=0.0 — a classifier that's \"right\" only when it fires, but essentially never fires. Arithmetic mean says 0.5 (looks okay); F1 says 0 (correctly useless). This is the whole point of F1: it only rewards you when *both* precision and recall are decent, not when you've gamed one at the other's expense.\n\nWorked example — confusion matrix TP=70, FP=30, FN=10:\n\n```\nprecision = 70 / (70 + 30) = 0.700\nrecall    = 70 / (70 + 10) = 0.875\nF1        = 2 * 0.700 * 0.875 / (0.700 + 0.875) ≈ 0.778\n```\n\nCompare to the arithmetic mean of precision/recall (0.7875) — F1 is pulled down slightly toward the weaker metric.\n\n**The key gotcha**: F1 is really F-beta with beta=1, which bakes in the assumption that a false positive and a false negative cost the same. Production systems almost never satisfy that. In fraud detection, a missed fraud (FN) might cost 100x an unnecessary hold (FP); in cancer screening, a missed case is far worse than a follow-up test. Optimizing threshold selection for F1 in these settings silently picks the wrong operating point. The fix is F-beta:\n\n```\nF_beta = (1 + beta^2) * P * R / (beta^2 * P + R)\n```\n\nbeta > 1 weights recall more (use when misses are costlier, e.g. beta=2); beta < 1 weights precision more. In an interview, volunteering \"what's the relative cost of FP vs FN here?\" before defaulting to F1 is the signal that separates senior thinking from reciting a formula. Second gotcha: F1 ignores true negatives entirely and is tied to one threshold — report the threshold, or use PR-AUC if you need threshold-independent comparison.",
+  "examples": "**Example 1 — binary F1 in sklearn (matches the hand calc above)**\n\n```python\nfrom sklearn.metrics import precision_score, recall_score, f1_score\n\ny_true = [1]*80 + [0]*920                 # 80 positives, 920 negatives\ny_pred = [1]*70 + [0]*10 + [1]*30 + [0]*890  # TP=70, FN=10, FP=30, TN=890\n\nprint(precision_score(y_true, y_pred))  # 0.700\nprint(recall_score(y_true, y_pred))     # 0.875\nprint(f1_score(y_true, y_pred))         # 0.778\n```\n\n**Example 2 — F-beta and multi-class averaging in a production content-moderation model**\n\n```python\nfrom sklearn.metrics import fbeta_score, f1_score\n\n# Recall-sensitive: missing a violation is worse than a false flag\nf2 = fbeta_score(y_true, y_pred, beta=2)\n\n# Multi-class (5 categories): pick the averaging deliberately\nf1_macro    = f1_score(y_true_multi, y_pred_multi, average=\"macro\")    # each class weighted equally\nf1_weighted = f1_score(y_true_multi, y_pred_multi, average=\"weighted\")# weighted by class support\nf1_micro    = f1_score(y_true_multi, y_pred_multi, average=\"micro\")   # pools all TP/FP/FN — ≈ accuracy here\n```\n\nMacro-F1 can swing on a class with only a handful of examples; weighted-F1 reflects real-world class prevalence; micro-F1 in single-label multi-class collapses toward accuracy.",
+  "tradeoffs": "Use plain F1 when you need a quick default for imbalanced binary classification and truly have no strong prior on FP vs FN cost — e.g., internal model comparison on a leaderboard. Avoid it when costs are asymmetric (use F-beta or a direct cost/utility function), when you need threshold-independent comparison (use PR-AUC), or when true negatives carry information (F1 ignores them entirely). In multi-class problems, always state your averaging: macro-F1 treats rare and common classes equally (good for fairness, noisy on tiny classes), weighted-F1 mirrors prevalence, micro-F1 behaves like accuracy under single-label multi-class.",
+  "diagnosticQuiz": [
+    {
+      "q": "What does the F1 score represent?",
+      "choices": [
+        "The geometric mean of true positive rate and false positive rate",
+        "Accuracy adjusted for class imbalance",
+        "The harmonic mean of precision and recall",
+        "The arithmetic mean of precision and recall"
+      ],
+      "answer": 2,
+      "explanation": "F1 = 2PR/(P+R) is exactly the harmonic mean of precision and recall. The arithmetic mean (the tempting wrong answer) doesn't punish imbalance the way F1 does — precision=1, recall=0 gives 0.5 under arithmetic mean but 0 under F1, which is the entire reason F1 exists."
+    },
+    {
+      "q": "A model has TP=40, FP=10, FN=40. What is its F1 score (to 2 decimals)?",
+      "choices": [
+        "0.62",
+        "0.50",
+        "0.65",
+        "0.80"
+      ],
+      "answer": 0,
+      "explanation": "precision = 40/(40+10) = 0.80, recall = 40/(40+40) = 0.50, so F1 = 2·0.8·0.5/1.3 ≈ 0.62. 0.65 is the arithmetic mean of P and R (the classic \"averaged instead of harmonic\" mistake); 0.80 and 0.50 are just precision and recall alone, a common gotcha of reporting one input instead of the combined score."
+    },
+    {
+      "q": "Why is F1 low (≈0.095) even though precision=0.95 and recall=0.05 \"average\" to 0.50?",
+      "choices": [
+        "Because F1 always equals min(precision, recall)",
+        "Because F1 is undefined when classes are imbalanced",
+        "Because F1 requires at least 1000 samples to be reliable",
+        "Because the harmonic mean is dominated by the smaller value, skewing F1 toward it"
+      ],
+      "answer": 3,
+      "explanation": "Harmonic mean is bounded between min(P,R) and their arithmetic mean, always skewing toward the smaller value — hence F1≈0.095 here, far below the naive average of 0.5. Option C overstates this: F1 approaches min(P,R) as the gap widens but is only exactly equal to it when P=R, a subtlety worth knowing precisely rather than approximately."
+    },
+    {
+      "q": "In which production scenario is optimizing for standard F1 (beta=1) LEAST appropriate?",
+      "choices": [
+        "A cancer-screening triage model where missing a true case is far costlier than a false alarm",
+        "A spam filter where blocking real email and letting spam through are about equally annoying",
+        "Reporting one headline metric on a leaderboard of imbalanced binary classifiers",
+        "Comparing two candidate models on a balanced internal benchmark before shipping"
+      ],
+      "answer": 0,
+      "explanation": "F1 weights precision and recall equally, but cancer screening has starkly asymmetric costs — a missed case is far worse than an unnecessary follow-up. That calls for F-beta with beta>1 (recall-weighted) or an explicit cost model. The other options are roughly-equal-cost use cases where plain F1 is a reasonable default."
+    },
+    {
+      "q": "A team reports \"macro-F1 = 0.90\" for a 5-class model where one class has only 8 of 10,000 examples. What's the key risk in trusting that number?",
+      "choices": [
+        "Macro-F1 cannot be computed without a validation set",
+        "Macro-F1 weights every class equally regardless of size, so the tiny class's noisy per-class F1 can swing the average",
+        "Macro-F1 is mathematically undefined for more than 2 classes",
+        "Macro-F1 is identical to accuracy in multi-class settings"
+      ],
+      "answer": 1,
+      "explanation": "Macro-F1 averages per-class F1 unweighted by support, so a class with 8 examples counts the same as one with 5,000 — a couple of misclassifications swing its F1 wildly, yet it still moves the reported average by a full 1/5. Check per-class F1 and weighted-F1 before trusting one aggregate. (It's micro-F1, not macro, that collapses toward accuracy-like behavior in single-label multi-class.)"
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Why would you choose F1 over accuracy for an imbalanced dataset, and when would you choose F-beta over F1 instead?",
+      "a": "Accuracy is dominated by the majority class — a 99%-negative dataset scores 99% accuracy by predicting all-negative, which is useless. F1 forces both precision and recall to be reasonable, so it exposes that failure mode. But F1 assumes FP and FN cost the same, which is rarely true in production; I'd switch to F-beta (beta>1 to favor recall, beta<1 to favor precision) as soon as I can name a concrete cost ratio for the two error types — e.g. \"missing fraud costs ~50x more than a false hold.\""
+    },
+    {
+      "q": "Walk me through picking a decision threshold with F1 for a production fraud model — what's wrong with that approach?",
+      "a": "Standard approach: sweep thresholds, compute F1 at each, pick the max. The problem is F1 bakes in equal FP/FN cost, but fraud is asymmetric — a missed fraud (FN) is typically far more expensive than a false hold (FP) that just delays a legitimate transaction. Maximizing F1 picks a threshold that under-weights recall relative to the actual business loss. I'd instead build an explicit cost function (cost_FN · FN_count + cost_FP · FP_count), sweep thresholds against *that*, and use F-beta or the PR curve only as a diagnostic, not the optimization target."
+    },
+    {
+      "q": "You need to report one metric to a non-ML stakeholder for a 5-class content-moderation model. Macro-F1, micro-F1, or weighted-F1 — why?",
+      "a": "Weighted-F1, generally — it reflects real-world class prevalence, so it won't be distorted by a rare class with a handful of noisy examples the way macro-F1 can be, and unlike micro-F1 it doesn't collapse toward looking like accuracy in a single-label setup. I'd still report per-class F1 alongside it internally, since a stakeholder-facing aggregate can hide that the model is failing on one specific (maybe high-severity) category."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "precision-and-recall"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "6ece49405a8e4f63",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T09:31:20Z"
+  }
+}

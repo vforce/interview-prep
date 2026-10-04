@@ -1,0 +1,101 @@
+{
+  "id": "transports-stdio-vs-streamable-http",
+  "title": "Transports: stdio vs Streamable HTTP",
+  "definition": "MCP transports carry the identical JSON-RPC 2.0 data layer over different physical channels: **stdio** pipes messages through a locally spawned subprocess's stdin/stdout, while **Streamable HTTP** POSTs them to a single network endpoint that can optionally upgrade its response to a Server-Sent Events (SSE) stream.",
+  "summary": "stdio assumes a 1:1, same-machine client-server pair where the client owns the server's process lifecycle — no network stack, no auth model beyond OS process boundaries — which is why it's the default for local tool/IDE integrations. Streamable HTTP is MCP's transport for remote, multi-client servers: one endpoint handles JSON-RPC POSTs and optional SSE streaming, with session IDs and resumability layered on for stateful deployments at scale. The choice is a deployment-topology decision, not a protocol one — the data layer above is identical either way.",
+  "objectives": [
+    "Explain what problem each transport solves and why MCP standardizes on both.",
+    "Trace the same JSON-RPC message through stdio vs. Streamable HTTP end to end.",
+    "Spot the stdout-corruption and shared-global-state gotchas before they hit production.",
+    "Choose the right transport — and its auth/scaling posture — for a given deployment."
+  ],
+  "lesson": "MCP separates *what* gets said from *how* it's carried: the data layer defines JSON-RPC 2.0 requests, responses, and notifications (`initialize`, `tools/list`, `tools/call`, …); the transport layer decides how those bytes move. stdio and Streamable HTTP are the two standard transports, and picking between them is a deployment-topology decision — the messages above are identical either way.\n\n**stdio**: the client spawns the MCP server as a local subprocess and exchanges newline-delimited JSON-RPC messages over its stdin/stdout. It's inherently 1:1 and same-machine — the client owns the server's process lifecycle (spawn it, pipe to it, kill it on exit). No network stack means no ports, no TLS, no CORS, no auth to design — the OS process boundary *is* the security boundary. This is why Claude Desktop/Claude Code launch local integrations (filesystem, git, a DB driver) over stdio.\n\n**Streamable HTTP**: built for servers that live elsewhere and may serve many clients at once. A single endpoint accepts POSTs (client → server JSON-RPC) and, optionally, the server's response upgrades from a plain `application/json` body to a `text/event-stream` (SSE) when it needs to stream multiple messages — progress notifications, then a final result — for one logical call. A client can also open a GET to that endpoint for server-initiated pushes. Sessions are tracked with an `Mcp-Session-Id` header the server issues at `initialize`; SSE streams can resume via `Last-Event-ID` if a connection drops.\n\nThe gotcha that actually bites in production: **stdio hijacks stdout as the message channel**. Any stray `print()`, a dependency that logs to stdout by default, or an unbuffered debug line gets interleaved into the JSON-RPC stream and silently breaks the client's parser. The fix is a hard rule — an stdio server logs to stderr, never stdout. The Streamable HTTP mirror-image mistake is architectural, not a typo: since one process now serves many concurrent sessions, you can't keep per-conversation state in a module-level global the way a single-client stdio script gets away with — it must be keyed by session id, or clients start seeing each other's state under load.",
+  "examples": "### Example 1 — one server, transport chosen at launch\n\n```python\nfrom mcp.server.fastmcp import FastMCP\nimport sys\n\nmcp = FastMCP(\"orders\")\n\n@mcp.tool()\ndef get_status(order_id: str) -> str:\n    \"\"\"Look up an order's status.\"\"\"\n    print(f\"lookup {order_id}\", file=sys.stderr)  # fine: stderr is free\n    return \"shipped\"\n\nif __name__ == \"__main__\":\n    # only this line changes between deployments:\n    mcp.run(transport=sys.argv[1] if len(sys.argv) > 1 else \"stdio\")\n    # \"stdio\"           -> subprocess, stdin/stdout\n    # \"streamable-http\" -> HTTP server on /mcp\n```\n\nThe handler code — tool schema, logic, return value — never changes. Swap the stderr `print` for a bare `print(...)` and only the stdio deployment breaks: that stray stdout write gets parsed as (invalid) JSON-RPC by the client.\n\n### Example 2 — same message, different envelope\n\n```python\n# client: only the connection changes\n\n# stdio: spawn a local subprocess, talk over its stdin/stdout\nfrom mcp.client.stdio import stdio_client, StdioServerParameters\nparams = StdioServerParameters(command=\"python\", args=[\"server.py\"])\nasync with stdio_client(params) as (read, write):\n    ...\n\n# Streamable HTTP: connect to a URL; session id is handled for you\nfrom mcp.client.streamable_http import streamablehttp_client\nasync with streamablehttp_client(\"https://api.example.com/mcp\") as (read, write, _):\n    ...\n```\n\nOn the wire, the same `tools/call` request looks like:\n\n```\n# stdio — one line on the subprocess's stdin:\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_status\",\"arguments\":{\"order_id\":\"A1\"}}}\n\n# Streamable HTTP — POST to the single endpoint:\nPOST /mcp HTTP/1.1\nContent-Type: application/json\nMcp-Session-Id: 9f86d081-...\n\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_status\",\"arguments\":{\"order_id\":\"A1\"}}}\n\n# response can be plain JSON, or SSE if the server wants to stream progress first:\nHTTP/1.1 200 OK\nContent-Type: text/event-stream\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"shipped\"}]}}\n```",
+  "tradeoffs": "stdio wins on simplicity and security-by-default: no ports, no TLS/CORS/DNS-rebinding surface, lowest latency, trivial local dev — but it's strictly 1:1/same-host, so scaling means spawning more processes, and there's no auth model beyond the OS process boundary. Streamable HTTP wins on reach: multiple concurrent clients, ordinary load balancers, OAuth 2.1 for auth, and streaming when you need it — but you now own session management, resumability, and origin/DNS-rebinding checks yourself. Default to stdio for local tools and IDE integrations; reach for Streamable HTTP as soon as the server needs to live on a different machine from its callers, or serve more than one client at a time.",
+  "diagnosticQuiz": [
+    {
+      "q": "What best characterizes the relationship between MCP's data layer and its transport layer?",
+      "choices": [
+        "The data layer defines JSON-RPC messages and lifecycle; the transport layer only decides how those same messages are physically carried.",
+        "stdio and Streamable HTTP each use a different message format (JSON-RPC vs REST) for the same operations.",
+        "The data layer is only used for Streamable HTTP; stdio servers skip it entirely.",
+        "The transport layer defines which tools a server exposes; the data layer just serializes them."
+      ],
+      "answer": 0,
+      "explanation": "MCP is explicitly layered so the same JSON-RPC 2.0 requests, responses, and notifications (`initialize`, `tools/call`, …) work unchanged over any transport — switching transports is a deployment choice, not a protocol rewrite. A and D invert or break that layering (transport doesn't define tools, and the data layer isn't HTTP-specific), while C reflects the misconception that a \"simpler\" local transport must also mean a simpler or different message format — it doesn't."
+    },
+    {
+      "q": "MCP's startup handshake sends exactly 3 JSON-RPC messages: `initialize` request, `initialize` response, and an `initialized` notification. Over Streamable HTTP, what carries this exchange?",
+      "choices": [
+        "Three separate WebSocket frames, since MCP requires WebSockets for handshakes.",
+        "A single GET request that returns both the response and the notification together.",
+        "Two HTTP POSTs (one per client-sent message) — the first gets a JSON or SSE response, the second (a notification) needs no response body.",
+        "One long-lived SSE connection that both client and server write into for the whole session."
+      ],
+      "answer": 2,
+      "explanation": "Streamable HTTP maps each client-to-server JSON-RPC message onto its own POST; a message expecting a reply (`initialize`) gets one back as JSON or SSE, while a notification (`initialized`, no reply expected) just needs the POST accepted, no persistent stream required. Option A treats SSE as mandatory infrastructure rather than an on-demand upgrade, and MCP doesn't use WebSockets at all (B) or bundle multiple messages into one GET (D)."
+    },
+    {
+      "q": "Why does storing per-conversation state in a plain module-level Python dict quietly work in a quick stdio server but become a bug in a Streamable HTTP server?",
+      "choices": [
+        "Python dicts aren't thread-safe under HTTP but are thread-safe under stdio.",
+        "Streamable HTTP servers can't hold any state at all — everything must be sent by the client on every call.",
+        "A subprocess launched over stdio has a 1:1 relationship with its client, so a global dict is accidentally session-scoped by process boundaries alone; a Streamable HTTP server is one process fielding many sessions concurrently, so the same pattern leaks state across clients unless it's explicitly keyed by `Mcp-Session-Id`.",
+        "JSON-RPC notifications can't carry state over HTTP, only over stdio."
+      ],
+      "answer": 2,
+      "explanation": "A subprocess launched over stdio has a 1:1 relationship with its client, so a global dict is accidentally session-scoped by process boundaries alone. A Streamable HTTP server is one process fielding many sessions concurrently, so the same pattern leaks one client's state into another's unless it's explicitly keyed by `Mcp-Session-Id`. A and C misattribute the cause to Python internals or a nonexistent notification rule; D is also false — HTTP transport supports stateful sessions, it just requires you to scope state yourself."
+    },
+    {
+      "q": "Your MCP server will be called by several other teams' agents over the network and needs independent scaling plus OAuth-based auth. Which transport fits, and why?",
+      "choices": [
+        "stdio, because it has no attack surface and therefore doesn't need auth.",
+        "Either works identically since transport doesn't affect deployment.",
+        "Streamable HTTP — it's network-addressable, works behind a normal load balancer, and has an auth story (OAuth 2.1) to hang tokens on.",
+        "stdio — spawn one subprocess per remote caller and pipe over the network."
+      ],
+      "answer": 2,
+      "explanation": "Streamable HTTP is the transport designed for remote, multi-client, independently-scaled deployments, and it's the one MCP's auth spec (OAuth 2.1) targets. stdio has no network concept at all, so A is nonsensical (\"piping over the network\" isn't a thing), B ignores that transport is precisely what determines deployment shape, and C's logic only holds for the transport that actually has no attack surface — it doesn't transfer to a networked deployment."
+    },
+    {
+      "q": "An stdio-based MCP server has a dependency that logs debug info to stdout by default. What's the production symptom?",
+      "choices": [
+        "The server process crashes immediately with a permissions error.",
+        "The client's JSON-RPC parser breaks or hangs, because those log lines get interleaved into the message stream it expects to be pure JSON-RPC.",
+        "Nothing — stdout and stderr are automatically merged and both get discarded.",
+        "It triggers a DNS-rebinding vulnerability in the client."
+      ],
+      "answer": 1,
+      "explanation": "stdio uses stdout as the literal message channel, so anything else written there — a logging default, a stray `print()` — corrupts the newline-delimited JSON-RPC stream and breaks or hangs the client's parser. stdout isn't silently discarded or merged with stderr (A) — it's actively read by the client — and DNS rebinding (D) is a Streamable HTTP/network concern, not an stdio one."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "You're designing an MCP integration that multiple internal teams' agents will call over the network. Which transport do you pick, and what production concerns does that choice force you to own?",
+      "a": "**Streamable HTTP** — it's the transport built for network-addressable, multi-client servers. That forces me to own: **auth** (OAuth 2.1 bearer tokens instead of trusting the OS process boundary), **session state** (keyed by `Mcp-Session-Id`, never a module-level global), **horizontal scaling** (any replica must serve any session, or sessions need sticky routing/a shared store), and **origin/DNS-rebinding checks** now that there's a real network attack surface."
+    },
+    {
+      "q": "A teammate's stdio MCP server works locally but throws intermittent JSON parse errors when run on another machine. What's your first hypothesis and how do you confirm it?",
+      "a": "First hypothesis: something besides the MCP loop is writing to stdout — a dependency's default logger, a stray `print()`, a deprecation warning — corrupting the newline-delimited JSON-RPC stream. Confirm by redirecting the server's stdout to a file and scanning for non-JSON lines, or grepping the code and its dependencies for stdout writes/default log handlers. Fix: route all logging to stderr, keep stdout reserved for protocol messages only."
+    },
+    {
+      "q": "If you migrate an MCP server from stdio to Streamable HTTP, does anything change about the tools, resources, or prompts it exposes, or how a client negotiates capabilities?",
+      "a": "No — that's the point of MCP's layering: `initialize`/capability negotiation and every tool/resource/prompt schema live in the transport-agnostic data layer. Only the envelope and connection lifecycle change (subprocess pipe vs. HTTP session), along with which production concerns you now own (process supervision vs. auth/scaling/network security). A well-built server can support both transports off the same handler code — just swap the `transport=` argument at launch."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "building-an-mcp-server",
+    "data-and-transport-layers",
+    "security-and-authorization"
+  ],
+  "followUps": [
+    "building-an-mcp-server",
+    "security-and-authorization"
+  ],
+  "metadata": {
+    "inputHash": "27fafb1ef82d26d2",
+    "model": "sonnet",
+    "generatedAt": "2026-07-06T07:15:25Z"
+  }
+}

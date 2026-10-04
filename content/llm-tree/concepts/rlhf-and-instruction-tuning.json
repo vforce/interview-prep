@@ -1,0 +1,100 @@
+{
+  "id": "rlhf-and-instruction-tuning",
+  "title": "RLHF and Instruction Tuning",
+  "definition": "RLHF (reinforcement learning from human feedback) and instruction tuning are the post-pretraining stages that teach a language model to follow instructions and produce human-preferred responses — first via supervised fine-tuning (SFT) on instruction/response demonstrations, then by optimizing against a reward model trained on human preference comparisons.",
+  "summary": "Pretraining yields a raw text-completion engine with no notion of dialogue, instructions, or \"better vs. worse\" — it just predicts the next token. Instruction tuning (SFT) closes the format gap through imitation on curated (instruction, response) pairs; RLHF closes the quality gap by training a reward model on human pairwise comparisons and optimizing the policy against it, via PPO or the simpler closed-form DPO objective. In production this stage — not further pretraining scale — is usually the biggest lever on perceived model quality, and where cost, stability, and alignment risks like reward hacking get managed.",
+  "objectives": [
+    "Explain the three-stage pipeline: pretraining → SFT (instruction tuning) → RLHF/preference optimization",
+    "Describe how a reward model is trained from pairwise human preference data (Bradley-Terry loss)",
+    "Contrast PPO-based RLHF with DPO as an engineering-simpler alternative",
+    "Identify practical failure modes: reward hacking, KL drift, alignment tax",
+    "Reason about how to split a fixed annotation budget between SFT and preference data in production"
+  ],
+  "lesson": "Pretraining gives a model broad next-token competence but no notion of *conversation* or *instruction*: a raw base model will happily continue your prompt as more internet text rather than answer it. Post-training closes that gap in two stages.\n\n**Stage 1 — SFT (instruction tuning):** fine-tune on curated `(instruction, response)` pairs with ordinary cross-entropy — teach the model the *shape* of a good answer by imitation. It's cheap, stable, and really \"just\" continued pretraining on a smaller, higher-quality, more structured distribution. Its ceiling is the quality of the demonstrations: the model can't reliably exceed what your labelers can write.\n\n**Stage 2 — RLHF (preference alignment):** instead of asking humans to *write* the ideal answer (slow, expensive, inconsistent), ask them to *compare* two model outputs and say which is better — a much easier, cheaper, more reliable judgment. Train a reward model on these comparisons (Bradley-Terry loss), then optimize the SFT policy with PPO to maximize predicted reward, subject to a KL penalty back to the SFT model so the policy can't wander arbitrarily far in search of reward. Comparisons let supervision scale past what any single labeler could produce — which is why RLHF models often beat SFT-only quality on helpfulness and tone, even though no human ever wrote those exact words.\n\n**The key gotcha — reward hacking.** The reward model is a learned, imperfect proxy for \"humans prefer this.\" PPO will happily find and exploit its blind spots: outputs get longer, more hedgy (\"As an AI language model...\"), more confidently formatted — because those correlate with reward-model score without being genuinely more helpful. Classic Goodhart's law. The main lever against this is the KL penalty coefficient β: too small and the policy overfits the reward model's quirks; too large and you get no improvement over plain SFT. In practice, teams either (a) periodically refresh the reward model on the current policy's own outputs (iterative RLHF), or (b) switch to DPO, which optimizes a closed-form loss directly on preference pairs and skips the unstable RL loop entirely.",
+  "examples": "### Example 1 — reward model training (Bradley-Terry loss)\n\n```python\nimport torch\nimport torch.nn.functional as F\n\ndef reward_model_loss(r_chosen: torch.Tensor, r_rejected: torch.Tensor) -> torch.Tensor:\n    \"\"\"P(chosen > rejected) = sigmoid(r_chosen - r_rejected); maximize margin.\"\"\"\n    return -F.logsigmoid(r_chosen - r_rejected).mean()\n\n# reward_model is usually the SFT model with its LM head swapped for a scalar head\nr_chosen   = reward_model(prompt, response_chosen)     # shape: (batch,)\nr_rejected = reward_model(prompt, response_rejected)\nloss = reward_model_loss(r_chosen, r_rejected)\nloss.backward()\n```\n\n### Example 2 — PPO objective vs. DPO objective\n\n```\nPPO-RLHF (maximize, per sampled response y ~ π_θ):\n  J(θ) = E[ r_φ(x, y) ] − β · KL( π_θ(y|x) ‖ π_ref(y|x) )\n  π_ref = frozen SFT model; β trades off reward-seeking vs. staying close to π_ref.\n\nDPO (minimize, no reward model or RL loop, same β meaning):\n  L(θ) = −log σ( β·log[π_θ(y_w|x)/π_ref(y_w|x)] − β·log[π_θ(y_l|x)/π_ref(y_l|x)] )\n  y_w = human-preferred response, y_l = rejected response.\n```\nDPO is derived by substituting the closed-form optimal policy of the PPO objective back into the Bradley-Terry preference model — same target distribution, no sampling/RL required to get there.",
+  "tradeoffs": "SFT alone is cheap and stable but capped by demonstration quality — fine for teaching format, tool-call syntax, or house style, not for nuanced helpfulness/safety trade-offs. Full PPO-based RLHF can exceed that ceiling and adapts online, but needs 3-4 models resident at once (policy, reference, reward, often a value model), is notoriously finicky to tune, and risks reward hacking. DPO captures most of RLHF's preference-alignment benefit with SFT-like simplicity (one model, one supervised-style loss, no reward model or RL loop) and is the default choice for most production teams today — but it's offline, so it can't adapt to a shifting policy without re-collecting preference data, and it needs decent pairwise coverage up front. Rule of thumb: SFT-only for narrow behavior/format changes, DPO for standard preference alignment on a budget, online PPO-RLHF reserved for efforts that can afford iterative reward-model refresh.",
+  "diagnosticQuiz": [
+    {
+      "q": "What is the primary purpose of the SFT (instruction tuning) stage in the pretrain → SFT → RLHF pipeline?",
+      "choices": [
+        "To directly optimize a learned reward model using PPO",
+        "To compress the model for faster inference",
+        "To teach the model instruction-following format/behavior via imitation of curated demonstrations",
+        "To teach the model new factual knowledge not present in pretraining data"
+      ],
+      "answer": 2,
+      "explanation": "SFT is supervised imitation learning on (instruction, response) pairs — it teaches the *shape* of a good answer, not new facts (that's pretraining's job; over-fitting SFT on facts it doesn't know can even increase hallucination). The reward-model/PPO step is the next stage, not SFT. The common misconception is treating fine-tuning as a knowledge-injection tool rather than a behavior-shaping one."
+    },
+    {
+      "q": "A reward model trained with the Bradley-Terry loss `-log(sigmoid(r_chosen - r_rejected))` scores a pair as r_chosen = 1.5 and r_rejected = 1.5. What is the loss?",
+      "choices": [
+        "ln(2) ≈ 0.69 — sigmoid(0) = 0.5, maximal uncertainty about which is preferred",
+        "0 — equal scores mean no penalty",
+        "1.5 — equal to the input reward values",
+        "Undefined — equal inputs cause a divide-by-zero"
+      ],
+      "answer": 0,
+      "explanation": "sigmoid(r_chosen − r_rejected) = sigmoid(0) = 0.5, and −log(0.5) = ln(2) ≈ 0.693 — the loss's value at maximum classifier uncertainty, since the model has expressed zero preference for either response. The wrong-answer intuition \"equal scores → zero loss\" imports squared-error thinking into a classification-style loss, where a 50/50 call is treated as an error to push away from, not a correct answer."
+    },
+    {
+      "q": "Why does RLHF typically collect pairwise comparisons (\"A is better than B\") instead of asking humans to write an ideal response for every example?",
+      "choices": [
+        "Writing full responses is technically infeasible for human annotators",
+        "Comparative judgments are easier, faster, and more consistent for humans than authoring a great response, and let supervision scale past what any single labeler could write",
+        "Comparisons produce more raw training tokens per human-hour due to caching",
+        "RL algorithms mathematically require comparison data; freeform text cannot serve as a training target"
+      ],
+      "answer": 1,
+      "explanation": "Ranking two candidate outputs is a much lower-effort, more reliable judgment than composing a great response from scratch, and it lets supervision exceed the demonstrator's own writing skill — the core reason RLHF can beat an SFT-only ceiling. Freeform text absolutely can be an RL/imitation target (that's SFT itself), so the \"mathematically required\" framing is a myth about the algorithm's needs, not a reason for the field's actual choice."
+    },
+    {
+      "q": "Your team has limited ML infra — no dedicated RL cluster, and you want to avoid keeping 4 models resident in memory during training. You need to align tone and reduce harmful outputs. What's the most appropriate approach?",
+      "choices": [
+        "Increase the pretraining corpus size to implicitly fix tone",
+        "DPO, trained directly on preference pairs relative to a frozen SFT reference model",
+        "Full PPO-based RLHF with separate reward, value, policy, and reference models",
+        "Skip alignment entirely and rely on pretraining scale"
+      ],
+      "answer": 1,
+      "explanation": "DPO reframes the RLHF objective as one closed-form supervised loss over preference pairs, needing only the policy plus a frozen reference model — no reward model, no RL loop — which is far cheaper and more stable under limited infra. Pretraining scale doesn't inject preference-ordering signal (the model has no notion of \"better\" without comparison data), so C is the only option that actually targets the stated problem within the stated constraints."
+    },
+    {
+      "q": "A team's RLHF-tuned model becomes markedly more verbose, over-hedges, and repeats phrases like \"As an AI language model, I must emphasize...\" well beyond what response quality warrants. What does this illustrate?",
+      "choices": [
+        "Underfitting the reward model",
+        "Reward hacking — the policy exploits blind spots in the learned reward model rather than genuinely being more helpful",
+        "Catastrophic forgetting of pretraining knowledge",
+        "A tokenizer bug introduced during fine-tuning"
+      ],
+      "answer": 1,
+      "explanation": "Because the policy is optimized against an imperfect learned proxy for human preference, it drifts toward outputs the reward model scores highly without being genuinely better (Goodhart's law) — verbosity and hedging are classic artifacts since annotators subtly reward longer, more cautious-sounding text. This is precisely what the KL penalty to the reference/SFT policy exists to limit; it isn't forgetting, underfitting, or a tokenization issue."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Why would you choose DPO over PPO-based RLHF for a production alignment pipeline, and when would you go back to PPO?",
+      "a": "DPO substitutes the closed-form optimal policy of the RLHF objective directly into the preference loss, so training needs only the policy and a frozen reference model — no reward model, no RL loop, no value model. That means fewer moving parts, no online-exploration instability, and cheaper, more reproducible iteration, which is why it's the default for most teams today. I'd go back to PPO/online RL when the reward signal needs to keep adapting to a moving policy — e.g., iterative RLHF where you re-collect preferences on the *current* policy's outputs each round, since a static DPO dataset goes stale as the policy drifts from where the preferences were originally collected. PPO also composes more easily with extra reward signals at train time (safety classifiers, rule-based rewards, retrieval-groundedness checks)."
+    },
+    {
+      "q": "Your reward model hits 95% accuracy on held-out preference pairs, but after RLHF the policy's outputs look *worse* to human raters. What's going on, and how do you debug it?",
+      "a": "This is the signature of reward over-optimization / reward hacking: PPO has found a region of output space the reward model scores well but that's poorly covered by its training distribution, so the reward model's judgment doesn't generalize there even though its held-out accuracy looked fine. To debug — check the KL divergence from the reference policy (a large jump signals over-optimization; reduce β or early-stop); have humans rate outputs directly at several checkpoints instead of trusting reward-model score alone, to find where the two diverge; scan for degenerate patterns (repetition, generic hedging, length gaming); and consider refreshing the reward model on samples drawn from the current policy (iterative RLHF) so it's evaluated on-distribution."
+    },
+    {
+      "q": "You have a fixed human-annotation budget. How do you split it between SFT demonstrations and preference comparisons?",
+      "a": "Frontload a modest, high-quality SFT set (thousands, not millions, of examples) — just enough to get sane instruction-following and format behavior, since RLHF needs a reasonably competent policy to sample from in the first place. Put the bulk of the remaining budget into preference comparisons: they're cheaper and more reliable per judgment than authoring gold responses, and they scale supervision on nuanced dimensions (helpfulness, tone, safety trade-offs) past what demonstrations alone can teach — consistent with public write-ups like InstructGPT, where preference volume dwarfs SFT volume. I'd also reserve some budget for *iterative* collection — periodically re-rating the current policy's outputs — rather than spending it all upfront, to keep the reward model on-distribution as the policy moves."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "lora-and-fine-tuning",
+    "pretraining"
+  ],
+  "followUps": [
+    "lora-and-fine-tuning"
+  ],
+  "metadata": {
+    "inputHash": "977f51242a7ea41c",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T13:51:05Z"
+  }
+}

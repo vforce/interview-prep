@@ -1,0 +1,61 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: dist_shard
+type: kata
+area: PyTorch
+order: 49
+title: Two-level sharding for IterableDataset (PyTorch)
+prompt: >-
+  Rung 4, and the trap most candidates fall into. `DistributedSampler` does not work with an
+  `IterableDataset` — a stream has no indices to permute — so you shard it yourself, and you must
+  shard *twice*: across the `world_size` ranks, and again across the `num_workers` DataLoader
+  workers inside each rank. Every worker is a forked copy of the dataset object, so if you only
+  shard on rank, all `num_workers` workers replay the identical records and you silently train on
+  duplicated data. Flatten the (rank, worker) grid into one shard space and interleave. Return a
+  generator — never materialise the stream.
+sig: 'def shard(stream, rank, world_size, worker_id, num_workers):'
+stub: "def shard(stream, rank, world_size, worker_id, num_workers):\n    # flatten (rank, worker) into one global id over world_size * num_workers shards, then interleave\n    \n"
+reference: |
+  # In production: rank = torch.distributed.get_rank(), and
+  #                worker_id = torch.utils.data.get_worker_info().id  (None in the main process).
+  # Taking them as plain arguments is exactly what makes this partition testable in one process.
+
+  def shard(stream, rank, world_size, worker_id, num_workers):
+      # TWO levels of parallelism, but only ONE flat shard space.
+      #
+      # Each rank forks num_workers loader processes, and every fork gets its own COPY of the
+      # dataset object. Nothing tells a copy which one it is. So if you shard on rank alone, all
+      # num_workers copies inside that rank iterate the identical records — and you train on
+      # duplicated data, at num_workers times the rate, with no error and no warning. That is the
+      # single nastiest IterableDataset bug, and it is why DistributedSampler can't help you here:
+      # a stream has no indices to permute, so there is nothing for a sampler to slice.
+      #
+      # Fix: flatten the (rank, worker) grid so every one of the W*K loaders has a unique id.
+      total = world_size * num_workers          # e.g. 3 ranks x 2 workers = 6 shards in total
+      gid = rank * num_workers + worker_id      # this loader's slot in 0 .. total-1
+      for i, rec in enumerate(stream):
+          if i % total == gid:                  # round-robin: record i belongs to exactly one loader
+              yield rec                         # yield, not return: the stream is never materialised
+test: |
+  W, K, N = 3, 2, 20                            # 3 ranks x 2 workers = 6 independent loader processes
+  out = {(r, w): list(shard(range(N), r, W, w, K))
+         for r in range(W) for w in range(K)}
+
+  # 1. no duplicates: sharding on rank alone would replay the stream once per worker
+  flat = [x for v in out.values() for x in v]
+  assert len(flat) == len(set(flat)) == N, (len(flat), len(set(flat)))
+
+  # 2. and nothing is dropped
+  assert set(flat) == set(range(N)), set(range(N)) - set(flat)
+
+  # 3. balanced to within one record, or the fast workers idle at the epoch boundary
+  sizes = sorted(len(v) for v in out.values())
+  assert sizes[-1] - sizes[0] <= 1, sizes
+
+  # 4. the second level actually bites — workers inside one rank must not see the same records
+  assert out[(0, 0)] != out[(0, 1)], "workers within a rank got identical records"
+
+  # 5. streaming: works on a one-shot iterator, not just a re-iterable sequence
+  assert list(shard(iter("abcdef"), 0, 2, 0, 1)) == ["a", "c", "e"]
+
+  print("PASS - 6 checks")

@@ -1,0 +1,96 @@
+{
+  "id": "feed-forward-network",
+  "title": "Feed-Forward Network",
+  "definition": "The Feed-Forward Network (FFN) is the position-wise sub-layer in each Transformer block — a two-layer MLP with a nonlinearity that expands a token's vector and projects it back down — applied identically and independently to every position, in contrast to attention's cross-token mixing.",
+  "summary": "Every Transformer block interleaves two sub-layers: attention, which mixes information across token positions, and the FFN, which transforms each token's vector independently through an expand-then-contract MLP. The FFN holds roughly two-thirds of a block's parameters (attention the other third), making it the dominant driver of model size, weight-memory bandwidth, and the primary target for quantization and Mixture-of-Experts sparsification. Its two weight matrices are also interpretable as a key-value memory: neurons in the expanded layer act as pattern-detecting keys, the corresponding output-projection rows as the values they retrieve.",
+  "objectives": [
+    "Derive the FFN forward pass and its shape/parameter math, and compare it to attention's parameter count.",
+    "Explain the position-wise property: why the FFN does not mix information across tokens.",
+    "Compare ReLU/GELU FFNs to gated variants (SwiGLU) and know why frontier LLMs adopted the latter.",
+    "Reason about FFN's production cost: parameter share, memory bandwidth, quantization, and MoE."
+  ],
+  "lesson": "After attention lets each token \"look at\" other positions and aggregate context into its own vector, the FFN is where the model does per-token computation on that aggregated representation — recombining features and, per one influential interpretation, recalling stored facts. Structurally it's a plain two-layer MLP applied identically at every position:\n\n```\nFFN(x) = W2 · σ(W1 x + b1) + b2\n```\n\nwhere `x ∈ R^d_model`, `W1 ∈ R^(d_ff × d_model)`, `W2 ∈ R^(d_model × d_ff)`, and `d_ff` is usually 4×`d_model` (original Transformer, BERT, GPT-2). σ is ReLU in the original paper, GELU in BERT/GPT, and a gated SiLU (SwiGLU) in LLaMA/PaLM-style models.\n\nWorked shapes (BERT-base: `d_model=768`, `d_ff=3072`): a 768-dim token vector projects up to 3072 (4× expansion), passes through GELU, projects back to 768 — applied to every token independently, hence \"position-wise\" and embarrassingly parallel across the sequence.\n\nParameter-wise, compare both sub-layers at `d_model=768`: attention has 4 matrices (Q, K, V, O) of 768×768 → `4·768² ≈ 2.36M`. FFN has 2 matrices of 768×3072 → `2·768·3072 ≈ 4.72M` — exactly 2× attention's count. So FFN alone is roughly two-thirds of a block's parameters. This is the key production fact: FFN dominates model size and weight-loading bandwidth (autoregressive decode is memory-bound), which is why it's the first target for quantization and the layer Mixture-of-Experts replaces — swap one dense FFN for N expert FFNs, route each token to k of them, and grow total capacity without growing per-token compute.\n\n**Key gotcha:** the FFN does not mix information across tokens. Same weights, applied independently to each position — no interaction between position i and position j. \"The FFN lets tokens communicate\" is wrong; that's attention's job. The FFN's only context is whatever attention already wrote into that one token's vector.",
+  "examples": "**1. Standard FFN (ReLU/GELU, 2-matrix, 4× expansion):**\n\n```python\nimport torch, torch.nn as nn\n\nclass FeedForward(nn.Module):\n    def __init__(self, d_model=768, d_ff=3072):\n        super().__init__()\n        self.fc1 = nn.Linear(d_model, d_ff)\n        self.fc2 = nn.Linear(d_ff, d_model)\n        self.act = nn.GELU()\n\n    def forward(self, x):                      # x: (batch, seq_len, d_model)\n        return self.fc2(self.act(self.fc1(x)))  # same shape out\n\nx = torch.randn(2, 128, 768)\nprint(FeedForward()(x).shape)  # torch.Size([2, 128, 768])\n```\n\n**2. SwiGLU (LLaMA-7B sizing: `d_model=4096`, `d_ff=11008`):**\n\n```python\nclass SwiGLU_FFN(nn.Module):\n    def __init__(self, d_model=4096, d_ff=11008):\n        super().__init__()\n        self.w_gate = nn.Linear(d_model, d_ff, bias=False)\n        self.w_up   = nn.Linear(d_model, d_ff, bias=False)\n        self.w_down = nn.Linear(d_ff, d_model, bias=False)\n\n    def forward(self, x):\n        return self.w_down(nn.functional.silu(self.w_gate(x)) * self.w_up(x))\n```\n\n`d_ff ≈ 11008 ≈ (2/3)·4·d_model` — the 3-matrix gated version shrinks `d_ff` so total FFN parameters stay comparable to a plain 2-matrix, 4× FFN.",
+  "tradeoffs": "Wider FFN (higher `d_ff/d_model`) buys capacity at roughly linear cost in parameters and FLOPs; 4× is an empirical convention, not a law. Gated activations (SwiGLU/GeGLU) consistently beat plain ReLU/GELU at equal parameter budget, at the cost of a third weight matrix — nearly all frontier open models (LLaMA, Mistral, Qwen) have converged on this. Dense FFNs are simple and latency-predictable but dominate weight-memory, making them the natural quantization target. MoE trades a larger total parameter/memory footprint and routing complexity (load balancing, all-to-all communication, training instability) for lower per-token FLOPs — worth it at large scale with multi-device serving infra already in place, not worth it for small models or single-node latency-critical serving.",
+  "diagnosticQuiz": [
+    {
+      "q": "What distinguishes the FFN sub-layer from the attention sub-layer in a Transformer block?",
+      "choices": [
+        "FFN has no learnable parameters",
+        "FFN applies the same MLP independently to each position's vector; attention mixes across positions",
+        "FFN only exists in encoder blocks, not decoder blocks",
+        "FFN mixes information across token positions; attention does not"
+      ],
+      "answer": 1,
+      "explanation": "The FFN is position-wise — same weights applied independently per token, no cross-token interaction. Attention is the sub-layer that mixes across positions. The best distractor (A) simply reverses the two roles, a common confusion for learners who conflate \"sub-layer\" with \"the one that adds context.\""
+    },
+    {
+      "q": "For `d_model=1024` and the standard 4× expansion (`d_ff=4096`), what is the FFN sub-layer's parameter count (ignoring biases)?",
+      "choices": [
+        "~16.8M",
+        "~8.4M",
+        "~1M",
+        "~4M"
+      ],
+      "answer": 1,
+      "explanation": "Two matrices, each `d_model·d_ff`: `2·1024·4096 ≈ 8.4M`. The tempting wrong answer (D, ~16.8M) comes from mistakenly counting 4 matrices as if this were attention's Q/K/V/O — a common mix-up between the two sub-layers' matrix counts."
+    },
+    {
+      "q": "Why is the FFN often described using a \"key-value memory\" analogy?",
+      "choices": [
+        "Because rows of the first weight matrix act as pattern-detecting \"keys,\" and the corresponding rows of the second act as \"values\" added to the output when a key fires",
+        "Because it stores the KV-cache used during autoregressive decoding",
+        "Because it literally reuses the attention mechanism's K and V projections",
+        "Because it caches previous tokens' hidden states for reuse"
+      ],
+      "answer": 0,
+      "explanation": "This is the Geva et al. (2021) interpretation: each hidden neuron's row in `W1` detects a pattern (a \"key\"), and the matching row of `W2` is the \"value\" summed into the output when that key activates strongly. The best distractor (A) confuses this with the unrelated attention KV-cache — same vocabulary, entirely different mechanism."
+    },
+    {
+      "q": "You're serving a latency-critical, single-GPU chatbot, and profiling shows decode is memory-bandwidth bound. Which lever most directly addresses this?",
+      "choices": [
+        "Increase `d_ff` to add more capacity",
+        "Replace GELU with ReLU",
+        "Quantize the FFN weights to lower precision (e.g., int8/int4)",
+        "Switch the dense FFN to a Mixture-of-Experts FFN"
+      ],
+      "answer": 2,
+      "explanation": "FFN weights dominate parameter count, and memory-bound decode means bytes-streamed-per-step is the bottleneck, so quantizing those weights directly cuts the binding cost. MoE (B) targets compute-bound, multi-device serving and generally *increases* memory footprint (all experts must be loadable) — the wrong direction for a single-GPU memory-bound case."
+    },
+    {
+      "q": "A colleague claims \"since FFN is two-thirds of the parameters, it's also two-thirds of the FLOPs, for any sequence length.\" What's wrong?",
+      "choices": [
+        "Nothing — it's exactly true for any sequence length",
+        "Attention has no parameters, so the comparison is meaningless",
+        "FFN has zero FLOPs, only parameters",
+        "FFN FLOPs scale with sequence length n, while attention FLOPs scale with n² — so attention's share of total compute grows as sequences get longer, and the parameter split doesn't fix the FLOP split"
+      ],
+      "answer": 3,
+      "explanation": "FFN cost per token is fixed (`O(d_model·d_ff)`), so total FFN FLOPs scale `O(n·d²)`. Attention's pairwise score computation scales `O(n²·d)`. The two shares match roughly at moderate n, but as context length grows, attention's quadratic term eventually dominates — the classic reason long-context serving invests heavily in attention efficiency (e.g., FlashAttention)."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Why do modern LLMs (LLaMA, Mistral, etc.) use SwiGLU instead of a plain ReLU/GELU FFN?",
+      "a": "Empirically, gated linear unit variants give better loss-per-parameter than plain ReLU/GELU MLPs (Shazeer, \"GLU Variants Improve Transformer,\" 2020), and this was confirmed at scale by PaLM and LLaMA. Mechanically, the gate `silu(xW_gate)` learns a smooth, input-dependent multiplicative filter on the \"up\" projection — a form of conditional computation the plain MLP lacks. The catch is it needs 3 weight matrices instead of 2, so implementations shrink `d_ff` (~8/3·`d_model` instead of 4×) to hold the FFN's parameter budget roughly constant. Production teams adopt it because it's a validated, essentially \"free\" quality win at fixed parameter/FLOP cost."
+    },
+    {
+      "q": "Your team is deciding between widening a dense model's FFN vs. moving to MoE. Walk through the production tradeoffs.",
+      "a": "Dense scaling (bigger `d_ff`) grows both parameters and FLOPs per token proportionally — simple to train, serve, and quantize, with predictable latency, but every token pays the same compute regardless of difficulty. MoE keeps per-token FLOPs roughly constant (only top-k experts activate) while growing total capacity, so you get more effective \"knowledge\" without more compute per token — good when you're compute-bound and already have multi-GPU/multi-node serving infra to hold all experts resident. The cost is engineering maturity: routing/load-balancing losses, all-to-all communication overhead, harder quantization from uneven expert utilization, and training instability (expert collapse, dropped tokens). I'd pick MoE at large scale with compute as the binding constraint, and dense when memory-bound, latency-sensitive on one node, or without the ops maturity to handle routing failures."
+    },
+    {
+      "q": "Someone suggests \"just quantize the attention weights\" to cut serving cost. Is that the right target?",
+      "a": "Not the first lever. Attention holds only about a third of a block's parameters (`4·d_model²` for Q/K/V/O vs. the FFN's `~8·d_model²` at 4× expansion), so FFN weights are the bigger win for static weight-memory footprint and loading bandwidth — that's where I'd point quantization or pruning first. But attention has its own separate cost axis at serving time: the KV-cache, which grows with sequence length and batch size and is often the actual latency/memory bottleneck at long context. So the right target depends on which you're bound by — FFN weights for static memory, KV-cache compression (grouped-query attention, cache quantization) for long-context serving."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "transformer-overview"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "33a787cff43b9b05",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T13:35:41Z"
+  }
+}

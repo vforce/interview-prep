@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: dpgrid
+fam: dp
+label: DP Grid
+order: 25
+trigger: paths / min-cost across a grid
+insight: dp[r][c] from top/left; rolls down to a single 1D row
+probs:
+- {n: Unique Paths, slug: unique-paths, d: M}
+- {n: Minimum Path Sum, slug: minimum-path-sum, d: M}
+- {n: Dungeon Game, slug: dungeon-game, d: H}

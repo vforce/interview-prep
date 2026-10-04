@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.venv/
+.cc-chat/
+content/*.tmp
+server.log
+lc-tags.json
+.claude/
+node_modules/

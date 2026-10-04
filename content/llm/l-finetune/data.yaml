@@ -1,0 +1,36 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: l-finetune
+type: concept
+area: Adaptation & Retrieval
+order: 24
+front: Full fine-tune vs LoRA — what does LoRA actually train?
+back: |-
+  Full fine-tune updates every weight — huge memory for gradients + optimizer states.
+  LoRA freezes the base and trains only low-rank adapters ΔW = B·A (a tiny % of params).
+  Prompt/RAG for knowledge; fine-tune/LoRA for behavior, format, and style.
+more: |-
+  LoRA assumes the weight *update* is low-rank, learning ΔW as a product of two thin matrices.
+
+  ## Concrete example
+  One attention projection, d = 4096, LoRA rank r = 8:
+  ```
+  Full ΔW   : d × d  = 4096 × 4096 = 16,777,216 params
+  LoRA A    : r × d  = 8 × 4096    =     32,768
+  LoRA B    : d × r  = 4096 × 8    =     32,768
+  trainable : B + A  =                  65,536  → 0.39% of full
+  ΔW = B·A  : rank ≤ 8, yet still shaped 4096 × 4096
+  ```
+  Memory for a 7B model (mixed-precision Adam):
+  ```
+  Full FT : weights 14GB + grads 14GB + master/m/v ~84GB ≈ 112GB
+  LoRA    : base 14GB frozen (no grads/optimizer) + adapters ~tens of MB
+  ```
+
+  | Need | Use |
+  |---|---|
+  | Fresh facts | RAG |
+  | Consistent format/persona | LoRA |
+  | One-off, tiny data | few-shot prompt |
+
+  **Misconception:** LoRA doesn't shrink the model — the base is unchanged. At inference you can merge W' = W + B·A, so there is zero added latency.

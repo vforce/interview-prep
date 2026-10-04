@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: dpknap
+fam: dp
+label: DP Knapsack
+order: 22
+trigger: pick items to hit a target sum/count, coins, partition
+insight: dp over (items, capacity). COMBINATIONS → items outer; PERMUTATIONS → target outer (that's 518 vs 377)
+probs:
+- {n: Coin Change, slug: coin-change, d: M}
+- {n: Partition Equal Subset Sum, slug: partition-equal-subset-sum, d: M}
+- {n: Profitable Schemes, slug: profitable-schemes, d: H}

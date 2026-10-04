@@ -1,0 +1,98 @@
+{
+  "id": "similarity-at-scale",
+  "title": "Similarity at Scale",
+  "definition": "Similarity at scale is the systems problem of finding approximate nearest neighbors across large (millions–billions) vector collections within fixed latency, memory, and cost budgets — not just picking a similarity metric.",
+  "summary": "Exact brute-force similarity search is a single matmul and is fine up to roughly hundreds of thousands of vectors; beyond that, raw storage and O(N·d) comparison cost blow past production budgets. Real systems address this with three levers — approximate indexes (HNSW, IVF), vector compression (product/scalar quantization), and sharding/replication — and typically fuse dense (embedding) search with sparse (TF-IDF/BM25) search because neither alone covers both semantic and exact-match recall.",
+  "objectives": [
+    "Quantify why brute-force k-NN stops scaling (memory and compute cost) and know the rough crossover point for switching to ANN.",
+    "Explain why cosine similarity is implemented as normalized dot product in production ANN libraries, and the failure mode when normalization is skipped.",
+    "Apply vector quantization (PQ/scalar) to fit large indexes in RAM and reason about the recall cost.",
+    "Design a hybrid dense+sparse retrieval pipeline (e.g., via Reciprocal Rank Fusion) and justify when it's worth the extra latency.",
+    "Diagnose a production recall regression in a vector search system."
+  ],
+  "lesson": "\"Similarity at scale\" is the engineering problem of finding nearest neighbors once brute-force comparison against every vector is too slow or too big to fit in memory. You already know HNSW gets you sub-linear query time and TF-IDF gives sparse lexical similarity — the scale problem is deciding when each applies, and how to compress, distribute, and combine them under a real latency/cost budget. It's a system-design question, not just an algorithm choice.\n\nStart with the metric. Embedding models are usually trained for cosine similarity, but computing angle directly at query time is wasteful. Instead, L2-normalize every vector once at ingestion and search with inner product (dot product): cosine similarity of two unit vectors *equals* their dot product, and dot product is what every ANN library (FAISS `IndexFlatIP`, HNSWlib) optimizes with SIMD/BLAS kernels. Skip normalization and you silently change metrics — dot product on unnormalized vectors rewards magnitude, not direction, and rankings degrade with no error thrown.\n\nWorked example: 10M vectors, 768-dim, fp32 → 10M × 768 × 4 bytes ≈ 30.7 GB just for raw vectors, before index overhead — already awkward to serve from one machine alongside a live index. Product quantization (PQ) replaces each vector with codebook indices — e.g. 96 subquantizers × 1 byte/code = 96 bytes/vector instead of 3072 — a 32x memory reduction, letting an IVF+PQ or HNSW+PQ index fit fully in RAM at far larger scale. The cost is measurable recall loss (typically a few points of recall@10) that you must validate against ground truth, not assume from a paper.\n\nThe recurring production gotcha: dense embeddings alone lose exact-match signal — a rare SKU, an error code, a proper name — because embedding models compress and generalize. TF-IDF/BM25 doesn't have that blind spot. So production RAG systems run both a dense ANN pass and a sparse lexical pass and fuse the ranked lists (commonly Reciprocal Rank Fusion). Skipping this is the single most common reason \"the embeddings look fine but retrieval quality is bad.\"",
+  "examples": "**1. Storage cost: raw vs. quantized**\n\n```python\nn_vectors, dim = 10_000_000, 768\n\nraw_gb = n_vectors * dim * 4 / 1e9          # fp32\nprint(f\"raw fp32:  {raw_gb:.1f} GB\")        # 30.7 GB\n\npq_bytes_per_vec = 96                        # 96 subquantizers, 1 byte/code\npq_gb = n_vectors * pq_bytes_per_vec / 1e9\nprint(f\"PQ:        {pq_gb:.2f} GB\")         # 0.96 GB\nprint(f\"ratio:     {raw_gb / pq_gb:.0f}x\")  # 32x\n```\n\n**2. Hybrid fusion — dense (ANN) + sparse (TF-IDF) via Reciprocal Rank Fusion**\n\n```python\ndef reciprocal_rank_fusion(rankings, k=60):\n    \"\"\"rankings: list of ranked doc-id lists, e.g. [dense_hits, sparse_hits]\"\"\"\n    scores = {}\n    for ranking in rankings:\n        for rank, doc_id in enumerate(ranking):\n            scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (k + rank + 1)\n    return sorted(scores, key=scores.get, reverse=True)\n\ndense_hits  = [\"doc17\", \"doc3\", \"doc45\", \"doc9\"]   # HNSW cosine search\nsparse_hits = [\"doc9\", \"doc102\", \"doc17\", \"doc5\"]  # TF-IDF/BM25\n\nprint(reciprocal_rank_fusion([dense_hits, sparse_hits]))\n# doc17 and doc9 rank highest — both signals agree\n```",
+  "tradeoffs": "Brute-force (flat) search is exact and simplest — use it under roughly 100k–1M vectors, where a single matmul beats the complexity of building and tuning an ANN index. ANN (HNSW, IVF+PQ) buys sub-linear query time and lower memory at larger scale, but adds index-build time, parameter tuning (`ef_search`, `nprobe`), and update cost — HNSW inserts/deletes are more expensive than appending to a flat array, so high-churn corpora often need periodic full rebuilds. Quantization gives RAM-resident indexes at billion-vector scale but costs measurable recall — always validate on your own data, not the paper's numbers. Hybrid dense+sparse fusion improves recall on rare terms/entities/IDs but roughly doubles retrieval latency and adds a fusion-tuning surface — skip it only when queries are pure semantic/paraphrase with no exact-match terms.",
+  "diagnosticQuiz": [
+    {
+      "q": "Which best defines \"similarity at scale\" in a production RAG context?",
+      "choices": [
+        "The process of training larger embedding models to improve similarity accuracy",
+        "A synonym for TF-IDF term-weighting at large corpus sizes",
+        "The formula used to compute cosine similarity between two vectors",
+        "The system-design problem of finding approximate nearest neighbors across large vector collections within latency, memory, and cost budgets"
+      ],
+      "answer": 3,
+      "explanation": "Similarity at scale is about the engineering tradeoffs — ANN indexing, compression, sharding, hybrid retrieval — needed once a corpus is too large for exact brute-force comparison. It's not the math of a single similarity computation (A), not specific to TF-IDF (C), and orthogonal to model training (D)."
+    },
+    {
+      "q": "You store 10M vectors at 768 dimensions as float32. Approximately how much memory do the raw vectors require?",
+      "choices": [
+        "~307 GB",
+        "~3.07 GB",
+        "~7.68 GB",
+        "~30.7 GB"
+      ],
+      "answer": 3,
+      "explanation": "10,000,000 × 768 × 4 bytes ≈ 30.7 GB. ~3.07 GB drops a factor of 10 (e.g., computing for 1M vectors), ~307 GB adds an extra 10x, and ~7.68 GB comes from using 1 byte/dim (int8/quantized) instead of fp32 — a common mix-up between raw and quantized storage."
+    },
+    {
+      "q": "Why do production ANN libraries implement cosine similarity search as inner-product (dot product) search over pre-normalized vectors, rather than computing cosine directly per query?",
+      "choices": [
+        "Because dot product is always a strictly better similarity measure than cosine",
+        "Because ANN libraries cannot support division operations",
+        "Because cosine similarity is undefined for high-dimensional vectors",
+        "Because dot product on unit-normalized vectors is mathematically equal to cosine similarity, so the library can reuse one optimized inner-product kernel without per-pair normalization"
+      ],
+      "answer": 3,
+      "explanation": "Normalize once at ingestion; the dot product of two unit vectors equals their cosine similarity by definition, so search can use a single fast SIMD/BLAS inner-product kernel. Option C is the misconception to watch: dot product equals cosine *only* under normalization — without it, dot product becomes magnitude-sensitive and ranks differently. Cosine is well-defined at any dimensionality, and division isn't the actual blocker."
+    },
+    {
+      "q": "Your RAG corpus has ~40,000 chunks, p99 latency budget is 200ms, and the index is rebuilt nightly. What's the pragmatic retrieval design?",
+      "choices": [
+        "Train a custom embedding model to shrink the corpus",
+        "Use HNSW with aggressive quantization to minimize memory",
+        "Brute-force (flat/exact) similarity search — a single matmul over 40k vectors is well within budget and avoids ANN recall loss and tuning overhead",
+        "Build a sharded IVF+PQ index across 8 nodes"
+      ],
+      "answer": 2,
+      "explanation": "At tens of thousands of vectors, an exact scan is milliseconds and fits comfortably in memory — ANN's value proposition (sub-linear time, lower memory) isn't needed yet, so adopting it only adds index-build and tuning complexity for no benefit. Sharding and quantization solve problems that don't exist at this scale; retraining the embedding model doesn't address retrieval cost at all."
+    },
+    {
+      "q": "A team swaps an in-house brute-force cosine function for FAISS `IndexFlatIP` for speed. No vectors or data changed, but retrieval quality drops immediately. Most likely cause?",
+      "choices": [
+        "IndexFlatIP is approximate and lost recall versus brute force",
+        "The team stopped L2-normalizing vectors before indexing/querying, so inner product now reflects vector magnitude instead of angle",
+        "FAISS indexes silently drop low-dimensional vectors",
+        "IndexFlatIP requires retraining the embedding model"
+      ],
+      "answer": 1,
+      "explanation": "`IndexFlatIP` is an exact full inner-product scan, not approximate — option A is the trap, since people often assume any FAISS index name implies approximation. The real classic cause is a silent normalization mismatch: the old code normalized before computing cosine; the new path does a raw dot product, so rankings now correlate with vector magnitude. C and D describe behaviors FAISS doesn't have."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Walk me through designing a vector similarity search system for 500M embeddings with a p99 latency budget of 100ms.",
+      "a": "Start from the constraint: 500M vectors at, say, 768-dim fp32 is ~1.5TB raw — too big for one machine and too slow to scan. Compress with product or scalar quantization to get it RAM-resident with acceptable recall loss (validate on a held-out labeled set, not defaults). Shard across nodes (hash or clustered partitioning) with an ANN index (IVF+PQ or HNSW) per shard, query all shards in parallel and merge top-k, and replicate shards for throughput/availability. Add a sparse (BM25/TF-IDF) pass and fuse via RRF for exact-match recall, and keep a small brute-force ground-truth sample to continuously monitor recall drift."
+    },
+    {
+      "q": "How would you debug a sudden drop in retrieval recall in production?",
+      "a": "First rule out a normalization mismatch — check that both corpus and query vectors are still unit-normalized if the metric assumes cosine. Then check index freshness (did the embedding model change without a reindex, causing a mixed old/new-embedding index?). Check ANN search-time parameters (`ef_search`/`nprobe` too low after a config change or auto-tuning). Finally, sample queries and compare ANN results against brute-force ground truth on the same vectors to isolate whether it's an index problem or an upstream embedding/data problem."
+    },
+    {
+      "q": "When would you deliberately avoid an ANN index and use brute-force search instead?",
+      "a": "Below roughly 100k–1M vectors (hardware/dim-dependent), where a single matmul is already within budget and exact — ANN only adds index-build time, parameter tuning, and recall loss for no real gain. Also when the corpus churns heavily (ANN insert/delete is costlier than appending to a flat array) or when you're reranking an already-small shortlist (e.g., top-200 from a first-stage retriever), where exactness matters more than shaving milliseconds off a search over a few hundred items."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "hnsw",
+    "tf-idf"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "ba1548fe55169199",
+    "model": "sonnet",
+    "generatedAt": "2026-07-08T11:06:59Z"
+  }
+}

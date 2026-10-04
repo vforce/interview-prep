@@ -1,0 +1,944 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Recovery Roadmap</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='15'>🧗</text></svg>"/>
+<!-- ponytail: Google Fonts over network (cached after first load). Vendor locally for fully offline. -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=Hanken+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<!-- ponytail: CodeMirror 5 from CDN gives the kata editor syntax highlighting; ml.js falls back to a plain textarea if it doesn't load -->
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/dracula.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/python/python.min.js"></script>
+<!-- ponytail: marked renders the Ask-Claude chat markdown (headings/tables/code). chat.js falls back to a simple renderer if it doesn't load. -->
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.0/marked.min.js"></script>
+<script>
+/* ponytail: blocking XHR mirrors the server's state.json into localStorage BEFORE any app code reads it,
+   so progress is port/origin-independent and durable. One fast localhost request; silently skipped on file:// or old server. */
+try {
+  var _x = new XMLHttpRequest();
+  _x.open("GET", "/api/state", false);
+  _x.send();
+  if (_x.status === 200) {
+    var _s = JSON.parse(_x.responseText || "{}");
+    for (var _k in _s) {
+      if (_k === "recovery-progress-v2") {                 // merge progress (server wins per-slug) so no port wipes the other's marks
+        var _cur = {}; try { _cur = JSON.parse(localStorage.getItem(_k) || "{}"); } catch (e) {}
+        localStorage.setItem(_k, JSON.stringify(Object.assign(_cur, _s[_k])));
+      } else { localStorage.setItem(_k, JSON.stringify(_s[_k])); }
+    }
+  }
+} catch (e) {}
+</script>
+<style>
+  :root{
+    --bg:#0a0e14; --bg2:#0e131c; --surface:#141a24; --surface2:#1a212e;
+    --line:#242d3d; --text:#e7edf5; --muted:#8b97a8; --faint:#4d5868;
+    --ok:#34d399; --warn:#fbbf24; --bad:#f87171;
+    --mono:"IBM Plex Mono",ui-monospace,monospace;
+    --body:"Hanken Grotesk",system-ui,sans-serif;
+    --display:"Bricolage Grotesque",system-ui,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    font-family:var(--body); color:var(--text); overflow:hidden;
+    background-color:var(--bg);
+    background-image:
+      radial-gradient(900px 500px at 12% -8%, rgba(74,163,255,.10), transparent 60%),
+      radial-gradient(800px 600px at 108% 112%, rgba(244,114,182,.08), transparent 55%),
+      linear-gradient(rgba(255,255,255,.022) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.022) 1px, transparent 1px);
+    background-size:auto,auto,30px 30px,30px 30px;
+  }
+  .wrap{height:100vh;display:flex;flex-direction:column}
+
+  /* ---- header ---- */
+  header{
+    display:flex;align-items:flex-end;justify-content:space-between;gap:20px;
+    padding:20px 30px 16px;border-bottom:1px solid var(--line);
+    background:linear-gradient(180deg, rgba(10,14,20,.85), rgba(10,14,20,.4));
+    backdrop-filter:blur(6px);z-index:10;
+  }
+  .brand .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.32em;color:var(--muted);text-transform:uppercase}
+  .brand h1{font-family:var(--display);font-weight:800;font-size:30px;line-height:1;margin:6px 0 0;letter-spacing:-.02em}
+  .brand h1 .dot{color:var(--ok)}
+  .hud{display:flex;align-items:center;gap:18px}
+  .stat{font-family:var(--mono);font-size:12px;color:var(--muted)}
+  .stat b{color:var(--text);font-weight:600}
+  .stat .sep{color:var(--faint);margin:0 4px}
+  #reset{
+    font-family:var(--mono);font-size:11px;letter-spacing:.04em;color:var(--muted);
+    background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:7px 12px;cursor:pointer;
+    transition:.18s;
+  }
+  #reset:hover{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 45%,var(--line))}
+  .statcol{display:flex;flex-direction:column;gap:3px;align-items:flex-end;text-align:right}
+  #syncmsg{max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--faint)}
+  #syncmsg b{color:var(--text)}
+  .sync{display:flex;align-items:center;gap:7px}
+  .sync input{font-family:var(--mono);font-size:11.5px;color:var(--text);background:var(--surface);
+    border:1px solid var(--line);border-radius:8px;padding:7px 10px;width:128px;outline:none;transition:.18s}
+  .sync input:focus{border-color:#4aa3ff}
+  #syncbtn{font-family:var(--mono);font-size:11px;letter-spacing:.04em;color:#08110b;background:var(--ok);
+    border:1px solid var(--ok);border-radius:8px;padding:7px 13px;cursor:pointer;font-weight:600;transition:.16s}
+  #syncbtn:hover{filter:brightness(1.08)}
+  #syncbtn:disabled{opacity:.45;cursor:default}
+  .tabs{display:flex;gap:3px;background:var(--surface);border:1px solid var(--line);border-radius:11px;padding:3px}
+  .tabs button{font-family:var(--mono);font-size:12px;letter-spacing:.04em;color:var(--muted);background:transparent;border:0;border-radius:8px;padding:7px 16px;cursor:pointer;transition:.16s}
+  .tabs button.active{background:var(--surface2);color:var(--text);box-shadow:inset 0 1px 0 rgba(255,255,255,.05)}
+  .tabs button:hover:not(.active){color:var(--text)}
+  .deck-view{flex:1;overflow:auto;padding:40px 56px 80px}
+
+  /* ---- map ---- */
+  #map{flex:1;overflow:auto;position:relative;padding:44px 60px 80px}
+  /* daily warm-up + random cards, side by side */
+  .warmups{display:flex;gap:18px;flex-wrap:wrap;align-items:flex-start;max-width:940px;margin:0 0 34px;position:relative;z-index:1}
+  #today,#random{flex:1 1 320px;min-width:0;padding:17px 21px;border-radius:16px;
+    background:linear-gradient(135deg,color-mix(in srgb,var(--ok) 13%,var(--surface2)),var(--surface));
+    border:1px solid color-mix(in srgb,var(--ok) 28%,var(--line));box-shadow:0 16px 44px -26px var(--ok)}
+  #random{background:linear-gradient(135deg,color-mix(in srgb,var(--warn) 13%,var(--surface2)),var(--surface));
+    border-color:color-mix(in srgb,var(--warn) 28%,var(--line));box-shadow:0 16px 44px -26px var(--warn)}
+  .warmups .t-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:9px}
+  .warmups .t-title{font-family:var(--mono);font-size:11px;letter-spacing:.22em;text-transform:uppercase;color:var(--ok)}
+  #random .t-title{color:var(--warn)}
+  .warmups .t-date{font-family:var(--mono);font-size:11px;color:var(--muted)}
+  .warmups .reroll{font-family:var(--mono);font-size:12px;color:var(--muted);background:transparent;border:1px solid var(--line);border-radius:7px;padding:2px 8px;margin-left:7px;cursor:pointer}
+  .warmups .reroll:hover{color:var(--text);border-color:var(--faint)}
+  .pick{display:flex;align-items:center;gap:11px;padding:11px 0}
+  .pick+.pick{border-top:1px solid var(--line)}
+  .pick .fam-dot{width:8px;height:8px;border-radius:2px;flex:none}
+  .pick .meta{flex:1;min-width:0}
+  .pick .pname{font-weight:600;font-size:14.5px;line-height:1.2}
+  .pick .pname a{color:var(--text);text-decoration:none}
+  .pick .pname a:hover{text-decoration:underline}
+  .pick .psub{font-family:var(--mono);font-size:10.5px;color:var(--muted);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .pick .donebtn{flex:none;font-family:var(--mono);font-size:11px;color:var(--muted);background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:7px 12px;cursor:pointer;transition:.16s}
+  .pick .donebtn:hover{color:var(--text);border-color:var(--faint)}
+  .pick.done .donebtn{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 45%,var(--line));background:color-mix(in srgb,var(--ok) 12%,var(--surface))}
+  .pick.done .pname a{color:var(--muted);text-decoration:line-through}
+  .warmups .alldone{font-family:var(--mono);font-size:12px;color:var(--ok);padding-top:10px}
+  #random .alldone{color:var(--warn)}
+  svg.edges{position:absolute;top:0;left:0;z-index:0;overflow:visible;pointer-events:none;opacity:0;transition:opacity .7s .25s}
+  svg.edges.ready{opacity:1}
+  svg.edges path{fill:none;stroke-width:1.5;stroke-opacity:.12;transition:stroke-opacity .2s,stroke-width .2s}
+  svg.edges path.hl{stroke-opacity:.95;stroke-width:2.5}
+  .cols{position:relative;z-index:1;display:flex;gap:46px;align-items:flex-start;width:max-content}
+  .col{display:flex;flex-direction:column;gap:13px;opacity:0;animation:rise .55s cubic-bezier(.2,.7,.2,1) both;animation-delay:calc(var(--i)*.07s)}
+  @keyframes rise{from{opacity:0;transform:translateY(16px)}to{opacity:1;transform:none}}
+  .col-head{font-family:var(--mono);font-size:10px;letter-spacing:.22em;color:var(--faint);text-transform:uppercase;padding-left:4px;margin-bottom:1px}
+
+  /* ---- node card ---- */
+  .node{
+    position:relative;width:174px;text-align:left;cursor:pointer;color:var(--text);
+    background:linear-gradient(180deg,var(--surface2),var(--surface));
+    border:1px solid var(--line);border-radius:13px;padding:12px 13px 11px 17px;
+    font-family:var(--body);
+    transition:transform .18s,border-color .18s,box-shadow .18s;
+  }
+  .node::before{content:"";position:absolute;left:0;top:11px;bottom:11px;width:3px;border-radius:0 3px 3px 0;background:var(--fam);box-shadow:0 0 10px -1px var(--fam)}
+  .node .l{display:block;font-weight:600;font-size:13.5px;letter-spacing:-.01em;line-height:1.2}
+  .node .m{display:flex;align-items:center;gap:7px;margin-top:6px;font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+  .node .fresh{color:var(--faint)}
+  .node .fresh.warm{color:var(--ok)}
+  .node .pip{width:7px;height:7px;border-radius:50%;background:var(--faint);transition:.2s}
+  .node:hover,.node.lit{transform:translateY(-2px);border-color:color-mix(in srgb,var(--fam) 55%,var(--line));box-shadow:0 10px 28px -10px rgba(0,0,0,.7),0 0 0 1px color-mix(in srgb,var(--fam) 22%,transparent)}
+  .node.active{border-color:var(--fam);box-shadow:0 0 0 1px var(--fam),0 12px 30px -10px color-mix(in srgb,var(--fam) 60%,transparent)}
+  .node[data-st="green"]{border-color:color-mix(in srgb,var(--ok) 50%,var(--line));box-shadow:0 0 22px -10px var(--ok)}
+  .node[data-st="green"] .pip{background:var(--ok);box-shadow:0 0 8px -1px var(--ok)}
+  .node[data-st="progress"]{border-color:color-mix(in srgb,var(--warn) 45%,var(--line))}
+  .node[data-st="progress"] .pip{background:var(--warn)}
+  .node[data-st="red"]{border-color:color-mix(in srgb,var(--bad) 50%,var(--line))}
+  .node[data-st="red"] .pip{background:var(--bad);box-shadow:0 0 8px -1px var(--bad)}
+
+  /* ---- legend ---- */
+  .legend{position:fixed;left:18px;bottom:16px;z-index:8;display:flex;flex-wrap:wrap;gap:5px 14px;max-width:46vw;
+    background:color-mix(in srgb,var(--bg2) 80%,transparent);backdrop-filter:blur(10px);
+    border:1px solid var(--line);border-radius:12px;padding:10px 13px;font-family:var(--mono);font-size:10.5px;color:var(--muted)}
+  .legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:middle}
+  .legend em{color:var(--ok);font-style:normal;letter-spacing:.02em;margin-left:3px}
+  .legend .grp{flex-basis:100%;height:0;margin:1px 0;border-top:1px solid var(--line)}
+
+  /* ---- side panel ---- */
+  #panel{
+    position:fixed;top:0;right:0;height:100%;width:min(382px,100vw);z-index:30;padding:26px 26px 40px;overflow:auto;
+    background:color-mix(in srgb,var(--bg2) 90%,transparent);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+    border-left:1px solid var(--line);box-shadow:-30px 0 60px -30px rgba(0,0,0,.8);
+    transform:translateX(100%);transition:transform .34s cubic-bezier(.36,.66,.04,1)}
+  #panel.open{transform:none}
+  #panel .x{position:absolute;top:18px;right:18px;width:30px;height:30px;border-radius:8px;border:1px solid var(--line);
+    background:var(--surface);color:var(--muted);cursor:pointer;font-size:15px;line-height:1;transition:.18s}
+  #panel .x:hover{color:var(--text);border-color:var(--faint)}
+  .p-eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.2em;text-transform:uppercase;color:var(--pf)}
+  .p-eyebrow::before{content:"";display:inline-block;width:18px;height:2px;background:var(--pf);vertical-align:middle;margin-right:9px;border-radius:2px}
+  #panel h2{font-family:var(--display);font-weight:700;font-size:25px;letter-spacing:-.02em;margin:9px 0 0;line-height:1.05}
+  .lbl{font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--faint);margin:22px 0 7px}
+  .trigger{color:var(--muted);font-size:13.5px;font-style:italic;line-height:1.5}
+  .insight{position:relative;font-family:var(--mono);font-size:12.5px;line-height:1.6;color:#cdd6e2;background:var(--surface);
+    border:1px solid var(--line);border-left:3px solid var(--pf);border-radius:0 10px 10px 0;padding:11px 14px;white-space:pre-wrap}
+  .mini-edit{font-family:var(--mono);font-size:11px;color:var(--faint);background:none;border:none;cursor:pointer;padding:0 4px;vertical-align:middle}
+  .mini-edit:hover{color:var(--pf)}
+  textarea.insight-edit{width:100%;box-sizing:border-box;font-family:var(--mono);font-size:12.5px;line-height:1.6;color:#cdd6e2;
+    background:var(--surface);border:1px solid var(--pf);border-radius:0 10px 10px 0;padding:11px 14px;resize:vertical}
+  .edit-actions{display:flex;gap:8px;margin-top:8px}
+  .edit-actions button{font-family:var(--mono);font-size:11px;padding:5px 12px;border-radius:7px;cursor:pointer;border:1px solid var(--line);background:var(--surface);color:var(--text)}
+  .edit-actions .save{border-color:var(--pf);color:var(--pf)}
+  .edit-actions button:disabled{opacity:.5;cursor:default}
+  ul.probs{list-style:none;padding:0;margin:0;display:flex;flex-direction:column;gap:13px}
+  .prow{display:flex;align-items:center;gap:9px;font-size:13.5px}
+  .chip{font-family:var(--mono);font-size:10px;font-weight:600;width:18px;text-align:center;border-radius:5px;padding:2px 0;flex:none}
+  .chip.E{color:var(--ok);background:color-mix(in srgb,var(--ok) 16%,transparent)}
+  .chip.M{color:var(--warn);background:color-mix(in srgb,var(--warn) 16%,transparent)}
+  .chip.H{color:var(--bad);background:color-mix(in srgb,var(--bad) 16%,transparent)}
+  .prow a{color:var(--text);text-decoration:none;flex:1;line-height:1.25}
+  .prow a:hover{color:#fff;text-decoration:underline;text-underline-offset:2px}
+  .tries{font-family:var(--mono);font-size:11px;color:var(--faint);flex:none}
+  .tries.has{color:var(--muted)}
+  /* premium-lock toggle: translucent when off, opaque + amber when on (LeetCode premium). Saved to data.yaml. */
+  .lock{flex:none;width:24px;height:24px;padding:0;border:0;border-radius:7px;background:transparent;
+    font-size:12.5px;line-height:1;cursor:pointer;opacity:.26;filter:grayscale(.4);
+    transition:opacity .15s,background .15s,filter .15s,box-shadow .15s,transform .1s}
+  .lock:hover{opacity:.72}
+  .lock:active{transform:scale(.88)}
+  .lock:disabled{cursor:default}
+  .lock.on{opacity:1;filter:none;background:color-mix(in srgb,var(--warn) 20%,transparent);
+    box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--warn) 46%,transparent)}
+  .lock.err{background:color-mix(in srgb,var(--bad) 24%,transparent)}
+  .prow.premium a{color:var(--muted)}
+  /* favorite toggle: dim star when off, gold ★ + amber wash when on — personal, saved to state.json */
+  .fav{flex:none;width:24px;height:24px;padding:0;border:0;border-radius:7px;background:transparent;
+    font-size:15px;line-height:1;cursor:pointer;color:var(--faint);transition:color .15s,background .15s,transform .1s}
+  .fav:hover{color:var(--muted)}
+  .fav:active{transform:scale(.88)}
+  .fav.on{color:var(--warn);background:color-mix(in srgb,var(--warn) 16%,transparent)}
+  .fav.on:hover{color:var(--warn)}
+  .grades{display:flex;gap:6px;margin:5px 0 0 27px}
+  .grades button{flex:none;width:34px;height:28px;border:1px solid var(--line);border-radius:8px;background:var(--surface);
+    cursor:pointer;font-size:14px;line-height:1;filter:grayscale(.55) opacity(.7);transition:.16s}
+  .grades button:hover{filter:none;border-color:var(--faint);transform:translateY(-1px)}
+  .grades button.on{filter:none;background:color-mix(in srgb,var(--gc) 18%,var(--surface));border-color:var(--gc);box-shadow:0 0 0 1px color-mix(in srgb,var(--gc) 40%,transparent)}
+  .hint{color:var(--faint);font-size:11.5px;line-height:1.5;margin-top:26px;font-family:var(--mono)}
+  #rel-head b{color:var(--text)}
+  .related{max-height:340px;overflow:auto;margin-top:4px}
+  .rel{display:flex;align-items:center;gap:9px;padding:6px 0;font-size:13px}
+  .rel-check{flex:none;width:22px;height:22px;border-radius:6px;border:1px solid var(--line);background:var(--surface);color:var(--ok);cursor:pointer;font-size:12px;line-height:1}
+  .rel-check:hover{border-color:var(--faint)}
+  .rel.done .rel-check{background:color-mix(in srgb,var(--ok) 16%,var(--surface));border-color:color-mix(in srgb,var(--ok) 50%,var(--line))}
+  .rel a{color:var(--text);text-decoration:none;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .rel a:hover{text-decoration:underline}
+  .rel a.paid{color:var(--muted)}
+  .rel-loading{color:var(--faint);font-size:12px;font-family:var(--mono);padding:6px 0}
+  .rel-all{margin-top:8px;font-family:var(--mono);font-size:11px;color:var(--muted);background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:7px 12px;cursor:pointer}
+  .rel-all:hover{color:var(--text);border-color:var(--faint)}
+
+  /* ---- mobile (placed last so it reliably wins the cascade) ---- */
+  @media (max-width:760px){
+    header{flex-wrap:wrap;gap:9px 14px;padding:11px 15px}
+    .brand .eyebrow{font-size:10px;letter-spacing:.24em}
+    .brand h1{font-size:19px;margin-top:2px}
+    /* tabs: one tight, swipeable segmented row spanning the header (keeps the pill container, just scrolls) */
+    #tabs{order:3;max-width:100%;flex-wrap:nowrap;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+    #tabs::-webkit-scrollbar{display:none}
+    .tabs button{flex:0 0 auto;padding:7px 13px}
+    /* study/topic tabs don't use the Algorithms HUD — reclaim its otherwise-reserved space on mobile */
+    body:not([data-tab="algorithms"]) #algo-hud{display:none}
+    #algo-hud{flex-wrap:wrap;gap:10px;justify-content:flex-start}
+    .statcol{align-items:flex-start;text-align:left}
+    .sync input{width:120px}
+    .deck-view{padding:22px 16px 72px}
+    #map{padding:24px 16px 70px}
+    .legend{display:none}
+  }
+  @media (max-width:560px){
+    .brand .eyebrow{display:none}                 /* on the smallest screens the wordmark alone carries it */
+    .brand h1{font-size:18px}
+    #panel{width:100%;padding:24px 18px 36px}
+    #panel h2{font-size:22px}
+    .deck-view{padding:16px 13px 64px}
+    #map{padding:14px 12px 60px}
+    #today{padding:15px 16px;margin-bottom:22px}
+    .cols{gap:26px}
+    .col{gap:11px}
+    .node{width:152px;padding:11px 11px 10px 15px}
+    .node .l{font-size:13px}
+  }
+</style>
+</head>
+<body data-tab="algorithms">
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <div class="eyebrow">Interview Prep</div>
+      <h1>Recovery Roadmap<span class="dot">.</span></h1>
+    </div>
+    <div class="tabs" id="tabs">
+      <button data-tab="algorithms" class="active">Algorithms</button>
+      <!-- study-deck tabs (ML, LLM, …) are added by study.js from content/*.yaml -->
+    </div>
+    <div class="hud" id="algo-hud">
+      <div class="statcol">
+        <div class="stat" id="stats"></div>
+        <div class="stat" id="syncmsg"></div>
+      </div>
+      <div class="sync">
+        <input id="lcuser" placeholder="your leetcode handle" spellcheck="false" autocomplete="off"/>
+        <button id="syncbtn">⟲ Sync</button>
+      </div>
+      <button id="reset">RESET</button>
+    </div>
+  </header>
+  <div id="map"><svg class="edges" id="edges"></svg><div class="warmups"><div id="today"></div><div id="random"></div></div><div class="cols" id="cols"></div></div>
+  <!-- study-deck views (.deck-view) are appended here by study.js -->
+</div>
+<div class="legend" id="legend"></div>
+<aside id="panel"></aside>
+
+<script src="/web/review.js"></script>
+<script src="/web/concepts.js"></script>
+<script src="/web/study.js"></script>
+<script src="/web/chat.js"></script>
+<script src="/web/git.js"></script>
+<script src="/web/topic.js"></script>
+<script src="/web/notes.js"></script>
+<script src="/web/dashboard.js"></script>
+<script src="/api/roadmap.js"></script>   <!-- window.ROADMAP: content/algos/ -->
+<script>
+if (typeof ROADMAP === "undefined") {   // /api/roadmap.js didn't load (stale/old server?) — fail loud, not blank
+  document.body.innerHTML = '<p style="max-width:44ch;margin:18vh auto;font:15px/1.6 system-ui,sans-serif;color:#cdd6e2;text-align:center">⚠ <b>/api/roadmap.js didn’t load.</b><br>Restart the dev server (<code>make run</code>) and reload — the roadmap data comes from there.</p>';
+  throw new Error("ROADMAP missing — /api/roadmap.js failed to load");
+}
+const FAM = ROADMAP.families;   // {fam: {n, c}} — content/algos/deck.yaml
+const STATUS = {
+  green:{c:"var(--ok)",emoji:"🟢",label:"got it"},
+  yellow:{c:"var(--warn)",emoji:"🟡",label:"shaky"},
+  red:{c:"var(--bad)",emoji:"🔴",label:"gap"},
+};
+// ---- recency + topic mapping (shared by the LeetCode sync and the Solved tab) ----
+const SYNC_WINDOW_DAYS = 30;                                    // a solve counts as "recent" for this many days
+const daysAgo = d => Math.round((Date.now() - Date.parse(d)) / 864e5);   // d = "YYYY-MM-DD" → whole days
+const TAG_FAM = {                                              // LeetCode topic tag → dashboard family
+  "Two Pointers":"arrays","Sliding Window":"arrays","Prefix Sum":"arrays","Binary Search":"arrays","Array":"arrays","Hash Table":"arrays","Sorting":"arrays","Greedy":"arrays","Matrix":"arrays","String":"arrays","Counting":"arrays",
+  "Stack":"stackheap","Monotonic Stack":"stackheap","Heap (Priority Queue)":"stackheap","Queue":"stackheap","Monotonic Queue":"stackheap",
+  "Backtracking":"backtracking",
+  "Tree":"trees","Binary Tree":"trees","Binary Search Tree":"trees","Depth-First Search":"trees","Breadth-First Search":"trees","Segment Tree":"trees","Binary Indexed Tree":"trees",
+  "Graph":"graphs","Union Find":"graphs","Topological Sort":"graphs","Shortest Path":"graphs","Minimum Spanning Tree":"graphs",
+  "Trie":"triebits","Bit Manipulation":"triebits","Bitmask":"triebits",
+  "Dynamic Programming":"dp","Memoization":"dp",
+  "Design":"design","Linked List":"design","Data Stream":"design","Iterator":"design",
+};
+const FAM_PRIORITY = ["dp","graphs","trees","triebits","backtracking","stackheap","design","arrays"];   // most distinctive wins
+const famOf = tags => { const s = new Set((tags||[]).map(t=>TAG_FAM[t]).filter(Boolean)); for (const f of FAM_PRIORITY) if (s.has(f)) return f; return "other"; };
+// One node per pattern. probs = an easy→hard ramp; tackle them top to bottom.
+const P = ROADMAP.topics;       // topic nodes — content/algos/<id>/data.yaml
+const E = ROADMAP.edges;        // prerequisite DAG — content/algos/deck.yaml
+
+/* ---------- state ---------- */
+const KEY = "recovery-progress-v2";
+const prog = JSON.parse(localStorage.getItem(KEY) || "{}");   // { slug: {s, a, t, lc} }
+const fav = JSON.parse(localStorage.getItem("recovery-favorites") || "{}");   // { slug: true } — personal favorites, synced to state.json
+const topicFresh = (() => { try { return JSON.parse(localStorage.getItem("recovery-topics") || "{}"); } catch (_) { return {}; } })();   // { family: "YYYY-MM-DD" last practiced }
+// When was a family last practiced? `topicFresh` alone under-reports: it's only ever written by the
+// LeetCode sync, and only for solves whose topic tags are already cached in lc-tags.json — so a brand
+// new solve (tags not cached yet) or an in-app "mark done" left the family reading stale. Union it with
+// the dates the curated problems already carry in `prog`; the stored map still covers off-roadmap solves.
+const FAM_SLUGS = {};                                          // family → its curated problem slugs
+P.forEach(p => (FAM_SLUGS[p.fam] = FAM_SLUGS[p.fam] || []).push(...p.probs.map(q => q.slug)));
+function famFresh(fam){
+  let d = topicFresh[fam] || "";
+  for (const slug of FAM_SLUGS[fam] || []){ const t = prog[slug] && prog[slug].t; if (t && t > d) d = t; }
+  return d || null;                                            // "YYYY-MM-DD" sorts lexically = chronologically
+}
+const STATE_KEYS =["recovery-progress-v2", "recovery-favorites", "recovery-daily", "recovery-random", "recovery-topics", "ml-srs-v1", "llm-srs-v1", "ml-srs-v1::rand", "llm-srs-v1::rand", "ml-srs-v1::top", "llm-srs-v1::top", "ml-srs-v1::quiz-srs", "llm-srs-v1::quiz-srs", "concepts-v1", "recovery-notes"];
+function pushState(){                                       // debounced mirror of localStorage → server state.json
+  clearTimeout(pushState._t);
+  pushState._t = setTimeout(() => {
+    const bundle = {};
+    for (const k of STATE_KEYS){ const v = localStorage.getItem(k); if (v != null) try { bundle[k] = JSON.parse(v); } catch (_) {} }
+    fetch("/api/state", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(bundle) }).catch(() => {});
+  }, 400);
+}
+window.__pushState = pushState;
+const save = () => { localStorage.setItem(KEY, JSON.stringify(prog)); pushState(); };
+const saveFav = () => { localStorage.setItem("recovery-favorites", JSON.stringify(fav)); pushState(); };
+const byId = Object.fromEntries(P.map(p => [p.id, p]));
+
+function agg(p){
+  let solved=0, touched=0, gap=0;
+  for (const q of p.probs){ const e = prog[q.slug]; if (e && e.s){ touched++; if (e.s==="green") solved++; else if (e.s==="red") gap++; } }
+  let st = null;
+  if (solved === p.probs.length) st = "green";
+  else if (gap > 0) st = "red";
+  else if (touched > 0) st = "progress";
+  return {solved, total:p.probs.length, st};
+}
+
+/* ---------- layered (longest-path) layout ---------- */
+const indeg = {}, adj = {}, depth = {};
+P.forEach(p => { indeg[p.id]=0; adj[p.id]=[]; });
+E.forEach(([a,b]) => { adj[a].push(b); indeg[b]++; });
+const q = [];
+P.forEach(p => { if (indeg[p.id]===0){ depth[p.id]=0; q.push(p.id); } });
+while (q.length){ const u=q.shift(); for (const v of adj[u]){ depth[v]=Math.max(depth[v]??0, depth[u]+1); if (--indeg[v]===0) q.push(v); } }
+const maxD = Math.max(...Object.values(depth));
+const famOrder = Object.keys(FAM);
+
+const colsEl = document.getElementById("cols");
+const cardEl = {};
+for (let d=0; d<=maxD; d++){
+  const col = document.createElement("div");
+  col.className = "col"; col.style.setProperty("--i", d);
+  const head = document.createElement("div");
+  head.className = "col-head"; head.textContent = "Stage " + String(d).padStart(2,"0");
+  col.appendChild(head);
+  P.filter(p => depth[p.id]===d)
+   .sort((a,b) => famOrder.indexOf(a.fam)-famOrder.indexOf(b.fam) || a.label.localeCompare(b.label))
+   .forEach(p => {
+      const card = document.createElement("button");
+      card.className = "node";
+      card.style.setProperty("--fam", FAM[p.fam].c);
+      card.innerHTML = `<span class="l">${p.label}</span><span class="m"><i class="pip"></i><span class="frac"></span><span class="fresh"></span></span>`;
+      card.onclick = e => { e.stopPropagation(); openPanel(p.id); };
+      card.onmouseenter = () => hover(p.id, true);
+      card.onmouseleave = () => hover(p.id, false);
+      cardEl[p.id] = card;
+      col.appendChild(card);
+      refreshCard(p);
+   });
+  colsEl.appendChild(col);
+}
+
+const nbr = {}; P.forEach(p => nbr[p.id]=new Set());
+E.forEach(([a,b]) => { nbr[a].add(b); nbr[b].add(a); });
+
+function refreshCard(p){
+  const a = agg(p), c = cardEl[p.id];
+  if (a.st) c.dataset.st = a.st; else c.removeAttribute("data-st");
+  c.querySelector(".frac").textContent = `${a.solved}/${a.total}`;
+  const tf = famFresh(p.fam), fe = c.querySelector(".fresh");   // this family practiced recently?
+  if (fe){
+    const n = tf ? daysAgo(tf) : null;
+    if (n != null && n <= SYNC_WINDOW_DAYS){ fe.textContent = n <= 0 ? "· today" : `· ${n}d`; fe.classList.add("warm"); }
+    else { fe.textContent = ""; fe.classList.remove("warm"); }
+  }
+}
+function hover(id, on){
+  document.querySelectorAll("#edges path").forEach(pa => {
+    if (pa.dataset.from===id || pa.dataset.to===id) pa.classList.toggle("hl", on);
+  });
+  nbr[id].forEach(n => cardEl[n] && cardEl[n].classList.toggle("lit", on));
+}
+
+/* ---------- edges ---------- */
+const map = document.getElementById("map"), svg = document.getElementById("edges");
+function layoutEdges(){
+  if (map.offsetParent === null) return;   // skip while the algorithms view is hidden (rects would be 0)
+  const W = map.scrollWidth, H = map.scrollHeight, mr = map.getBoundingClientRect();
+  svg.setAttribute("width", W); svg.setAttribute("height", H); svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  const ctr = el => { const r = el.getBoundingClientRect(); return {x:r.left-mr.left+map.scrollLeft, y:r.top-mr.top+map.scrollTop, w:r.width, h:r.height}; };
+  let s = "";
+  for (const [from,to] of E){
+    const a = cardEl[from], b = cardEl[to]; if (!a || !b) continue;
+    const ca = ctr(a), cb = ctr(b);
+    const x1 = ca.x+ca.w, y1 = ca.y+ca.h/2, x2 = cb.x, y2 = cb.y+cb.h/2;
+    const dx = Math.max(34, (x2-x1)*0.5);
+    s += `<path d="M${x1},${y1} C${x1+dx},${y1} ${x2-dx},${y2} ${x2},${y2}" stroke="${FAM[byId[from].fam].c}" data-from="${from}" data-to="${to}"></path>`;
+  }
+  svg.innerHTML = s;
+  svg.classList.add("ready");
+}
+let rt; addEventListener("resize", () => { clearTimeout(rt); rt=setTimeout(layoutEdges, 120); });
+(document.fonts ? document.fonts.ready : Promise.resolve()).then(() => requestAnimationFrame(layoutEdges));
+requestAnimationFrame(() => requestAnimationFrame(layoutEdges));
+
+/* ---------- panel ---------- */
+const panel = document.getElementById("panel");
+let openId = null;
+function openPanel(id){
+  openId = id; const p = byId[id];
+  panel.style.setProperty("--pf", FAM[p.fam].c);
+  panel.innerHTML = `
+    <button class="x" title="close">✕</button>
+    <div class="p-eyebrow">${FAM[p.fam].n}</div>
+    <h2>${p.label}</h2>
+    <div class="lbl">When you see</div><div class="trigger">${p.trigger}</div>
+    <div class="lbl">Key insight <button class="mini-edit" id="edit-insight" title="Edit insight">✎ edit</button></div><div class="insight" id="insight-view">${p.insight}</div>
+    <div class="lbl">Problems · grade each attempt</div>
+    <ul class="probs">${p.probs.map(qq => {
+      const e = prog[qq.slug] || {}, a = e.a || 0;
+      return `<li>
+        <div class="prow${qq.premium?' premium':''}"><span class="chip ${qq.d}">${qq.d}</span><a href="https://leetcode.com/problems/${qq.slug}/" target="_blank" rel="noopener">${qq.n}</a><span class="tries ${a?'has':''}">${a?'×'+a:''}${e.lc?' · LC':''}</span><button class="fav${fav[qq.slug]?' on':''}" data-slug="${qq.slug}" aria-pressed="${fav[qq.slug]?'true':'false'}" title="${fav[qq.slug]?'Favorited · click to remove':'Mark as favorite'}">★</button><button class="lock${qq.premium?' on':''}" data-slug="${qq.slug}" aria-pressed="${qq.premium?'true':'false'}" title="${qq.premium?'Premium-locked · click to unlock':'Mark as premium-locked'}">🔒</button></div>
+        <div class="grades">${Object.entries(STATUS).map(([k,v]) =>
+          `<button title="${v.label}" data-slug="${qq.slug}" data-g="${k}" class="${e.s===k?'on':''}" style="--gc:${v.c}">${v.emoji}</button>`).join("")}</div>
+      </li>`;
+    }).join("")}</ul>
+    <div class="lbl" id="rel-head">Related problems</div>
+    <div id="related" class="related"></div>
+    <p class="hint">Each button press logs one attempt; Sync ticks off solved related problems.<br>Full notes &amp; code templates live in RECOVERY.md.</p>`;
+  panel.classList.add("open");
+  keepOpen();
+  panel.querySelector(".x").onclick = closePanel;
+  panel.querySelectorAll("button[data-g]").forEach(b => b.onclick = () => grade(b.dataset.slug, b.dataset.g));
+  panel.querySelectorAll("button.lock").forEach(b => {
+    const prob = p.probs.find(q => q.slug === b.dataset.slug);
+    b.onclick = () => toggleLock(b, prob, p.id);
+  });
+  panel.querySelectorAll("button.fav").forEach(b => b.onclick = () => toggleFav(b, b.dataset.slug));
+  wireInsight(p);
+  loadRelated(p);
+}
+// Toggle a problem's favorite flag — personal, localStorage → state.json (no server write, unlike premium).
+function toggleFav(btn, slug){
+  const next = !fav[slug];
+  if (next) fav[slug] = true; else delete fav[slug];
+  saveFav();
+  btn.classList.toggle("on", next);
+  btn.setAttribute("aria-pressed", next ? "true" : "false");
+  btn.title = next ? "Favorited · click to remove" : "Mark as favorite";
+}
+// Toggle a problem's LeetCode-premium flag → POST /api/roadmap/premium, which rewrites content/algos/<id>/data.yaml.
+// byId[id] === p, so the flag sticks in memory too; commit the changed file when you're ready.
+async function toggleLock(btn, prob, topicId){
+  if (!prob || btn.disabled) return;
+  const next = !prob.premium;
+  btn.disabled = true;
+  try {
+    const r = await fetch("/api/roadmap/premium", { method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({ id: topicId, slug: prob.slug, premium: next }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || d.error) throw new Error(d.error || "save failed");
+    prob.premium = next;                                   // update in-memory ROADMAP so re-opening reflects it
+    btn.classList.toggle("on", next);
+    btn.closest(".prow").classList.toggle("premium", next);
+    btn.setAttribute("aria-pressed", String(next));
+    btn.title = next ? "Premium-locked · click to unlock" : "Mark as premium-locked";
+  } catch(e){
+    btn.title = "⚠ " + (e.message || "save failed");
+    btn.classList.add("err"); setTimeout(() => btn.classList.remove("err"), 1200);
+  } finally { btn.disabled = false; }
+}
+// Edit the "Key insight" in place → POST /api/roadmap/insight, which rewrites content/algos/<id>/data.yaml.
+// byId[id] === p, so the edit sticks in memory too; commit the changed file when you're ready.
+function wireInsight(p){
+  const btn = panel.querySelector("#edit-insight"), view = panel.querySelector("#insight-view");
+  if (!btn || !view) return;
+  btn.onclick = () => {
+    btn.style.display = "none";
+    const ta = document.createElement("textarea");
+    ta.className = "insight-edit"; ta.value = p.insight; ta.rows = 4;
+    const bar = document.createElement("div");
+    bar.className = "edit-actions";
+    bar.innerHTML = `<button class="save">Save</button><button class="cancel">Cancel</button>`;
+    view.replaceWith(ta); ta.after(bar); ta.focus();
+    const restore = () => {
+      const v = document.createElement("div");
+      v.className = "insight"; v.id = "insight-view"; v.textContent = p.insight;
+      ta.replaceWith(v); bar.remove(); btn.style.display = ""; wireInsight(p);
+    };
+    bar.querySelector(".cancel").onclick = restore;
+    bar.querySelector(".save").onclick = async () => {
+      const val = ta.value.trim();
+      if (!val){ ta.focus(); return; }
+      const save = bar.querySelector(".save"); save.disabled = true; save.textContent = "Saving…";
+      try {
+        const r = await fetch("/api/roadmap/insight", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({ id: p.id, insight: val }) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok || d.error) throw new Error(d.error || "save failed");
+        p.insight = val;
+        restore();
+      } catch (e) {
+        save.disabled = false; save.textContent = "Save";
+        alert("Could not save insight: " + e.message + "\n(Edit from the local dev server — make run — or set ALLOW_REMOTE_GIT for the tailnet.)");
+      }
+    };
+  };
+}
+/* Closes on ✕, on an outside click, or after PANEL_IDLE_MS of no interaction. Any interaction inside the
+   panel restarts the clock. Panel clicks are stopped here (like the node cards do) so they never reach the
+   outside-click listener below — a handler that re-renders detaches its own e.target, and a detached target
+   is not `panel.contains(…)`, which used to make grading/starring a problem close the panel instantly. */
+const PANEL_IDLE_MS = 15000;
+let idleT;
+const keepOpen = () => {
+  clearTimeout(idleT);
+  if (openId) idleT = setTimeout(() => panel.querySelector(".insight-edit") ? keepOpen() : closePanel(), PANEL_IDLE_MS);
+};                                                        // an open insight editor is never closed out from under you
+function closePanel(){ clearTimeout(idleT); openId=null; panel.classList.remove("open"); }
+panel.addEventListener("click", e => e.stopPropagation());
+["pointerdown","pointermove","keydown","wheel","input"].forEach(t => panel.addEventListener(t, keepOpen));
+addEventListener("click", e => { if (openId && !panel.contains(e.target)) closePanel(); });
+
+/* ---------- related problems (LeetCode 'Similar Questions'; coverage = solved within the shown set) ---------- */
+const relatedCache = {};
+const fetchRelated = slugs => fetch("/api/related?" + slugs.map(s => "slug=" + encodeURIComponent(s)).join("&")).then(r => r.json());
+async function loadRelated(p){
+  const box = document.getElementById("related"); if (!box) return;
+  if (relatedCache[p.id]) return renderRelated(p);
+  box.innerHTML = `<div class="rel-loading">loading related problems…</div>`;
+  try {
+    const d = await fetchRelated([(p.probs.find(q => q.d === "M") || p.probs[0]).slug]);
+    if (d.error) { box.innerHTML = `<div class="rel-loading">⚠ ${d.error}</div>`; return; }
+    relatedCache[p.id] = { items: d.items || [], expanded: false };
+    if (openId === p.id) renderRelated(p);
+  } catch (_) {
+    box.innerHTML = `<div class="rel-loading">⚠ start the server (make run) and open via localhost to load related problems</div>`;
+  }
+}
+async function expandRelated(p){
+  const box = document.getElementById("related"); if (!box) return;
+  box.innerHTML = `<div class="rel-loading">loading more related…</div>`;
+  try {
+    const d = await fetchRelated(p.probs.map(q => q.slug));
+    if (!d.error) relatedCache[p.id] = { items: d.items || [], expanded: true };
+  } catch (_) {}
+  if (openId === p.id) renderRelated(p);
+}
+function renderRelated(p){
+  const head = document.getElementById("rel-head"), box = document.getElementById("related"), c = relatedCache[p.id];
+  if (!c || !box || !head) return;
+  const solved = c.items.filter(it => (prog[it.slug] || {}).s === "green").length;
+  head.innerHTML = `Related problems · <b>${solved}</b>/${c.items.length} solved`;
+  box.innerHTML = c.items.map(it => {
+    const e = prog[it.slug] || {}, done = e.s === "green", D = (it.difficulty || "?")[0];
+    const lk = e.p === undefined ? !!it.paid : e.p, f = !!fav[it.slug];   // lock defaults to LeetCode's paidOnly, overridable
+    return `<div class="rel ${done ? "done" : ""}"><button class="rel-check" data-slug="${it.slug}" title="mark solved">${done ? "✓" : ""}</button>` +
+      `<span class="chip ${D}">${D}</span>` +
+      `<a class="${lk ? "paid" : ""}" href="https://leetcode.com/problems/${it.slug}/" target="_blank" rel="noopener">${it.title}</a>` +
+      `<button class="fav${f ? " on" : ""}" data-slug="${it.slug}" aria-pressed="${f}" title="${f ? "Favorited · click to remove" : "Mark as favorite"}">★</button>` +
+      `<button class="lock${lk ? " on" : ""}" data-slug="${it.slug}" aria-pressed="${lk}" title="${lk ? "Premium-locked · click to unlock" : "Mark as premium-locked"}">🔒</button></div>`;
+  }).join("") + (c.items.length && !c.expanded ? `<button class="rel-all" id="rel-all">show more related →</button>` : "");
+  box.querySelectorAll(".rel-check").forEach(b => b.onclick = () => { toggleSolved(b.dataset.slug); renderRelated(p); P.forEach(refreshCard); renderStats(); });
+  box.querySelectorAll(".fav").forEach(b => b.onclick = () => toggleFav(b, b.dataset.slug));
+  box.querySelectorAll(".lock").forEach(b => b.onclick = () => { toggleRelLock(b.dataset.slug, !b.classList.contains("on")); renderRelated(p); });
+  const all = document.getElementById("rel-all"); if (all) all.onclick = () => expandRelated(p);
+}
+// Premium-lock a related problem. ponytail: personal override kept in prog[slug].p (already synced to
+// state.json) — related problems aren't in content/algos, so there's no data.yaml to write like .prow's lock.
+function toggleRelLock(slug, on){
+  const e = prog[slug] || {};
+  e.p = on; prog[slug] = e; save();
+}
+function toggleSolved(slug){
+  const e = prog[slug] || {};
+  e.s = e.s === "green" ? undefined : "green";
+  if (e.s) e.t = e.t || isoDay();
+  prog[slug] = e; save();
+}
+
+function grade(slug, g){
+  const e = prog[slug] || {a:0};
+  e.a = (e.a||0) + 1;   // every press = one attempt
+  e.s = g; e.t = isoDay();
+  prog[slug] = e; save();
+  P.forEach(refreshCard);              // a slug can live in >1 node
+  if (openId) openPanel(openId);
+  renderStats(); renderToday(); renderLegend();   // grading counts as practicing the family
+}
+function renderStats(){
+  const all = new Set(); P.forEach(p => p.probs.forEach(qq => all.add(qq.slug)));
+  let green=0, attempts=0;
+  all.forEach(slug => { const e = prog[slug]; if (e){ attempts += e.a||0; if (e.s==="green") green++; } });
+  document.getElementById("stats").innerHTML = `<b>${green}</b>/${all.size} solved<span class="sep">·</span><b>${attempts}</b> attempts`;
+}
+document.getElementById("reset").onclick = e => {
+  e.stopPropagation();
+  if (!confirm("Clear all grades and attempt counts?")) return;
+  for (const k in prog) delete prog[k]; for (const k in topicFresh) delete topicFresh[k];
+  localStorage.removeItem(KEY); localStorage.removeItem("recovery-daily"); localStorage.removeItem("recovery-random"); localStorage.removeItem("recovery-topics"); pushState();
+  P.forEach(refreshCard); closePanel(); renderStats(); renderToday(); renderLegend();
+};
+
+/* ---------- legend (families annotated with recent-practice freshness) ---------- */
+function renderLegend(){
+  const fams = Object.entries(FAM).map(([k,f]) => {
+    const tf = famFresh(k), warm = tf && daysAgo(tf) <= SYNC_WINDOW_DAYS;
+    return `<span><i style="background:${f.c}"></i>${f.n}${warm ? ` <em>${daysAgo(tf)===0?"today":daysAgo(tf)+"d"}</em>` : ""}</span>`;
+  }).join("");
+  document.getElementById("legend").innerHTML = fams +
+    `<span class="grp"></span>` +
+    `<span><i style="background:var(--ok)"></i>all solved</span>` +
+    `<span><i style="background:var(--warn)"></i>in progress</span>` +
+    `<span><i style="background:var(--bad)"></i>has a gap</span>`;
+}
+renderLegend();
+renderStats();
+
+/* ---------- LeetCode sync (needs server.py; no-op on file://) ---------- */
+async function sync(){
+  const user = document.getElementById("lcuser").value.trim();
+  const btn = document.getElementById("syncbtn"), msg = document.getElementById("syncmsg");
+  btn.disabled = true; msg.textContent = "syncing…";
+  try{
+    const data = await (await fetch("/api/progress?user=" + encodeURIComponent(user))).json();
+    if (data.error){ msg.textContent = "⚠ " + data.error; return; }
+    const dayOf = ts => { const t = new Date(ts*1000); return `${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,"0")}-${String(t.getDate()).padStart(2,"0")}`; };
+    const cutoff = new Date(Date.now() - SYNC_WINDOW_DAYS*864e5).toISOString().slice(0,10);   // 30 days ago
+    // 1) recency reconcile: drop LeetCode-sourced marks that aren't recent (this un-does the old all-time flood).
+    //    Your manual "mark done" grades have no .lc flag, so they're always kept.
+    for (const slug in prog){ const e = prog[slug]; if (e.lc && (!e.t || e.t < cutoff)) delete prog[slug]; }
+    // 2) apply RECENT LeetCode solves: freshen the specific curated problem you did, and mark its topic practiced.
+    const curated = new Set(P.flatMap(p=>p.probs.map(q=>q.slug)));
+    let nP = 0;
+    for (const r of (data.recent || [])){
+      const date = dayOf(r.ts);
+      if (date < cutoff) continue;                              // older than the window → not "recent"
+      if (curated.has(r.slug)){                                 // problem-level: a curated problem you solved on LC
+        const e = prog[r.slug];
+        if (!e || e.lc || (e.t||"") < date){ prog[r.slug] = {s:"green", a:(e&&e.a)||1, lc:true, t:date}; nP++; }
+      }
+      const fam = famOf(r.tags);                                // topic-level: any solve refreshes its family
+      if (fam && fam!=="other" && (!topicFresh[fam] || date > topicFresh[fam])) topicFresh[fam] = date;
+    }
+    localStorage.setItem("recovery-topics", JSON.stringify(topicFresh));
+    save(); P.forEach(refreshCard); renderStats(); renderToday(); renderLegend();
+    const c = data.counts || {}, tot = (c.Easy||0)+(c.Medium||0)+(c.Hard||0);
+    msg.innerHTML = `synced <b>${data.user}</b> · ${tot} on LC · <b>${nP}</b> recent here` + (data.authed ? "" : " · public");
+  } catch(_){
+    msg.textContent = "⚠ start the server: python3 server.py — then open via localhost, not file://";
+  } finally { btn.disabled = false; }
+}
+document.getElementById("syncbtn").onclick = e => { e.stopPropagation(); sync(); };
+const lcUser = document.getElementById("lcuser");                 // your LeetCode handle, remembered per browser
+lcUser.value = localStorage.getItem("lc-handle") || "";
+lcUser.onchange = () => { localStorage.setItem("lc-handle", lcUser.value.trim()); sync(); };
+if (location.protocol !== "file:") { sync(); setInterval(sync, 5 * 60 * 1000); }   // auto-sync on load + every 5 min
+document.getElementById("lcuser").onclick = e => e.stopPropagation();
+if (location.protocol === "file:")
+  document.getElementById("syncmsg").textContent = "run  python3 server.py  to enable LeetCode sync";
+
+/* ---------- daily warm-up: 1 stale easy + 1 medium that builds on a recent easy ---------- */
+const isoDay = () => new Date().toISOString().slice(0, 10);
+const entryDate = slug => { const e = prog[slug]; return e ? (e.t || "0001-01-01") : ""; };  // "" = never done → most stale
+const isDoneToday = slug => { const e = prog[slug]; return !!(e && e.t === isoDay()); };
+
+function computeDaily(){
+  // EASY = the easy you've gone longest without doing (never-done floats to the top).
+  const easies = P.flatMap(p => p.probs.filter(q => q.d==="E" && !q.premium).map(q => ({slug:q.slug, name:q.n, fam:p.fam, node:p.label})));
+  easies.sort((a,b) => entryDate(a.slug).localeCompare(entryDate(b.slug)) || a.slug.localeCompare(b.slug));
+  const easy = easies[0] || null;
+  // MEDIUM = the medium of a pattern whose EASY you did recently (most recent first), not yet solved.
+  const recent = P.map(p => ({p, e:p.probs.find(q => q.d==="E")}))
+                  .filter(x => x.e && prog[x.e.slug] && prog[x.e.slug].t)
+                  .sort((a,b) => prog[b.e.slug].t.localeCompare(prog[a.e.slug].t));
+  let med = null;
+  for (const {p,e} of recent){
+    const m = p.probs.find(q => q.d==="M" && !q.premium); if (!m) continue;
+    if ((prog[m.slug]||{}).s !== "green"){ med = {slug:m.slug, name:m.n, fam:p.fam, node:p.label, why:`builds on your ${e.n}`}; break; }
+  }
+  if (!med){                                              // fallback: stalest medium, preferring today's easy's family
+    const fam = easy && easy.fam;
+    const meds = P.flatMap(p => p.probs.filter(q => q.d==="M" && !q.premium).map(q => ({slug:q.slug, name:q.n, fam:p.fam, node:p.label})));
+    meds.sort((a,b) => ((a.fam===fam?0:1)-(b.fam===fam?0:1)) || entryDate(a.slug).localeCompare(entryDate(b.slug)) || a.slug.localeCompare(b.slug));
+    med = meds[0] || null;
+    if (med) med.why = med.fam===fam ? "same pattern family as today's easy" : "a fresh medium to stretch";
+  }
+  return {date:isoDay(), easy, med};
+}
+function getDaily(reroll){
+  let d = JSON.parse(localStorage.getItem("recovery-daily") || "null");
+  if (reroll || !d || d.date !== isoDay()){ d = computeDaily(); localStorage.setItem("recovery-daily", JSON.stringify(d)); pushState(); }
+  return d;
+}
+function markDone(slug){
+  const e = prog[slug] || {a:0};
+  e.a = (e.a||0)+1; e.s = "green"; e.t = isoDay(); delete e.lc;
+  prog[slug] = e; save();
+  P.forEach(refreshCard); renderStats(); renderToday(); renderRandom(); renderLegend(); layoutEdges();
+}
+function pickRow(pick, kind, why){
+  if (!pick) return "";
+  const done = isDoneToday(pick.slug);
+  return `<div class="pick ${done?'done':''}">
+    <span class="chip ${kind}">${kind}</span><span class="fam-dot" style="background:${FAM[pick.fam].c}"></span>
+    <span class="meta"><div class="pname"><a href="https://leetcode.com/problems/${pick.slug}/" target="_blank" rel="noopener">${pick.name}</a></div>
+    <div class="psub">${pick.node} · ${why}</div></span>
+    <button class="donebtn" data-done="${pick.slug}">${done?'✓ done':'mark done'}</button></div>`;
+}
+function renderToday(){
+  const d = getDaily(false), el = document.getElementById("today");
+  const both = (!d.easy || isDoneToday(d.easy.slug)) && (!d.med || isDoneToday(d.med.slug));
+  const date = new Date().toLocaleDateString(undefined, {weekday:"short", month:"short", day:"numeric"});
+  const easyWhy = d.easy ? (prog[d.easy.slug] ? "stale — time to revive it" : "you haven't done this one yet") : "";
+  el.innerHTML = `
+    <div class="t-head"><span class="t-title">☀ Today's warm-up</span>
+      <span class="t-date">${date}<button class="reroll" title="pick again">↻</button></span></div>
+    ${pickRow(d.easy, "E", easyWhy)}
+    ${pickRow(d.med, "M", d.med ? d.med.why : "")}
+    ${both ? '<div class="alldone">✓ warm for today — see you tomorrow.</div>' : ''}`;
+  el.querySelectorAll("[data-done]").forEach(b => b.onclick = ev => { ev.stopPropagation(); markDone(b.dataset.done); });
+  el.querySelector(".reroll").onclick = ev => { ev.stopPropagation(); getDaily(true); renderToday(); renderRandom(); layoutEdges(); };
+}
+renderToday();
+
+/* ---------- random questions: a few not-yet-solved problems, distinct from today's warm-up ---------- */
+const RAND_N = 3;
+const notDone = slug => (prog[slug]||{}).s !== "green";
+const warmupSlugs = () => { const d = getDaily(false); return new Set([d.easy&&d.easy.slug, d.med&&d.med.slug].filter(Boolean)); };
+function computeRandom(){
+  const ex = warmupSlugs();
+  const pool = P.flatMap(p => p.probs.filter(q => q.d !== "H" && !q.premium && notDone(q.slug) && !ex.has(q.slug))   // easy/medium only, no premium-locked
+                               .map(q => ({slug:q.slug, name:q.n, fam:p.fam, node:p.label, d:q.d})));
+  for (let i = pool.length-1; i > 0; i--){ const j = Math.floor(Math.random()*(i+1)); [pool[i],pool[j]] = [pool[j],pool[i]]; }   // Fisher–Yates
+  const picks = pool.slice(0, RAND_N).sort((a,b) => (a.d==="E"?0:1) - (b.d==="E"?0:1));   // show easy before medium
+  return {date:isoDay(), picks};
+}
+function getRandom(reroll){
+  let r = JSON.parse(localStorage.getItem("recovery-random") || "null");
+  const ex = warmupSlugs();
+  const stale = !r || r.date !== isoDay() || !r.picks || r.picks.some(p => ex.has(p.slug));  // recompute if a warm-up reroll collided
+  if (reroll || stale){ r = computeRandom(); localStorage.setItem("recovery-random", JSON.stringify(r)); pushState(); }
+  return r;
+}
+function renderRandom(){
+  const r = getRandom(false), el = document.getElementById("random");
+  const date = new Date().toLocaleDateString(undefined, {weekday:"short", month:"short", day:"numeric"});
+  const allDone = r.picks.length && r.picks.every(p => isDoneToday(p.slug));
+  el.innerHTML = `
+    <div class="t-head"><span class="t-title">⚄ Random questions</span>
+      <span class="t-date">${date}<button class="reroll" title="pick again">↻</button></span></div>
+    ${r.picks.length ? r.picks.map(p => pickRow(p, p.d, "random — not done yet")).join("")
+                     : '<div class="alldone">✓ nothing left undone — nice.</div>'}
+    ${allDone ? '<div class="alldone">✓ done — reroll for more.</div>' : ''}`;
+  el.querySelectorAll("[data-done]").forEach(b => b.onclick = ev => { ev.stopPropagation(); markDone(b.dataset.done); });
+  el.querySelector(".reroll").onclick = ev => { ev.stopPropagation(); getRandom(true); renderRandom(); layoutEdges(); };
+}
+renderRandom();
+window.__algoNext = reroll => ({ daily: getDaily(reroll), random: getRandom(reroll) });   // Home dashboard reuses these picks
+
+/* ---------- tab switching (Algorithms + study decks registered by study.js) ---------- */
+const deckViews = {};   // key -> { section, init, inited }
+// study.js calls this for each deck found in content/*.yaml, so new sections appear automatically.
+window.registerDeckView = function(key, label, init){
+  const section = document.createElement("section");
+  section.className = "deck-view"; section.id = "view-" + key; section.style.display = "none";
+  document.querySelector(".wrap").appendChild(section);
+  deckViews[key] = { section, init, inited:false };
+  const b = document.createElement("button");
+  b.dataset.tab = key; b.textContent = label;
+  b.onclick = () => switchTab(key);
+  document.getElementById("tabs").appendChild(b);
+  applyRoute();                                            // activate this tab now if the URL points at it (deep-link)
+  return section;
+};
+let curTab = null;
+function switchTab(name, push=true){
+  const entering = curTab !== name; curTab = name;   // false when registerDeckView()'s applyRoute() re-applies the tab we're already on
+  document.body.dataset.tab = name;   // lets mobile CSS reclaim the Algorithms-only HUD space on study/topic tabs
+  document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("active", b.dataset.tab === name));
+  const algo = name === "algorithms";
+  document.getElementById("map").style.display = algo ? "" : "none";
+  document.getElementById("algo-hud").style.visibility = algo ? "" : "hidden";  // hide but keep its space so the tabs stay put
+  document.getElementById("legend").style.display = algo ? "" : "none";
+  for (const k in deckViews) deckViews[k].section.style.display = (k === name) ? "" : "none";
+  if (algo) layoutEdges();
+  // Every other view owns its state, so it inits once. Home owns nothing — it's a read-only aggregate of the
+  // other silos — so it re-inits on every return, or it shows a snapshot from your first visit (master a concept
+  // in a topic, come back, and the ring hasn't moved). `entering` keeps boot from re-initing it once per tab that
+  // registers. ponytail: hardcoded name, not a per-view flag — Home is the only aggregate view.
+  else { const d = deckViews[name]; if (d && (!d.inited || (name === "home" && entering))){ d.init(d.section); d.inited = true; } }
+  if (push){                                               // reflect the active tab in the URL (deep-linkable, refresh-safe)
+    const url = "/" + (name === "home" ? "" : slugOf(name));
+    if (location.pathname !== url) history.pushState(null, "", url);
+  }
+}
+document.querySelector('#tabs button[data-tab="algorithms"]').onclick = () => switchTab("algorithms");
+window.switchTab = switchTab;                               // let dashboard.js navigate between tabs
+
+/* ---------- deep-link router: URL path <-> active tab ----------
+   Deck tabs register under their SRS key (ml-srs-v1); the URL slug drops that suffix → clean /ml, /llm.
+   Topics already use clean ids (rag, mcp, ml-tree), so slugOf() leaves them untouched. */
+function slugOf(key){ return key.replace(/-srs-v\d+$/, ""); }
+function tabForSlug(slug){
+  const s = slug || "home";                                // bare / → the Home dashboard
+  if (s === "algorithms") return "algorithms";             // hardcoded tab, not in deckViews
+  if (deckViews[s]) return s;                              // home + clean-id topics match directly
+  return Object.keys(deckViews).find(k => slugOf(k) === s) || null;   // deck: /ml → ml-srs-v1
+}
+function applyRoute(){                                      // URL -> active tab (no re-push)
+  const tab = tabForSlug(decodeURIComponent(location.pathname.replace(/^\//, "")));
+  if (tab) switchTab(tab, false);
+  // a slug whose tab isn't registered yet is picked up by registerDeckView()'s applyRoute() call
+}
+addEventListener("popstate", applyRoute);                  // back / forward
+applyRoute();                                              // initial load (/ resolves now; decks/topics when they register)
+
+/* ---------- "Solved" tab: every LeetCode solve, auto-categorized by its topic tags ---------- */
+(function(){
+  const el = (t,c,x)=>{const e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e;};
+  const DIFF = {Easy:0,Medium:1,Hard:2};
+  const curated = new Set(P.flatMap(p=>p.probs.map(q=>q.slug)));       // problems already on the roadmap
+  const TAG_FAM = {                                                     // LeetCode topic tag → dashboard family
+    "Two Pointers":"arrays","Sliding Window":"arrays","Prefix Sum":"arrays","Binary Search":"arrays","Array":"arrays","Hash Table":"arrays","Sorting":"arrays","Greedy":"arrays","Matrix":"arrays","String":"arrays","Counting":"arrays",
+    "Stack":"stackheap","Monotonic Stack":"stackheap","Heap (Priority Queue)":"stackheap","Queue":"stackheap","Monotonic Queue":"stackheap",
+    "Backtracking":"backtracking",
+    "Tree":"trees","Binary Tree":"trees","Binary Search Tree":"trees","Depth-First Search":"trees","Breadth-First Search":"trees","Segment Tree":"trees","Binary Indexed Tree":"trees",
+    "Graph":"graphs","Union Find":"graphs","Topological Sort":"graphs","Shortest Path":"graphs","Minimum Spanning Tree":"graphs",
+    "Trie":"triebits","Bit Manipulation":"triebits","Bitmask":"triebits",
+    "Dynamic Programming":"dp","Memoization":"dp",
+    "Design":"design","Linked List":"design","Data Stream":"design","Iterator":"design",
+  };
+  const PRIORITY = ["dp","graphs","trees","triebits","backtracking","stackheap","design","arrays"];   // most distinctive wins
+  const famOf = tags => { const s = new Set((tags||[]).map(t=>TAG_FAM[t]).filter(Boolean)); for (const f of PRIORITY) if (s.has(f)) return f; return "other"; };
+  const ORDER = ["arrays","stackheap","trees","graphs","dp","triebits","backtracking","design","other"];
+  const FAMX = Object.assign({other:{n:"Other / Uncategorized",c:"var(--faint)"}}, FAM);
+
+  async function load(host){
+    const user = document.getElementById("lcuser").value.trim();
+    const stat = host.querySelector(".solved-stat"), cols = host.querySelector(".solved-cols");
+    stat.textContent = "loading your solves…";
+    let d; try { d = await (await fetch("/api/solved?user="+encodeURIComponent(user))).json(); }
+    catch(e){ stat.textContent = "⚠ start the server, then reload"; return; }
+    if (d.error){ stat.textContent = "⚠ "+d.error; cols.replaceChildren(); return; }
+    const groups = {};
+    for (const it of d.solved){ (groups[famOf(it.tags)] = groups[famOf(it.tags)] || []).push(it); }
+    cols.replaceChildren();
+    for (const f of ORDER){
+      const items = groups[f]; if (!items || !items.length) continue;
+      const m = FAMX[f]||{n:f,c:"var(--faint)"};
+      const col = el("div","solved-col"); col.style.setProperty("--fc", m.c);
+      col.appendChild(el("div","solved-col-head", m.n+" · "+items.length));
+      items.sort((a,b)=>(DIFF[a.difficulty]===undefined?3:DIFF[a.difficulty])-(DIFF[b.difficulty]===undefined?3:DIFF[b.difficulty]));
+      for (const it of items){
+        const row = el("div","solved-row");
+        row.appendChild(el("span","solved-chip d-"+((it.difficulty||"?")[0]), (it.difficulty||"?")[0]));
+        const a = document.createElement("a"); a.href="https://leetcode.com/problems/"+it.slug+"/"; a.target="_blank"; a.rel="noopener"; a.className="solved-name"; a.textContent = it.title;
+        row.appendChild(a);
+        if (curated.has(it.slug)) row.appendChild(el("span","solved-badge","roadmap"));
+        col.appendChild(row);
+      }
+      cols.appendChild(col);
+    }
+    const pend = d.pending ? " · "+d.pending+" still tagging (↻ refresh)" : "";
+    stat.innerHTML = "<b>"+d.solved.length+"</b> solved"+(d.authed?"":" · public: last ~20 only (set LEETCODE_SESSION for full history)")+pend;
+  }
+  function init(host){
+    host.innerHTML = '<div class="solved-top"><div><div class="ml-eyebrow">LeetCode · auto-categorized by topic tags</div><div class="ml-stat solved-stat"></div></div><button class="ml-mini solved-refresh">↻ refresh</button></div><div class="solved-cols"></div>';
+    host.querySelector(".solved-refresh").onclick = ()=>load(host);
+    load(host);
+  }
+  const css = `
+    .solved-top{display:flex;align-items:flex-end;justify-content:space-between;gap:14px;margin-bottom:22px}
+    .solved-cols{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:18px;align-items:start}
+    .solved-col{border:1px solid var(--line);border-radius:14px;padding:14px 15px;background:var(--surface)}
+    .solved-col-head{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--fc);margin-bottom:10px;border-left:3px solid var(--fc);padding-left:9px}
+    .solved-row{display:flex;align-items:center;gap:9px;padding:7px 0;border-top:1px solid color-mix(in srgb,var(--line) 55%,transparent)}
+    .solved-row:nth-of-type(2){border-top:0}
+    .solved-chip{flex:none;width:19px;height:19px;border-radius:5px;font-family:var(--mono);font-size:10px;font-weight:700;display:flex;align-items:center;justify-content:center}
+    .solved-chip.d-E{background:color-mix(in srgb,var(--ok) 20%,transparent);color:var(--ok)}
+    .solved-chip.d-M{background:color-mix(in srgb,var(--warn) 20%,transparent);color:var(--warn)}
+    .solved-chip.d-H{background:color-mix(in srgb,var(--bad) 20%,transparent);color:var(--bad)}
+    .solved-name{flex:1;min-width:0;font-size:13px;color:var(--text);text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .solved-name:hover{color:#4aa3ff;text-decoration:underline}
+    .solved-badge{flex:none;font-family:var(--mono);font-size:9px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);border:1px solid var(--line);border-radius:5px;padding:2px 6px}
+    #view-solved{padding:0 4px}`;   /* scope tight padding to Solved only — was leaking to every deck-view (ML/LLM/RAG) */
+  document.head.appendChild(Object.assign(document.createElement("style"),{textContent:css}));
+  // registerDeckView("solved","Solved", init);   // Solved tab commented out — didn't serve a purpose (uncomment to restore)
+})();
+
+pushState();   // on first run of this build, migrate whatever's already in localStorage up to the server
+</script>
+</body>
+</html>

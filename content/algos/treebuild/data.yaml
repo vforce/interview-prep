@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: treebuild
+fam: trees
+label: Tree Construction
+order: 14
+trigger: build a tree from its traversals
+insight: preorder[0] is the root; find it in inorder to split left/right subtree sizes; recurse
+probs:
+- {n: Convert Sorted Array to BST, slug: convert-sorted-array-to-binary-search-tree, d: E}
+- {n: Build from Preorder & Inorder, slug: construct-binary-tree-from-preorder-and-inorder-traversal, d: M}
+- {n: Build from Preorder & Postorder, slug: construct-binary-tree-from-preorder-and-postorder-traversal, d: M}

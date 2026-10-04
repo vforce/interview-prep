@@ -1,0 +1,113 @@
+{
+  "id": "supervised-learning-basics",
+  "title": "Supervised Learning Basics",
+  "definition": "Supervised learning fits a function f(x) → y from a dataset of labeled (input, output) pairs by minimizing a loss over those examples, so it can predict y on new, unseen x.",
+  "summary": "Supervised learning covers regression (continuous y) and classification (categorical y), trained by minimizing empirical loss on labeled data and validated on held-out data to estimate generalization. In production, the model itself is rarely the bottleneck — data leakage, train/serve skew, and metric choice cause most real-world failures. It requires labeled examples up front, which is its main practical constraint versus unsupervised or self-supervised approaches.",
+  "objectives": [
+    "Distinguish regression vs. classification and match each to an appropriate loss/metric.",
+    "Explain empirical risk minimization (ERM) and how it relates to the bias-variance tradeoff.",
+    "Build a leakage-free train/val/test split, including time-based splits for temporal production data.",
+    "Recognize the top production failure modes: leakage, train/serve skew, and label noise.",
+    "Pick an evaluation metric that reflects business cost, not just raw accuracy."
+  ],
+  "lesson": "**Intuition.** Supervised learning is function-fitting with a teacher: you're given examples of correct answers (labels) and search a hypothesis class H for the f that best reproduces them, hoping it generalizes. Two flavors: **regression** (y continuous — squared error) and **classification** (y categorical — cross-entropy/hinge loss). Training is **empirical risk minimization (ERM)**: minimize average loss on the training set, `(1/n) Σ L(f(x_i), y_i)`, as a proxy for the true (unobservable) risk over the real data distribution.\n\n**Worked example.** Four points, roughly `y ≈ 2x`: x=[1,2,3,4], y=[3,5,7,8]. Least squares fits w=1.7, b=1.5 (minimizing Σ(y_i − (w·x_i+b))²). Predictions: [3.2, 4.9, 6.6, 8.3]; residuals: [−0.2, 0.1, 0.4, −0.3]; MSE = 0.075. That's ERM in miniature — every model, from linear regression to a transformer, runs this same loop at different scale: propose parameters, score with a loss, adjust to reduce it.\n\n**The key gotcha.** ERM only tells you about the *training* distribution. Two failure modes turn a great training loss into a production failure:\n1. **Overfitting** — H is too flexible relative to n, so the model memorizes training noise (low train loss, high test loss). Fixed by regularization, more data, a simpler H, or early stopping — the bias-variance tradeoff.\n2. **Leakage / train-serve skew** — the more common production killer. If a feature is computed differently at serving time than at training time, or encodes information from the future (or the label itself), your held-out metric will look great and mean nothing. Classic examples: fitting a `StandardScaler` on the full dataset before splitting, a \"days since last purchase\" feature that's null exactly for churned customers, or shuffling time-series data into a random split.\n\nA held-out score is only as trustworthy as the split and pipeline that produced it — auditing *that* is usually more valuable than tuning the model further.",
+  "examples": "**1. ERM by hand, reproduced in code**\n\n```python\nimport numpy as np\n\nx = np.array([1, 2, 3, 4])\ny = np.array([3, 5, 7, 8])\n\n# ERM: minimize sum((y - (w*x + b))**2) over w, b — closed-form least squares\nw, b = np.polyfit(x, y, deg=1)\npreds = w * x + b\nmse = np.mean((y - preds) ** 2)\n\nprint(w, b, mse)   # 1.7 1.5 0.075\n```\n\n**2. Leakage-safe production pipeline**\n\n```python\nfrom sklearn.model_selection import train_test_split\nfrom sklearn.pipeline import Pipeline\nfrom sklearn.preprocessing import StandardScaler\nfrom sklearn.linear_model import LogisticRegression\nfrom sklearn.metrics import roc_auc_score\n\nX_train, X_test, y_train, y_test = train_test_split(\n    X, y, test_size=0.2, stratify=y, random_state=0\n)\n\n# Scaler is fit ONLY inside pipe.fit(X_train, ...) — never on X_test or the full X.\npipe = Pipeline([\n    (\"scale\", StandardScaler()),\n    (\"clf\", LogisticRegression(max_iter=1000)),\n])\npipe.fit(X_train, y_train)\n\nprobs = pipe.predict_proba(X_test)[:, 1]\nprint(roc_auc_score(y_test, probs))\n```\nThe `Pipeline` wrapper is the point: it guarantees any fitted preprocessing statistic (mean/std, encodings) comes only from training rows, matching what happens at serving time.",
+  "tradeoffs": "Supervised learning needs labeled data — if labels are expensive, sparse, or lag reality (e.g., 90-day churn outcomes), consider weak supervision, semi-supervised methods, or self-supervised pretraining plus light fine-tuning instead. For tabular production data, simple linear/logistic models and GBMs (XGBoost/LightGBM) are usually the default: cheap to train, easy to monitor and explain, robust with limited data; reach for deep learning when data is large-scale and/or unstructured (images/text/audio) where representation learning pays off. Optimize the metric that reflects business cost (recall at a fixed false-positive budget, calibration, cost-weighted loss) — raw accuracy is close to meaningless on imbalanced production data (99% negative class → 99% \"accuracy\" doing nothing).",
+  "diagnosticQuiz": [
+    {
+      "q": "Which statement best defines supervised learning?",
+      "choices": [
+        "Learning a policy that maximizes cumulative reward through trial-and-error interaction with an environment.",
+        "Reducing the dimensionality of input data while preserving variance.",
+        "Grouping unlabeled examples into clusters based on similarity.",
+        "Learning a mapping from inputs to outputs using a dataset of labeled (input, output) pairs by minimizing a loss function."
+      ],
+      "answer": 3,
+      "explanation": "Supervised learning is defined by training on labeled pairs and minimizing a loss comparing predictions to ground truth. The other options describe clustering (unsupervised), reinforcement learning, and dimensionality reduction/PCA respectively. A common confusion is lumping \"any ML with a dataset\" together — unsupervised methods use data with no target labels at all."
+    },
+    {
+      "q": "A regression model predicts ŷ = [3, 2, 1] for true values y = [1, 2, 3]. What is the mean squared error (MSE)?",
+      "choices": [
+        "8",
+        "4/3 ≈ 1.33",
+        "8/3 ≈ 2.67",
+        "0"
+      ],
+      "answer": 2,
+      "explanation": "Errors are y−ŷ = [−2, 0, 2]; squared = [4, 0, 4]; sum = 8; MSE = 8/3 ≈ 2.67. Option A (0) is what you get if you average the *signed* errors instead of squaring first — they cancel, a reminder that low average bias doesn't mean low error. Option C (8) is the sum of squared errors (SSE) without dividing by n, a common metric-dashboard bug. Option D (≈1.33) is the mean *absolute* error, a different, more outlier-robust loss that shouldn't be conflated with MSE."
+    },
+    {
+      "q": "You increase model capacity (e.g., a much deeper tree) and training loss keeps dropping toward zero, but validation loss starts rising after a point. What does this indicate?",
+      "choices": [
+        "Train and validation sets use different label encodings.",
+        "The learning rate is too high.",
+        "The model is underfitting due to high bias.",
+        "The model is overfitting: capacity now exceeds what the data supports, memorizing noise (high variance)."
+      ],
+      "answer": 3,
+      "explanation": "Falling train loss with rising validation loss is the textbook signature of overfitting/high variance. Underfitting (A) would show both losses staying high. Learning rate (C) is a gradient-descent hyperparameter unrelated to tree depth. A label-encoding mismatch (D) would produce broken metrics from the start, not a capacity-dependent divergence."
+    },
+    {
+      "q": "Your team wants to flag anomalous transactions. You have millions of transaction logs but only a handful of confirmed fraud labels, and new fraud patterns emerge weekly. What's the most defensible first approach?",
+      "choices": [
+        "Wait until at least 10,000 labeled fraud examples are collected before doing anything.",
+        "Train a deep neural net classifier directly on the few labeled fraud examples.",
+        "Treat it primarily as an unsupervised/semi-supervised anomaly-detection problem, using the sparse labels mainly for evaluation and threshold-tuning.",
+        "Oversample the fraud class until it's 50% of the training set and train a standard classifier."
+      ],
+      "answer": 2,
+      "explanation": "With extremely sparse, evolving labels, a purely supervised classifier overfits to a handful of historical fraud patterns and misses novel ones. Anomaly detection generalizes better to \"unusual,\" using the few labels to validate and set a threshold rather than define the whole decision boundary. Oversampling (C) fabricates a class balance that doesn't reflect reality and encourages overfitting to duplicated points; waiting indefinitely (D) isn't a real option in production."
+    },
+    {
+      "q": "Offline, your churn classifier scores 0.95 AUC. After deployment, business KPIs barely move and live scores look mediocre. Most likely root cause?",
+      "choices": [
+        "AUC is not a valid metric for any classification problem.",
+        "The learning rate was set too low during training.",
+        "Train/serve skew or leakage — e.g., a feature only known after the outcome, or preprocessing statistics fit on the full dataset, isn't reproduced correctly at serving time.",
+        "The model needs more training epochs."
+      ],
+      "answer": 2,
+      "explanation": "A large offline/online gap paired with a suspiciously high offline AUC is the classic signature of leakage (a feature encoding the label) or train/serve skew (a feature pipeline behaving differently online). Learning rate and epoch count (A, D) are training-time concerns that don't explain this specific offline-vs-online gap. AUC (C) is a valid ranking metric — the problem is the data/pipeline, not the metric."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "How do you decide between a simple model (logistic regression) and a complex one (GBM/deep net) for a new production classifier?",
+      "a": "Start with the simplest baseline that could plausibly work — logistic regression or a small GBM — before reaching for anything heavier. Weigh: **data size** (deep nets need scale to pay off), **input type** (structured/tabular favors GBMs; images/text/audio favor deep nets or pretrained embeddings), **latency/serving cost**, **interpretability/compliance needs** (e.g., credit decisions often require explainable models), and **iteration speed** (simpler models are faster to retrain, debug, and monitor for drift). Only add complexity once the baseline's error is measured and a concrete gap justifies it."
+    },
+    {
+      "q": "Walk through how you'd set up train/val/test splits for a fraud model where transactions arrive continuously over time.",
+      "a": "Use a **time-based split**, not a random shuffle: train on the earliest window, validate on the next, test on the most recent — this mirrors how the model will actually be used (predicting the future from the past) and prevents leakage from data that wouldn't exist yet at prediction time. Add an embargo/gap period around split boundaries if labels arrive with delay (e.g., a fraud confirmed weeks later). Also audit every feature for hidden future information — target encodings or aggregates computed over the full history are a common leak — and re-validate with walk-forward (rolling-window) evaluation before trusting a single static split."
+    },
+    {
+      "q": "Your model has strong offline metrics but degrades within weeks in production. How do you debug it?",
+      "a": "First check for **drift**: compare feature distributions in production vs. training (PSI/KS tests) — the world may have shifted under the model. Second, check for **train/serve skew** — is the online feature-computation code producing the same values as the offline pipeline that built training data? Third, check **label delay/leakage** — did training accidentally use information not available at prediction time? Instrument monitoring going forward: per-feature distribution alerts, shadow-scoring new model versions against live traffic before cutover, and a defined retraining cadence rather than a \"fire and forget\" deployment."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "bias-variance-tradeoff",
+    "categorical-encoding",
+    "confusion-matrix",
+    "decision-trees",
+    "feature-scaling",
+    "k-nearest-neighbors",
+    "linear-regression",
+    "naive-bayes"
+  ],
+  "followUps": [
+    "bias-variance-tradeoff",
+    "categorical-encoding",
+    "confusion-matrix",
+    "decision-trees",
+    "feature-scaling",
+    "k-nearest-neighbors",
+    "linear-regression",
+    "naive-bayes"
+  ],
+  "metadata": {
+    "inputHash": "11014dd70de06fb8",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T09:24:20Z"
+  }
+}

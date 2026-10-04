@@ -1,0 +1,98 @@
+{
+  "id": "reranking",
+  "title": "Reranking",
+  "definition": "Reranking is a second-stage relevance-scoring step that takes the top-k candidates returned by a fast first-stage retriever (BM25 or bi-encoder/embedding search) and reorders them using a more expensive, more accurate model — typically a cross-encoder — before the result is passed to the generator.",
+  "summary": "First-stage retrieval is optimized for speed over millions of documents, which forces it to encode query and document independently and compare via a single vector similarity — losing fine-grained relevance signal. Reranking recovers that accuracy by running a cross-encoder, which jointly attends over the full query-document pair, but only on the small candidate set the first stage already narrowed down, keeping the expensive computation bounded. The result is bi-encoder-scale speed with near-cross-encoder precision exactly where it matters: the top few results an LLM will actually read.",
+  "objectives": [
+    "Explain why bi-encoder (embedding) similarity alone loses relevance signal that a cross-encoder captures.",
+    "Place reranking correctly in a production RAG pipeline, between first-stage retrieval and the LLM context.",
+    "Implement a cross-encoder reranking step in Python and reason about its latency/cost profile.",
+    "Recognize that reranking cannot recover recall lost in first-stage retrieval — it only reorders what it's given.",
+    "Decide, for a given latency/QPS budget, whether to rerank, how deep, and with which model class."
+  ],
+  "lesson": "Embedding-based retrieval (bi-encoders) encodes the query and each document into vectors independently, then ranks by cosine/dot-product similarity. That independence is what makes it fast: document vectors are precomputed once, and an ANN index (HNSW, IVF) searches millions of them in milliseconds. But it's also a bottleneck — all query-document interaction is squeezed through one dot product, so subtle relevance signals (negation, exact entity match, \"which of two similar paragraphs actually answers this\") get lost.\n\nA cross-encoder reranker fixes this by feeding the `(query, document)` pair together into a transformer, letting every query token attend to every document token, and outputting one relevance score. This is far more accurate but can't be precomputed — it needs one full forward pass per pair — so running it over a whole corpus is too slow.\n\nReranking is the practical compromise: use the cheap retriever (bi-encoder, optionally fused with BM25 for hybrid search) to pull, say, `top_k=100` candidates, then run the expensive cross-encoder only on those 100 to reorder them, keeping the top 5-10 for the LLM's context window.\n\nWorked intuition: query \"how do I reset my password\" retrieves both \"Password reset instructions\" and \"Account security best practices\" with similar cosine similarity, since both share vocabulary about accounts and security. A cross-encoder, seeing the query directly against each document's full text, recognizes only the first actually answers the question and promotes it to rank 1.\n\nKey gotcha: reranking cannot fix recall. If the truly relevant document never makes it into stage-1's top-k, the reranker never sees it and can't promote it — it only reorders what it's given. So stage-1 `top_k` must be generous enough (tune it against a labeled eval set), and reranking is a precision layer on top of good first-stage retrieval, not a substitute for it. Also watch cost: reranking scales linearly with `top_k`, so an unbounded value reintroduces the latency problem reranking exists to avoid.",
+  "examples": "### Example 1 — why the order changes after reranking\n\nQuery: `\"how do I reset my password\"`\n\nBi-encoder (cosine similarity) top-3 from stage-1 retrieval:\n\n```\nRank  Document                              Cosine sim\n1     \"Account security best practices\"     0.81\n2     \"Password reset instructions\"         0.79\n3     \"How to change your email address\"    0.77\n```\n\nAll three share vocabulary (\"account\", \"password\", \"security\"), so the bi-encoder can't tell which one actually answers the question — it's comparing whole-text vectors, not reasoning over the query against each document.\n\nCross-encoder reranker scores on the same three, now scored as `(query, doc)` pairs:\n\n```\nRank  Document                              Cross-encoder score\n1     \"Password reset instructions\"          3.2\n2     \"How to change your email address\"    -1.1\n3     \"Account security best practices\"     -2.4\n```\n\nFull token-level interaction lets the reranker correctly promote the document that actually contains reset steps.\n\n### Example 2 — production two-stage pipeline\n\n```python\nfrom sentence_transformers import CrossEncoder\n\n# Stage 1 (fast, precomputed index): top-100 candidates from ANN vector search\ncandidates = vector_store.search(query_embedding, top_k=100)  # list[Document]\n\n# Stage 2 (accurate, cost-bounded): rerank only those 100\nreranker = CrossEncoder(\"cross-encoder/ms-marco-MiniLM-L-6-v2\")\npairs = [(query, doc.text) for doc in candidates]\nscores = reranker.predict(pairs)              # one batched forward pass, not 100 sequential ones\n\nranked = sorted(zip(candidates, scores), key=lambda x: x[1], reverse=True)\ntop_docs = [doc for doc, _ in ranked[:8]]      # only this goes into the LLM prompt\n```\n\nHosted alternative when you don't want to host a cross-encoder yourself:\n\n```python\nimport cohere\nco = cohere.Client(api_key=\"...\")\nresult = co.rerank(model=\"rerank-english-v3.0\", query=query,\n                    documents=[d.text for d in candidates], top_n=8)\n```",
+  "tradeoffs": "Use reranking when the corpus is large or noisy, queries are complex/paraphrased, or precision in the top few results directly drives generation quality (legal, medical, support bots) — it reliably lifts precision@5/NDCG over bi-encoder-only ranking. Skip or shrink it when the p95 latency budget can't absorb another model call, QPS is high enough that rerank compute dominates cost, or the corpus is small/clean enough that first-stage ranking is already near-optimal. Distilled cross-encoders (MiniLM-scale) or late-interaction models (ColBERT) are a middle ground — cheaper than a full cross-encoder, still meaningfully better than a bare bi-encoder. Always bound `top_k` feeding the reranker (tens to low hundreds) — reranking the entire corpus just reintroduces the latency problem the first stage existed to solve.",
+  "diagnosticQuiz": [
+    {
+      "q": "What is the fundamental architectural difference between a cross-encoder reranker and a bi-encoder retriever?",
+      "choices": [
+        "The cross-encoder is faster because document vectors are precomputed once into an ANN index, while the bi-encoder must run a fresh forward pass per pair.",
+        "The cross-encoder encodes the query and document independently and compares them with cosine similarity, while the bi-encoder feeds them jointly into a transformer.",
+        "The cross-encoder and bi-encoder use the same joint-attention mechanism, but the cross-encoder additionally incorporates BM25 scores.",
+        "The cross-encoder feeds the (query, document) pair jointly into a transformer so every query token can attend to every document token, while the bi-encoder encodes each independently and compares via cosine/dot-product similarity."
+      ],
+      "answer": 3,
+      "explanation": "The lesson defines the cross-encoder as processing the pair jointly (full token-level interaction) versus the bi-encoder's independent encode-then-compare approach, which is exactly why the bi-encoder can be precomputed/indexed and the cross-encoder can't. The first option reflects the classic mix-up of swapping which model does the precomputable independent encoding — it's tempting because the cross-encoder sounds \"more integrated,\" but precomputation is only possible when query and document never interact until the final similarity step."
+    },
+    {
+      "q": "A cross-encoder reranker takes roughly 5ms per (query, document) pair. Stage-1 retrieval currently returns `top_k=100`, and a teammate proposes bumping it to `top_k=1000` to \"be safe\" on recall. What happens to reranking latency, and why?",
+      "choices": [
+        "Latency drops to ~50ms at top_k=1000 because larger batches are more GPU-efficient overall.",
+        "Latency grows roughly linearly, from ~500ms to ~5000ms, because reranking needs one full forward pass per pair and cost scales with `top_k`.",
+        "Latency stays at ~500ms either way, since cross-encoders score all candidates in a single constant-time batched pass.",
+        "Latency is unaffected by `top_k` since only the single top-scoring candidate requires a forward pass."
+      ],
+      "answer": 1,
+      "explanation": "The lesson's explicit gotcha is that \"reranking scales linearly with top_k, so an unbounded value reintroduces the latency problem reranking exists to avoid\" — going from 100 to 1000 pairs roughly 10x's the forward-pass work. The first option is the tempting misconception: batching (as in the `CrossEncoder.predict` example) improves throughput per item, but it doesn't make total compute independent of input size — you still pay for every pair scored."
+    },
+    {
+      "q": "In Example 1, the bi-encoder ranks \"Account security best practices\" (0.81) above \"Password reset instructions\" (0.79), but the cross-encoder reverses this, scoring the reset doc highest. What best explains the reversal?",
+      "choices": [
+        "The bi-encoder's cosine similarity scores were miscalibrated and needed re-normalization before ranking.",
+        "The cross-encoder was fine-tuned specifically on this query, so it \"memorized\" the right answer.",
+        "The bi-encoder compares whole-document vectors that share surface vocabulary (\"account,\" \"security,\" \"password\"), while the cross-encoder lets the query attend directly against each document's content and recognizes only one actually contains reset steps.",
+        "The cross-encoder had access to the full document text, while the bi-encoder only saw the title."
+      ],
+      "answer": 2,
+      "explanation": "Both stages see the same document content — the difference is architectural, not informational: the bi-encoder squeezes all query-document interaction through a single dot product over independently-computed vectors, losing fine-grained signal, while the cross-encoder's joint attention directly checks whether the document answers the query. The first option is the natural but wrong intuition — it's not that the cross-encoder \"sees more text,\" it's that it *interacts* with the text differently."
+    },
+    {
+      "q": "A team runs a high-QPS product search endpoint over a small, clean catalog (5,000 SKUs) with a strict 50ms p95 latency budget. Should they add cross-encoder reranking?",
+      "choices": [
+        "Yes, always — reranking reliably lifts precision@5/NDCG regardless of context, so it belongs in every retrieval pipeline.",
+        "Yes, but skip stage-1 entirely and cross-encode the whole 5,000-item catalog per query since it's small enough.",
+        "No — reranking is only useful for regulated domains like legal or medical, never for e-commerce search.",
+        "Probably not, or only a shrunk version — the corpus is already small/clean enough that first-stage ranking is near-optimal, and high QPS plus a tight latency budget means rerank compute would dominate cost."
+      ],
+      "answer": 3,
+      "explanation": "The tradeoffs section explicitly lists this combination — tight p95 budget, high QPS, small/clean corpus — as exactly when to skip or shrink reranking. The first option ignores that same passage's caveats and overgeneralizes the precision benefit; the domain list (legal/medical/support) in the \"when to use\" section is illustrative of high-stakes precision needs, not an exhaustive whitelist, so ruling out e-commerce categorically is also wrong."
+    },
+    {
+      "q": "A RAG pipeline adds a cross-encoder reranker, but a document known to be relevant still never appears in the final answer. Debugging shows stage-1 (bi-encoder) `top_k=20` never includes that document. What fixes this, and why won't reranker tuning alone help?",
+      "choices": [
+        "Lower the reranker's score threshold so more candidates pass through to the LLM.",
+        "Add more training data to the cross-encoder so it learns to generalize recall beyond its input set.",
+        "Swap in a more accurate cross-encoder model — a stronger reranker can still surface documents outside its input candidate set.",
+        "Increase stage-1's `top_k` (and/or improve first-stage retrieval, e.g., hybrid BM25+embedding) so the document is actually among the candidates the reranker receives — reranking only reorders what it's given and cannot recover documents stage-1 already dropped."
+      ],
+      "answer": 3,
+      "explanation": "This is the lesson's key gotcha: \"reranking cannot fix recall... it only reorders what it's given,\" so the fix must happen at stage-1 (bigger `top_k` or better retrieval, tuned against a labeled eval set). The first option is the most common misconception — it treats reranking as a strictly-better retriever rather than a re-ordering step that is architecturally blind to anything outside its input list."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Why add a reranking stage when you already have embedding-based retrieval — isn't that redundant?",
+      "a": "- Bi-encoders encode query and document independently, so similarity is one dot product — fast enough for millions of documents but blind to fine-grained query-document interaction.\n- Cross-encoder rerankers jointly attend over the pair and score relevance directly, meaningfully improving precision@top-k, but cost one forward pass per pair, so they can't scan a whole corpus.\n- Production pattern: use the bi-encoder to cheaply shortlist `top_k≈100`, then rerank only that shortlist down to the top 5-10 for the LLM's context. You get bi-encoder speed at corpus scale and cross-encoder accuracy exactly where the LLM will look."
+    },
+    {
+      "q": "How do you keep reranking latency acceptable under a tight budget, say p95 < 300ms?",
+      "a": "- Bound `top_k` into the reranker (50-100, not 1000) — cost is linear in candidate count.\n- Batch all pairs into a single forward pass on GPU instead of looping.\n- Use a small/distilled cross-encoder (MiniLM-scale) or a late-interaction model (ColBERT) that precomputes document-side token embeddings, cutting query-time compute.\n- Cache reranked results for repeated or templated queries.\n- If still too slow, consider a hosted rerank API with an SLA (e.g., Cohere Rerank) and measure its p95 directly.\n- Monitor the rerank step's p95/p99 separately from end-to-end latency so regressions are attributable."
+    },
+    {
+      "q": "How do you validate in production that a reranker is actually improving answer quality, not just reshuffling for its own sake?",
+      "a": "- Offline: build a labeled query → relevant-doc(s) eval set and compare NDCG@k / MRR / recall@k before vs. after reranking; specifically check it isn't demoting the correct document, not just aggregate lift.\n- Online: A/B test against a downstream metric tied to the generator's output — groundedness, citation accuracy, thumbs-up rate — not retrieval metrics in isolation, since answer quality is the real target.\n- Log candidate sets plus reranker scores so failures are diagnosable: \"right doc missing from stage 1\" (recall problem) vs. \"present but scored low\" (reranker problem)."
+    }
+  ],
+  "version": 2,
+  "relatedConcepts": [
+    "embeddings"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "0c06590ed69701da",
+    "model": "sonnet",
+    "generatedAt": "2026-07-03T10:46:40Z",
+    "quizUpdatedAt": "2026-07-04T05:46:29Z"
+  }
+}

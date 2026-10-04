@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: stackeval
+fam: stackheap
+label: Stack (Parse/Eval)
+order: 7
+trigger: parentheses, expression eval, nested decode
+insight: push the current context on '[' or operator; resolve on ']' or end of token
+probs:
+- {n: Valid Parentheses, slug: valid-parentheses, d: E}
+- {n: Decode String, slug: decode-string, d: M}
+- {n: Basic Calculator, slug: basic-calculator, d: H}

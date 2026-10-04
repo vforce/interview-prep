@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: backtrack
+fam: backtracking
+label: Backtracking
+order: 9
+trigger: enumerate ALL subsets / combinations / permutations
+insight: choose → recurse → un-choose. Combos pass start index; perms use used[]. Sort+skip equal siblings to dedup
+probs:
+- {n: Subsets, slug: subsets, d: M}
+- {n: Combination Sum, slug: combination-sum, d: M}
+- {n: N-Queens, slug: n-queens, d: H}

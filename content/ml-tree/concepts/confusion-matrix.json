@@ -1,0 +1,102 @@
+{
+  "id": "confusion-matrix",
+  "title": "Confusion Matrix",
+  "definition": "A confusion matrix is a table that cross-tabulates a classifier's predicted labels against the true labels, recording counts of true positives, false positives, false negatives, and true negatives (an N×N grid for N classes).",
+  "summary": "It is the raw substrate every classification metric — accuracy, precision, recall, F1, specificity — is computed from, so it never loses information the way a single scalar does. In production it's the fastest way to see not just that a model is wrong, but exactly which errors it makes and how often, which is what actually drives threshold and cost decisions.",
+  "objectives": [
+    "Derive precision, recall, specificity, and F1 from the four confusion-matrix cells",
+    "Explain why accuracy is misleading under class imbalance, using the matrix as evidence",
+    "Build and read a confusion matrix in Python with sklearn, including the multi-class case",
+    "Map confusion-matrix cells (FP vs FN) to real production costs and threshold decisions",
+    "Avoid the row/column-normalization and label-ordering gotchas when reading one"
+  ],
+  "lesson": "A confusion matrix decomposes every prediction into one of four buckets: true positive (TP), false positive (FP), false negative (FN), true negative (TN). Every metric you report — accuracy, precision, recall, F1, specificity — is arithmetic on these four counts. The matrix matters on its own because a single scalar averages over cells that can carry wildly different real-world costs and wildly different base rates, and that averaging can hide exactly the failure mode you care about.\n\nWorked example: a fraud model scores 100,000 transactions/day, of which 100 are truly fraudulent (0.1% base rate). A model that predicts \"not fraud\" for every transaction scores 99.9% accuracy — impressive-sounding, completely useless. Its confusion matrix exposes the problem immediately: TP = 0, FN = 100, so recall = 0. You can't see this from accuracy alone; you see it instantly from the matrix. This is why imbalanced production problems (fraud, churn, disease, defect detection) are reported in precision/recall/F1, not accuracy.\n\nFor multi-class problems the matrix generalizes to an N×N grid: the diagonal is correct predictions, and off-diagonal cell [i, j] means \"predicted class j when the truth was class i.\" This is the most actionable part in production — it doesn't just say the model is wrong, it says which specific classes get confused for which, so you know where to add training data or tune a threshold.\n\nKey gotcha: row vs. column normalization, and label order. Recall normalizes over the row (actual class count); precision normalizes over the column (predicted class count) — swapping these is the single most common hand-computation error. Separately, most libraries (sklearn included) order classes by sorted label value by default, not \"positive first.\" Assume position [0,0] is TP without checking, and you can silently read TN as TP. Always pass an explicit label order and print axis labels next to the matrix — a silent transpose in a monitoring pipeline corrupts every downstream metric without ever throwing an error.",
+  "examples": "**Example 1 — binary fraud detection (manual)**\n\n```\n                 Predicted Fraud   Predicted Not-Fraud\nActual Fraud            70 (TP)              30 (FN)\nActual Not-Fraud        20 (FP)          99,880 (TN)\n```\n\n- Precision = TP/(TP+FP) = 70/90 ≈ 0.78 → of everything flagged, 78% was real fraud\n- Recall = TP/(TP+FN) = 70/100 = 0.70 → caught 70% of actual fraud, missed 30\n- Accuracy = (70+99,880)/100,000 = 0.9995 → looks great, hides the 30 missed frauds\n\n**Example 2 — sklearn, explicit label order + multi-class monitoring**\n\n```python\nfrom sklearn.metrics import confusion_matrix, classification_report\n\ny_true = [1, 0, 1, 1, 0, 1, 0, 0]\ny_pred = [1, 0, 0, 1, 0, 1, 1, 0]\n\n# Force [positive, negative] order -- don't rely on the default sort.\ncm = confusion_matrix(y_true, y_pred, labels=[1, 0])\nprint(cm)\n# [[TP FN]\n#  [FP TN]]\n\nprint(classification_report(y_true, y_pred, labels=[1, 0],\n                             target_names=[\"fraud\", \"not_fraud\"]))\n```\n\nRow-normalizing a multi-class matrix gives per-class recall directly — a good dashboard metric, independent of class frequency:\n\n```python\nimport numpy as np\nfrom sklearn.metrics import confusion_matrix\n\ncm = confusion_matrix(y_true_multi, y_pred_multi, normalize=\"true\")\nnp.set_printoptions(precision=2, suppress=True)\nprint(cm)  # diagonal = per-class recall; off-diagonal = where each class leaks to\n```",
+  "tradeoffs": "Strengths: completeness (no information loss), cheap to compute, and every cell maps to an actionable decision — adjust a threshold, collect data for a specific confused pair, re-cost a business tradeoff. Weaknesses: it's a snapshot at one fixed decision threshold, so it doesn't capture ranking quality — two models can share an AUC but differ at a given threshold, or share a confusion matrix while one is far better calibrated. It also stops being eyeball-friendly past ~10-15 classes, where a heatmap or per-class summary beats raw counts. Use it to communicate a concrete deployed operating point or debug specific confusions; reach for ROC-AUC/PR-AUC when comparing models threshold-independently, and calibration curves when the probabilities themselves matter.",
+  "diagnosticQuiz": [
+    {
+      "q": "What does a confusion matrix show?",
+      "choices": [
+        "A plot of true positive rate vs. false positive rate across thresholds",
+        "The correlation matrix between input features, used to check multicollinearity",
+        "A table cross-tabulating predicted vs. actual class labels, with counts in each cell",
+        "A single scalar summarizing overall model correctness"
+      ],
+      "answer": 2,
+      "explanation": "A confusion matrix tabulates predicted vs. actual class counts — every other classification metric follows from it arithmetically. Option B describes an ROC curve (threshold-swept TPR/FPR), C describes accuracy (one derived scalar), and D is a correlation matrix, a different tool entirely — the name similarity (\"confusion\" vs. \"correlation\") is the trap."
+    },
+    {
+      "q": "A binary classifier's confusion matrix on a test set gives TP=80, FP=20, FN=10, TN=890. What is the precision?",
+      "choices": [
+        "0.98",
+        "0.89",
+        "0.97",
+        "0.80"
+      ],
+      "answer": 3,
+      "explanation": "Precision = TP/(TP+FP) = 80/100 = 0.80 — of everything predicted positive, 80% actually were positive. 0.89 is recall (TP/(TP+FN) = 80/90), a common mixup since both share TP in the numerator but normalize over different denominators. 0.97 is accuracy and 0.98 is specificity."
+    },
+    {
+      "q": "Why can a model with 99% accuracy still be useless in production?",
+      "choices": [
+        "Accuracy always equals precision",
+        "Accuracy can't be computed from a confusion matrix",
+        "Confusion matrices only apply to multi-class problems",
+        "Under severe class imbalance, the matrix can show near-zero recall on the minority class despite high accuracy"
+      ],
+      "answer": 3,
+      "explanation": "With a rare positive class (e.g., 0.1% fraud rate), always predicting \"negative\" yields high accuracy but TP=0 and recall=0 — the matrix reveals this, the aggregate accuracy hides it. Accuracy is in fact derived from the matrix (ruling out A), it doesn't generally equal precision (C), and binary is just the 2x2 special case of the matrix (ruling out D)."
+    },
+    {
+      "q": "You need to tell a fraud-ops team exactly how many real frauds are being missed at the currently deployed threshold. What should you show them?",
+      "choices": [
+        "The model's raw predicted-probability distribution",
+        "The ROC curve",
+        "The AUC score alone",
+        "The confusion matrix at the current operating threshold"
+      ],
+      "answer": 3,
+      "explanation": "The confusion matrix at the actual deployed threshold gives concrete, actionable counts (\"30 frauds missed out of 100\"). ROC and AUC are threshold-independent measures of ranking quality, good for comparing models but not for describing one specific operating point's real-world consequences. A raw probability distribution isn't actionable without a threshold applied."
+    },
+    {
+      "q": "You call sklearn's `confusion_matrix(y_true, y_pred)` without passing `labels=`. What's the risk?",
+      "choices": [
+        "The matrix comes out transposed relative to any other implementation",
+        "Classes are ordered by sorted unique values found in the data, which may not match the row/column order you assume, silently mislabeling which cell is TP vs. TN",
+        "It throws an error since labels must always be specified explicitly",
+        "It automatically detects the \"positive\" class from the model's predict_proba threshold"
+      ],
+      "answer": 1,
+      "explanation": "sklearn sorts labels ascending by default (0 before 1, or alphabetically for strings). If you assume a [1, 0] layout but get [0, 1], you'll read TP where TN actually is, silently corrupting any metric you compute by hand from the matrix. There's no error thrown (A is false), no probability threshold involved — only y_true/y_pred labels (C is false) — and transposition isn't a universal property of other implementations (D is false)."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Walk me through how you'd decide whether to ship a new fraud-detection model that has the same overall F1 as the current production model.",
+      "a": "I wouldn't compare F1 alone — it's a single number that can be identical across models with very different error distributions. I'd pull both models' confusion matrices at the same operating threshold and check: which cases moved between FP and FN (fewer missed frauds traded for more blocked legitimate users, or vice versa?), and for multi-class, whether off-diagonal confusions shifted to class pairs with different costs. Then I'd convert each cell to a dollar cost — `avg_fraud_loss × FN + avg_friction_cost × FP` — and ship based on total expected cost, not F1 parity."
+    },
+    {
+      "q": "A colleague sees accuracy drop from 98% to 97% after a retrain and wants to roll back. How do you respond?",
+      "a": "I'd pull the confusion matrix for both versions before deciding anything. A 1-point accuracy delta is close to meaningless in isolation, especially under class imbalance — the new model may have traded a few majority-class true negatives for materially better minority-class recall, which is usually the metric that actually matters (fraud, churn, disease detection). I'd compare per-class precision/recall, or a row-normalized (\"recall per class\") matrix, between versions, and only roll back if the cost-weighted error profile actually got worse — not because one aggregate number dipped."
+    },
+    {
+      "q": "How would you monitor a deployed multi-class classifier for silent degradation using confusion matrices?",
+      "a": "Log predictions alongside ground truth as it arrives (delayed feedback or sampled human review), and recompute a confusion matrix on a rolling window per model version. Track the row-normalized diagonal (per-class recall) for drift in individual classes, and the off-diagonal cells for new or growing confusions between specific class pairs — a signal of distribution shift or a new failure pattern. Alert on a per-class recall drop, not just aggregate accuracy/F1, since aggregate metrics can stay flat while one important class silently degrades and another happens to improve."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "accuracy-and-class-imbalance",
+    "precision-and-recall",
+    "supervised-learning-basics"
+  ],
+  "followUps": [
+    "accuracy-and-class-imbalance",
+    "precision-and-recall"
+  ],
+  "metadata": {
+    "inputHash": "087aec43c128e1e9",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T09:26:47Z"
+  }
+}

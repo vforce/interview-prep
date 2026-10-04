@@ -1,0 +1,45 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: np_stack
+type: kata
+area: NumPy
+order: 51
+title: stack vs concatenate (NumPy)
+prompt: >-
+  The most common NumPy shape bug, in one line: `np.stack` adds a **new** axis, `np.concatenate`
+  extends an **existing** one. Given a list of k arrays each of shape (n, d), return
+  `(stacked, joined)` — `stacked` of shape (k, n, d), `joined` of shape (k*n, d). Two lines. Then
+  notice in the test that flattening the first two axes of `stacked` gives you `joined` back: they
+  hold the same numbers in the same order, only the shape differs.
+sig: 'def stack_and_join(arrays):'
+stub: "import numpy as np\n\ndef stack_and_join(arrays):\n    \n    return stacked, joined\n"
+reference: |
+  import numpy as np
+
+  def stack_and_join(arrays):                     # k arrays, each (n, d)
+      # stack = "pile them up like sheets of paper" — it INVENTS an axis to index the sheets by.
+      # Every input must have identical shape, and the result gains a dimension.
+      stacked = np.stack(arrays)                  # k x (n, d) -> (k, n, d)     ndim 2 -> 3
+      # concatenate = "glue them end to end" — it EXTENDS an axis that already exists.
+      # Shapes must agree on every axis EXCEPT the one you're joining along. ndim is unchanged.
+      joined = np.concatenate(arrays, axis=0)     # k x (n, d) -> (k*n, d)      ndim 2 -> 2
+      # Same numbers, same order, different shape: stacked.reshape(k*n, d) IS joined.
+      # (vstack/hstack are just concatenate with the axis pre-chosen. Prefer the explicit form.)
+      return stacked, joined
+test: |
+  import numpy as np
+
+  k, n, d = 3, 4, 2
+  arrays = [np.full((n, d), i) for i in range(k)]      # array i is all i's
+  s, j = stack_and_join(arrays)
+
+  assert s.shape == (k, n, d), s.shape                 # stack ADDS an axis
+  assert j.shape == (k * n, d), j.shape                # concatenate EXTENDS one
+
+  # same numbers, same order — only the shape differs
+  assert np.array_equal(s.reshape(k * n, d), j), "stacked and flattened == concatenated"
+
+  assert s[2, 0, 0] == 2, s[2, 0, 0]                   # 3rd array, 1st row
+  assert j[8, 0] == 2, j[8, 0]                         # ...which starts at row 2*4 = 8 once joined
+
+  print("PASS - 5 checks")

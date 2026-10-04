@@ -1,0 +1,12 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: k-kv-memory
+type: concept
+area: Inference & KV Cache
+order: 18
+front: How big is the KV cache and why does it matter?
+back: |-
+  Size ≈ 2 (K and V) × n_layers × n_kv_heads × head_dim × seq_len × batch × bytes.
+
+  It grows LINEARLY with context length and batch size, and at long contexts can exceed the model weights in memory. The KV cache — not the parameters — is often what caps how many concurrent/long requests fit on a GPU.
+more: 'Example: Llama-2-70B (80 layers, 8 KV heads via GQA, head_dim 128, fp16) ≈ 2·80·8·128·2 B ≈ 320 KB per token → ~1.3 GB for a 4k context, times batch. Without GQA (64 KV heads) it''d be 8× larger. So at long context / high batch it''s the cache, not the 140 GB of weights, that runs you out of memory and throttles throughput — and fp8/int8 KV roughly halves or quarters it.'

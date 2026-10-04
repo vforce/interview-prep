@@ -1,0 +1,53 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: np_topk
+type: kata
+area: NumPy
+order: 53
+title: Top-k per row (NumPy)
+prompt: >-
+  Given a 2-D score matrix (n, m) — logits, similarities, whatever — return the top k of each row as
+  `(idx, vals)`, both (n, k), highest first. `np.argsort` hands you the indices (negate the scores to
+  sort descending). The bit everyone gropes for is pulling the matching *values* back out:
+  `scores[idx]` indexes **rows**, not per-row columns, so it silently returns garbage of the wrong
+  shape. `np.take_along_axis(scores, idx, axis=1)` is the one you want. You will reach for this
+  constantly — top-k logits, nearest neighbours, retrieval hits.
+sig: 'def top_k(scores, k):'
+stub: "import numpy as np\n\ndef top_k(scores, k):\n    # argsort for the indices, take_along_axis for the values\n    \n    return idx, vals\n"
+reference: |
+  import numpy as np
+
+  def top_k(scores, k):                                # scores is (n, m)
+      # argsort returns the INDICES that WOULD sort the array, ascending — it never moves the data.
+      # There's no reverse= flag, so negate the values to sort descending (or slice [::-1] after).
+      # axis=1 sorts WITHIN each row, so these come back as column indices, one row of them per row.
+      idx = np.argsort(-scores, axis=1)[:, :k]         # (n, m) -> (n, m) -> [:, :k] -> (n, k)
+
+      # Now fetch the values sitting at those indices — and this is the step people fumble.
+      # scores[idx] would read idx as ROW numbers and hand you an (n, k, m) monstrosity.
+      # take_along_axis pairs them up row-wise: row i of idx indexes into row i of scores.
+      vals = np.take_along_axis(scores, idx, axis=1)   # (n, m) gathered by (n, k) -> (n, k)
+
+      # (For big m, np.argpartition(-scores, k)[:, :k] gets the top k unsorted in O(m) — then
+      #  sort just those k. Same idea, cheaper; reach for it when m is large and k is small.)
+      return idx, vals
+test: |
+  import numpy as np
+
+  s = np.array([[0.1, 0.9, 0.4],
+                [0.7, 0.2, 0.5]])
+  idx, vals = top_k(s, 2)
+
+  assert idx.shape == (2, 2) and vals.shape == (2, 2), (idx.shape, vals.shape)
+  assert idx.tolist() == [[1, 2], [0, 2]], idx.tolist()          # highest first
+  assert np.allclose(vals, [[0.9, 0.4], [0.7, 0.5]]), vals
+
+  # the values must line up with their indices, row by row
+  assert all(np.isclose(vals[r, j], s[r, idx[r, j]])
+             for r in range(2) for j in range(2)), "vals don't match idx — take_along_axis, not scores[idx]"
+
+  # k = the full width is just a per-row descending sort
+  _, v_all = top_k(s, 3)
+  assert np.allclose(v_all, np.sort(s, axis=1)[:, ::-1]), v_all
+
+  print("PASS - 5 checks")

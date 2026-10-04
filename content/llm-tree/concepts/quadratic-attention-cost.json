@@ -1,0 +1,97 @@
+{
+  "id": "quadratic-attention-cost",
+  "title": "Quadratic Attention Cost",
+  "definition": "Quadratic attention cost is the O(n²) growth in both compute and memory that self-attention incurs as sequence length n grows, because every token's query must be scored against every other token's key before anything else happens.",
+  "summary": "Self-attention first builds an n×n score matrix (QKᵀ), so its FLOPs and memory scale with the square of context length, while every other part of a transformer block (QKV/output projections, MLP, layernorm) scales linearly in n. This asymmetry is why context length, not model width, is usually what breaks a production serving budget first — doubling the prompt roughly quadruples attention's compute and memory, not just doubles it. Mitigations either shrink the constant (FlashAttention), shrink the effective n (sliding-window/sparse attention, RAG), or remove the pairwise term altogether (linear attention, SSMs).",
+  "objectives": [
+    "Derive why attention costs O(n²·d) while projections/MLP cost O(n·d²), and locate the crossover point.",
+    "Compute the memory footprint of the attention score matrix for a given sequence length and explain why it — not the weights — causes long-context OOMs.",
+    "Explain precisely what FlashAttention fixes (memory IO) and what it does not (FLOP count / asymptotic complexity).",
+    "Explain why KV-caching makes each decode step O(n) but the cumulative cost of generating a sequence is still O(n²).",
+    "Choose between FlashAttention, sparse/local attention, linear attention/SSMs, and RAG given a production long-context requirement."
+  ],
+  "lesson": "Self-attention's defining move is also its cost driver: to let every token gather information from every other token, it first forms `S = QKᵀ`, an n×n matrix of pairwise scores. Building `S` costs O(n²·d) multiply-adds (n² pairs, each a d-dim dot product), the softmax over it costs O(n²), and multiplying by `V` costs another O(n²·d). Every other op in a transformer block — the Q/K/V/output projections, the MLP — is applied per token independently, so it costs O(n·d²). Comparing the constants (worked out below), attention-cost / projection-cost ≈ n/(2·d_model) — attention overtakes the dense layers once n exceeds roughly 2·d_model tokens.\n\nThe gotcha that trips people up in interviews: **FlashAttention does not change this asymptotic math.** It computes the exact same O(n²) FLOPs — it just never writes the full n×n matrix to slow GPU HBM. It tiles Q/K/V into blocks that fit in on-chip SRAM, accumulates the softmax incrementally (\"online softmax\"), and recomputes score blocks during the backward pass instead of storing them. Because attention at typical sizes is memory-bandwidth-bound rather than FLOP-bound, this is a huge real speedup and drops peak memory from O(n²) to O(n) — with zero approximation. But it is still O(n²) compute. If someone asks \"is FlashAttention a linear-attention method,\" the answer is no.\n\nSecond gotcha: KV-caching during generation makes each new token's attention step O(n) — one new query against n cached keys — not O(n²), so it looks \"fixed.\" But summed across generating a full sequence of length n, that's 1+2+...+n ≈ n²/2: total compute to produce a sequence is still quadratic in its length. It's just paid incrementally, one token at a time, instead of all at once in a single prefill pass.",
+  "examples": "**Example 1 — where attention starts to dominate**\n\n```python\ndef block_flops(n, d_model):\n    proj = 8 * n * d_model**2   # Wq,Wk,Wv,Wo — each ~2*n*d^2, linear in n\n    attn = 4 * n**2 * d_model   # QK^T then (softmax)V — each ~2*n^2*d\n    return proj, attn\n\nfor n in (512, 4096, 8192, 16384):\n    proj, attn = block_flops(n, d_model=4096)\n    print(n, f\"proj={proj:.2e}\", f\"attn={attn:.2e}\", f\"attn/proj={attn/proj:.2f}\")\n# 512   proj=6.87e+10 attn=4.29e+09  attn/proj=0.06\n# 4096  proj=5.50e+11 attn=2.75e+11  attn/proj=0.50\n# 8192  proj=1.10e+12 attn=1.10e+12  attn/proj=1.00  <- crossover: n = 2*d_model\n# 16384 proj=2.20e+12 attn=4.40e+12  attn/proj=2.00\n```\nWith `d_model=4096` (a mid-size LLM), attention overtakes the dense layers right around 8k tokens — squarely inside common production context windows.\n\n**Example 2 — why you can't just materialize the score matrix**\n\nPeak memory for one head's n×n score matrix, fp16:\n\n| seq_len (n) | n² | memory (1 head, fp16) |\n|---|---|---|\n| 1,024 | 1.05M | 2 MiB |\n| 8,192 | 67.1M | 128 MiB |\n| 32,768 | 1.07B | 2 GiB |\n| 131,072 | 17.2B | 32 GiB |\n\n```python\ndef score_matrix_bytes(n, dtype_bytes=2):\n    return n * n * dtype_bytes  # one head, one batch item, one layer\n```\nMultiply by heads × batch × layers and a single 128k-token request would need terabytes if materialized naively — exactly what FlashAttention avoids by never allocating this matrix.",
+  "tradeoffs": "Full quadratic attention is the right default up to a few thousand tokens: it's exact, every token attends to every other with no approximation, which matters when a task needs precise long-range reasoning over the whole input. FlashAttention should be on regardless of length — same math, far less memory traffic, no quality cost. Past tens/hundreds of thousands of tokens, reach for sliding-window/sparse attention (cheap, but can miss dependencies outside the window/global tokens), a linear-attention or SSM backbone like Mamba (true O(n), different quality profile, usually not a drop-in swap), or — often the pragmatic production answer — don't extend attention's reach at all: chunk and retrieve (RAG) so the tokens actually fed to attention stay in the thousands. MQA/GQA are worth knowing but solve a different problem (KV-cache memory bandwidth during decode), not the O(n²) FLOPs itself.",
+  "diagnosticQuiz": [
+    {
+      "q": "What specifically causes self-attention's O(n²) cost?",
+      "choices": [
+        "The size of the token embedding vocabulary",
+        "The choice of activation function in the feed-forward block",
+        "Computing a pairwise score between every query and every key in the sequence",
+        "The number of transformer layers stacked in the model"
+      ],
+      "answer": 2,
+      "explanation": "The n×n score matrix QKᵀ requires one dot product per (query, key) pair, so both compute and memory scale with the square of sequence length. Vocabulary size, layer count, and activation choice affect other costs (embedding table size, total depth, elementwise ops), but none is the source of the quadratic term — a common distractor because people conflate \"big model\" factors with the specific mechanism that scales quadratically."
+    },
+    {
+      "q": "Holding d_model fixed, if you double the sequence length, how does the FLOP cost of computing QKᵀ change?",
+      "choices": [
+        "It roughly quadruples (4x)",
+        "It roughly doubles (2x)",
+        "It increases by 8x",
+        "It stays the same"
+      ],
+      "answer": 0,
+      "explanation": "QKᵀ costs O(n²·d), so scaling n by 2 scales the cost by 2²=4. The tempting wrong answer is 2x — that's what you'd get if you (incorrectly) assumed attention scales like the linear projections, O(n·d²), which really is linear in n."
+    },
+    {
+      "q": "Why doesn't the feed-forward (MLP) block inside a transformer layer suffer the same quadratic blowup as attention?",
+      "choices": [
+        "It's applied to each token's vector independently, with no token-to-token interaction",
+        "It only runs at inference time, not during training",
+        "It uses a smaller hidden dimension than the attention block",
+        "It is automatically skipped once the sequence exceeds a length threshold"
+      ],
+      "answer": 0,
+      "explanation": "The MLP applies the same weight matrices to every token's vector on its own, so its cost is O(n·d²) — linear in n, because there's no pairwise term at all. The \"smaller hidden dimension\" option is wrong on both counts: MLP hidden dims are usually larger than d_model (often 4x), and dimension size was never what separates quadratic from linear scaling — cross-token interaction is."
+    },
+    {
+      "q": "Your product needs to process 100-page documents (~80k tokens) per request on a fixed GPU budget. Which change most directly addresses the quadratic attention bottleneck, as opposed to just making the existing computation more efficient?",
+      "choices": [
+        "Switch the attention kernel to FlashAttention",
+        "Increase the serving batch size",
+        "Switch to a sparse/local attention pattern (or an SSM backbone, or RAG-based chunking) so the effective sequence length attention sees is bounded",
+        "Increase d_model for a higher-quality representation"
+      ],
+      "answer": 2,
+      "explanation": "FlashAttention is a great baseline but leaves the O(n²) FLOP count unchanged — it only fixes memory IO. Only changing which tokens attend to which, swapping to an O(n) architecture, or capping effective context via retrieval actually changes the complexity class. Increasing batch size or d_model doesn't touch the n² term and would make the memory problem worse, not better."
+    },
+    {
+      "q": "A team argues that because they use KV-caching during autoregressive generation, their inference is no longer quadratic in sequence length. What's the flaw in that reasoning?",
+      "choices": [
+        "The reasoning is correct — KV-caching removes the quadratic cost entirely",
+        "KV-caching is incompatible with multi-head attention, so the premise is invalid",
+        "KV-caching only applies during training, not inference",
+        "Each decode step is indeed only O(n) (new query against n cached keys), but summed across generating all n tokens of a response, the total cost is still O(n²)"
+      ],
+      "answer": 3,
+      "explanation": "KV-caching avoids recomputing the full attention matrix from scratch at every step, so each individual step is cheap — O(n) — but that cost is paid once per generated token, and 1+2+...+n ≈ n²/2. The team's mistake is looking at per-step cost instead of cumulative cost across the whole generation; per-step linearity doesn't imply end-to-end linearity."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Why is quadratic attention cost the main scaling limiter for long-context LLM serving, concretely — not just \"it's O(n²)\"?",
+      "a": "Self-attention's score matrix and its memory footprint scale as n², while every other transformer op (projections, MLP) scales as n. In practice: (1) doubling prompt length roughly quadruples attention compute and the memory needed for scores/activations, so latency and GPU memory both blow up faster than the prompt did; (2) that per-request memory eats into the budget you'd rather spend on batching, so max batch size — and throughput — shrinks as context grows; (3) it's specifically *context length* that does this, not parameter count or d_model, so \"use a bigger GPU\" scales worse here than it does for model size."
+    },
+    {
+      "q": "Does FlashAttention solve the quadratic attention cost problem?",
+      "a": "No — it's an exact reformulation of the same O(n²) computation, not an approximation or a complexity reduction. It never materializes the full n×n score matrix in GPU HBM; instead it tiles Q/K/V into SRAM-sized blocks, computes softmax incrementally, and recomputes score blocks during the backward pass instead of storing them. Since attention at typical sizes is memory-bandwidth-bound rather than FLOP-bound, this gives large real speedups and drops peak memory from O(n²) to O(n) — but the FLOP count is unchanged. Treat it as a free, lossless baseline you always turn on, not a fix for regimes where the O(n²) FLOPs themselves are the bottleneck."
+    },
+    {
+      "q": "Your product needs to support 128k-token context on a fixed GPU budget. What do you actually ship?",
+      "a": "Turn on FlashAttention regardless — free and lossless, but not sufficient alone at this length. Then, in order of increasing risk: first check whether RAG/chunking can keep the tokens actually fed to attention in the low thousands (cheapest, lowest-risk, often \"good enough\" for document-QA-style tasks); if the task genuinely needs one pass over the full 128k, consider sliding-window/sparse attention for a bounded, approximate solution; only reach for a linear-attention or SSM backbone (e.g. Mamba) if retraining/fine-tuning a different architecture is on the table, since that's the highest-effort option. I would not try to buy my way out with more GPUs/batch size — the memory problem scales quadratically, so that doesn't buy nearly as much as it sounds like it should."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "self-attention"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "6d27b505be3c8f3b",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T14:08:54Z"
+  }
+}

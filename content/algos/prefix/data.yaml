@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: prefix
+fam: arrays
+label: Prefix Sum + Hashmap
+order: 2
+trigger: subarray sum equals / divisible by K, count of such
+insight: count += seen[sum−k]; for divisibility key on sum%k (normalize negatives). Seed seen[0]=1
+probs:
+- {n: Range Sum Query - Immutable, slug: range-sum-query-immutable, d: E}
+- {n: Subarray Sum Equals K, slug: subarray-sum-equals-k, d: M}
+- {n: Subarray Sums Divisible by K, slug: subarray-sums-divisible-by-k, d: M}

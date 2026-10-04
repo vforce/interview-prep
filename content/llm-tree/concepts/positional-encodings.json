@@ -1,0 +1,100 @@
+{
+  "id": "positional-encodings",
+  "title": "Positional Encodings",
+  "definition": "Positional encoding is a fixed or learned signal added to (or fused into) token representations so that self-attention — which is otherwise permutation-equivariant — can recover token order and relative distance.",
+  "summary": "`attention(Q,K,V) = softmax(QK^T/√d)V` treats its input as an unordered set: permute the tokens and the output permutes identically, with no signal distinguishing \"before\" from \"after.\" Positional encodings fix this either by injecting an absolute position vector at the input (sinusoidal, learned) or by modifying attention scores/query-key geometry based on relative offset (ALiBi, RoPE). The choice drives how well a production model extrapolates to context lengths beyond training and how cheaply it serves with KV-caching.",
+  "objectives": [
+    "Explain why attention architecturally requires an explicit positional signal",
+    "Compare absolute (sinusoidal, learned) vs relative (RoPE, ALiBi) schemes",
+    "Derive/recall the sinusoidal formula and RoPE's rotation mechanism",
+    "Reason about length extrapolation and long-context extension in production",
+    "Spot the common gotcha: silent degradation vs hard failure beyond trained length"
+  ],
+  "lesson": "Self-attention computes a weighted sum over the *set* of tokens. Permute the inputs and (modulo relabeling) you get the exact same computation — attention has no built-in sense of order. Language obviously cares about order (\"dog bites man\" ≠ \"man bites dog\"), so position must be injected explicitly.\n\n**Absolute schemes** assign each position a vector added to the token embedding before layer 1.\n- *Sinusoidal* (original Transformer): `PE(pos,2i)=sin(pos/10000^(2i/d))`, `PE(pos,2i+1)=cos(...)`. Fixed, zero parameters, and — thanks to trig angle-sum identities — `PE(pos+k)` is a linear function of `PE(pos)`, so the model *can* learn to attend by relative offset despite the encoding being absolute.\n- *Learned* (BERT, GPT-2): a trainable table indexed by position `0..max_len-1`. Simple, but there is no row for position `max_len` — the model is architecturally unable to represent a token beyond its trained length.\n\n**Relative schemes** inject offset information at attention time instead of at the input.\n- *ALiBi*: subtract a distance-proportional penalty from raw attention scores. No parameters, extrapolates very well.\n- *RoPE* (rotary): rotate each query/key vector by an angle proportional to its absolute position, in 2D sub-block pairs. Because rotations are orthogonal, `⟨R_m q, R_n k⟩` depends only on `(m−n)` — relative position falls out of the geometry for free. RoPE is now the default in LLaMA, Mistral, GPT-NeoX, Qwen, etc.\n\n**The key gotcha:** every scheme has a length it was trained on. Learned absolute embeddings hard-fail past it (no vector exists). RoPE and sinusoidal don't crash, but their rotation angles/frequencies extrapolate into a regime the model never saw, so quality *quietly* degrades (\"lost in the middle\") — exactly why production long-context extension needs NTK-aware scaling, position interpolation, or YaRN rather than just feeding a longer prompt and hoping.",
+  "examples": "**1. Sinusoidal PE**\n\n```python\nimport numpy as np\n\ndef sinusoidal_pe(seq_len, d_model):\n    pos = np.arange(seq_len)[:, None]           # (seq_len, 1)\n    i   = np.arange(d_model)[None, :]           # (1, d_model)\n    angle_rates = 1 / (10000 ** (2 * (i // 2) / d_model))\n    angles = pos * angle_rates\n    pe = np.zeros((seq_len, d_model))\n    pe[:, 0::2] = np.sin(angles[:, 0::2])\n    pe[:, 1::2] = np.cos(angles[:, 1::2])\n    return pe   # x = token_embedding + pe\n```\n\n**2. RoPE — relative-position invariance, verified numerically**\n\n```python\nimport numpy as np\n\ndef rope_rotate(x, pos, theta=10000.0):\n    d = x.shape[-1]                              # d even\n    freqs = theta ** (-np.arange(0, d, 2) / d)\n    angles = pos * freqs\n    x1, x2 = x[..., 0::2], x[..., 1::2]\n    out = np.empty_like(x)\n    out[..., 0::2] = x1 * np.cos(angles) - x2 * np.sin(angles)\n    out[..., 1::2] = x1 * np.sin(angles) + x2 * np.cos(angles)\n    return out\n\nq, k = np.random.randn(4), np.random.randn(4)\nm, n = 5, 2\nscore_a = rope_rotate(q, m) @ rope_rotate(k, n)\nscore_b = rope_rotate(q, m + 7) @ rope_rotate(k, n + 7)   # shift both by +7\nprint(np.allclose(score_a, score_b))   # True — only (m - n) matters\n```",
+  "tradeoffs": "Sinusoidal costs nothing and generalizes somewhat, but modern models rarely rely on it alone — empirically weaker than RoPE. Learned absolute embeddings are simplest and fine for fixed, known-length inputs (e.g., short encoder classification), but cannot extrapolate at all and spend embedding capacity relearning shift structure. ALiBi is nearly free and extrapolates best of all, at the cost of a fixed distance-decay prior that can hurt tasks needing precise long-range retrieval. RoPE is the current default for generative LLMs — strong quality, clean relative-position algebra, and KV-cache friendly since each cached key is rotated once by its own absolute position — but extending context past the trained length isn't free: it needs explicit scaling (NTK-aware theta rescaling, position interpolation, YaRN) usually plus a short fine-tune. Default to RoPE or ALiBi whenever context length might grow or vary; reserve learned-absolute for short, fixed-length, non-generative settings.",
+  "diagnosticQuiz": [
+    {
+      "q": "Why do Transformer models require an explicit positional encoding mechanism?",
+      "choices": [
+        "Because self-attention is permutation-equivariant and has no built-in notion of token order",
+        "Because embeddings are randomly initialized and need position to break symmetry",
+        "Because the softmax function requires a monotonic input ordering to converge",
+        "Because gradient descent cannot update embedding matrices without positional indices"
+      ],
+      "answer": 0,
+      "explanation": "`attention(Q,K,V)=softmax(QK^T/√d)V` treats input as a set — permuting tokens permutes the output identically, so without an added signal the model can't tell \"the dog bit the man\" from \"the man bit the dog.\" Option B confuses initialization symmetry-breaking (already handled by embeddings) with sequence-order encoding — a common mix-up."
+    },
+    {
+      "q": "In sinusoidal encoding, `PE(pos,2i)=sin(pos·ω_i)` with `ω_i = 1/10000^(2i/d)`. For a fixed dimension pair `i`, what does `(sin, cos)` trace as `pos` grows?",
+      "choices": [
+        "An exponentially decaying oscillation that vanishes for large pos",
+        "A point rotating around the unit circle at a frequency fixed by that dimension's index i",
+        "A linearly increasing ramp bounded only by pos",
+        "A random-looking sequence with no closed-form structure"
+      ],
+      "answer": 1,
+      "explanation": "For fixed `i`, `(sin(pos·ω_i), cos(pos·ω_i))` parametrizes a point moving around the unit circle as `pos` increases, with different `i` giving different rotation frequencies — the exact structure RoPE later reuses explicitly as rotation matrices. Option D tempts because \"sin/cos\" suggests decay, but the amplitude never shrinks — only frequency varies with `i`."
+    },
+    {
+      "q": "RoPE rotates each query/key by an angle proportional to its absolute position before the dot product. Why does the resulting score depend only on the *relative* position `(m−n)`?",
+      "choices": [
+        "Because softmax normalizes away any dependence on absolute position automatically",
+        "Because the rotation is only applied to the key vectors, not the queries",
+        "Rotating q at position m and k at position n by their respective angles makes their dot product a function of the angle difference (m−n)θ, by the geometry of rotations",
+        "Because RoPE clips absolute position values above a fixed threshold before rotating"
+      ],
+      "answer": 2,
+      "explanation": "Rotation matrices are orthogonal, so `⟨R_m q, R_n k⟩ = ⟨q, R_{n-m} k⟩` — the inner product only sees the relative rotation. Option D is a common misconception: softmax renormalizes scores but doesn't erase position-dependent structure baked into the raw dot products; the cancellation here is purely geometric, prior to softmax."
+    },
+    {
+      "q": "You're serving a model that must reliably handle inputs far longer than anything seen in training (trained at 4k, served at 128k). Which choice most directly addresses this?",
+      "choices": [
+        "Switch to no positional encoding at inference time to avoid overfitting to training length",
+        "Prefer a relative scheme (RoPE with NTK/YaRN scaling, or ALiBi) over learned absolute embeddings, since the latter has no representation for unseen positions",
+        "Prefer learned absolute embeddings since they are simplest to fine-tune",
+        "Positional encoding choice doesn't matter — extrapolation is purely a function of model depth"
+      ],
+      "answer": 1,
+      "explanation": "Learned absolute embeddings are a lookup table sized to the max trained length — there is no vector for position 50,000, so the model literally can't process it. RoPE (with scaling) and ALiBi are defined for arbitrary offsets and are what production long-context models actually use to extend context post-hoc."
+    },
+    {
+      "q": "A team fine-tunes a RoPE model to a longer context but forgets to rescale RoPE's base frequency (theta) or apply position interpolation. What's the likely production symptom?",
+      "choices": [
+        "No effect, since RoPE angles are learned end-to-end during fine-tuning",
+        "A crash at inference time because RoPE has a hard-coded maximum sequence length",
+        "Improved performance, since higher positions naturally get more attention weight",
+        "Sharp quality degradation (e.g., \"lost in the middle,\" incoherent long-range attention) once inputs exceed the original training length"
+      ],
+      "answer": 3,
+      "explanation": "Feeding longer sequences through unscaled RoPE pushes rotation angles into a regime never seen in training, so attention degrades — precisely why NTK-aware scaling, position interpolation, and YaRN exist. Option C is a common false assumption: RoPE is computed analytically for any position, so nothing \"crashes\" — it silently degrades, which is worse in production because it's harder to catch."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Why do most modern production LLMs (LLaMA, Mistral, Qwen, GPT-NeoX) use RoPE instead of learned or sinusoidal positional embeddings?",
+      "a": "RoPE's dot product depends only on relative position `(m−n)`, not absolute index, which generalizes and extrapolates better than a learned table with zero extra parameters and empirically beats plain sinusoidal. Critically for serving, it's **KV-cache friendly**: each key/query is rotated once by its own absolute position at creation time, so appending a new token during autoregressive decoding never requires recomputing rotations for already-cached keys."
+    },
+    {
+      "q": "You need to extend a model's context window from 4K (trained) to 32K in production without retraining from scratch. What's your approach?",
+      "a": "Use position interpolation (compress positions into the trained range) or NTK-aware RoPE theta rescaling, or YaRN (blends both, scaling frequency bands differently) — typically paired with a short low-LR fine-tune on long documents to adapt attention patterns. Watch for the failure mode being *silent* degradation (\"lost in the middle\"), not a crash, so long-context accuracy must be explicitly evaluated before shipping. Note this is orthogonal to the separate cost of the longer KV cache itself (`O(n)` memory, `O(n²)` attention)."
+    },
+    {
+      "q": "Why can't the model just learn token order from data alone, without positional encoding?",
+      "a": "Because `attention(Q,K,V)=softmax(QK^T/√d)V` is exactly permutation-equivariant — permuting the input tokens permutes the output identically, with zero signal differentiating orderings. This isn't a data or training-scale problem; it's a representational limitation of the attention operation itself, so no amount of data fixes it without an explicit positional term."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "context-window",
+    "transformer-overview"
+  ],
+  "followUps": [
+    "context-window"
+  ],
+  "metadata": {
+    "inputHash": "520bc8b2c3f6888f",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T13:26:58Z"
+  }
+}

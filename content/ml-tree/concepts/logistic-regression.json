@@ -1,0 +1,105 @@
+{
+  "id": "logistic-regression",
+  "title": "Logistic Regression",
+  "definition": "Logistic regression is a linear model for binary classification that fits the log-odds of the positive class as `w·x + b` and maps it to a probability via the sigmoid function, trained by minimizing cross-entropy loss (equivalently, maximizing Bernoulli likelihood).",
+  "summary": "Logistic regression takes linear regression's `w·x + b` score and passes it through the sigmoid function so the output is a valid probability in (0, 1), then fits the weights by minimizing cross-entropy loss instead of squared error. It's the standard production baseline for binary classification: cheap to score, easy to regularize, and its weights are directly interpretable as changes in log-odds.",
+  "objectives": [
+    "Derive the sigmoid from the log-odds (logit) link and explain why it's the natural choice, not an arbitrary S-curve.",
+    "Write the cross-entropy loss and derive its gradient, showing it takes the same `(prediction − label) × input` form as linear regression's.",
+    "Explain why unregularized logistic regression fails on linearly separable data, and how L2/L1 regularization fixes it.",
+    "Reason about decision thresholds, class imbalance, and probability calibration for production scoring systems.",
+    "Recognize when the linear decision boundary in log-odds space is a limitation and reach for trees/GBMs/NNs instead."
+  ],
+  "lesson": "Linear regression outputs an unbounded real number; classification needs a probability in (0, 1). Logistic regression bridges the two by modeling the **log-odds** of the positive class as linear in the features, then inverting:\n\n```\nlog(p / (1 - p)) = w·x + b              (the logit link)\np = σ(w·x + b) = 1 / (1 + e^-(w·x+b))   (sigmoid = inverse logit)\n```\n\nSigmoid isn't an arbitrary \"S-curve\" pick — it's forced by treating log-odds as the linear quantity.\n\nTraining swaps squared error for cross-entropy: `L = -[y·log(p) + (1-y)·log(1-p)]`. Take its gradient w.r.t. `w`. Because `d/dz σ(z) = σ(z)(1-σ(z))`, the `p` and `(1-p)` terms cancel cleanly, leaving:\n\n```\n∂L/∂w = (p - y) · x\n```\n\nThat's exactly linear regression's `(ŷ - y)·x` gradient — only `ŷ` is now `σ(w·x)` instead of `w·x`. The gradient descent loop you already know is unchanged; only the forward pass gets a sigmoid.\n\n**Worked intuition:** `x` = hours studied, `w=1, b=-5`. At `x=6`: `z=1`, `p=σ(1)≈0.73` → predict \"pass.\" A gradient step moves `w` by `lr·(p-y)·x` — same shape as an OLS update, scaled by the probability error instead of the raw residual.\n\n**Key gotcha:** if the classes are (or become) linearly separable — common with sparse/high-dimensional features like text or embeddings — the unregularized MLE has no finite optimum. The optimizer can always shrink the loss further by scaling `‖w‖→∞` to push `p` closer to 0/1, so training never converges and weights blow up. This is why every production implementation regularizes by default (e.g., scikit-learn's `LogisticRegression` is L2-penalized with `C=1.0` unless you turn it off) — regularization here isn't just anti-overfitting hygiene, it's what makes the optimization well-posed at all. Corollary: extreme `p` values near 0/1 don't imply good calibration — check a reliability curve before piping raw scores into a cost-sensitive threshold.",
+  "examples": "**1. Gradient descent from scratch (ties directly to the linear-regression update rule):**\n```python\nimport numpy as np\n\ndef sigmoid(z):\n    return 1 / (1 + np.exp(-z))\n\ndef train_logreg(X, y, lr=0.1, epochs=1000, l2=0.01):\n    n, d = X.shape\n    w, b = np.zeros(d), 0.0\n    for _ in range(epochs):\n        p = sigmoid(X @ w + b)\n        grad_w = X.T @ (p - y) / n + l2 * w   # l2 term keeps ||w|| bounded\n        grad_b = np.mean(p - y)\n        w -= lr * grad_w\n        b -= lr * grad_b\n    return w, b\n```\n`grad_w` is `X.T @ error / n` — identical to OLS gradient descent — plus the `l2 * w` shrinkage term that prevents divergence on separable data.\n\n**2. Production usage with scikit-learn — regularization, imbalance, calibration check:**\n```python\nfrom sklearn.linear_model import LogisticRegression\nfrom sklearn.calibration import calibration_curve\n\nclf = LogisticRegression(C=1.0, class_weight=\"balanced\")  # C = 1/lambda; smaller C -> stronger L2\nclf.fit(X_train, y_train)\n\nprobs = clf.predict_proba(X_test)[:, 1]\nfrac_pos, mean_pred = calibration_curve(y_test, probs, n_bins=10)\n# frac_pos ≈ mean_pred per bin -> well-calibrated; large gaps -> recalibrate (Platt/isotonic)\n```",
+  "tradeoffs": "Use logistic regression when you need a fast, low-latency scorer (one dot product + sigmoid), interpretable weights (log-odds per feature — useful for compliance, credit, or healthcare stakeholders), and a strong, well-understood baseline before reaching for anything heavier; it also works well as a calibration/probe layer on top of features or embeddings from a bigger model. Avoid it — or at least don't expect it to work unmodified — when the true decision boundary needs feature interactions or nonlinearity you haven't engineered by hand (crosses, splines); gradient-boosted trees or neural nets will beat it there with less feature work. It's also not automatically well-calibrated or robust to severe class imbalance/separability without tuning (`class_weight`, regularization strength, threshold choice) — treat calibration as something to verify, not assume.",
+  "diagnosticQuiz": [
+    {
+      "q": "What quantity does logistic regression model as a linear function of the input features?",
+      "choices": [
+        "The predicted class label",
+        "The variance of the target variable",
+        "The probability of the positive class",
+        "The log-odds (logit) of the positive class"
+      ],
+      "answer": 3,
+      "explanation": "The model fits `w·x + b` to the log-odds `log(p/(1-p))`; the probability itself is a *nonlinear* (sigmoid) function of that score, not linear in `x`. \"The probability of the positive class\" is the tempting wrong answer because people casually describe logistic regression as \"predicting a probability,\" which skips the link function that makes the linearity assumption precise."
+    },
+    {
+      "q": "A logistic regression model computes a linear score `w·x + b = 2`. What probability does it predict for the positive class?",
+      "choices": [
+        "≈ 0.88",
+        "2.00",
+        "0.50",
+        "≈ 0.12"
+      ],
+      "answer": 0,
+      "explanation": "`σ(2) = 1/(1+e^-2) ≈ 0.881`. `≈0.12` is `σ(-2)` — the result of a sign error in the exponent (or flipping which class is \"positive\"), a very common bug when implementing sigmoid by hand. `0.50` is only correct at a score of exactly 0, and `2.00` mistakes the raw logit for the probability itself — exactly the confusion the logit link exists to prevent."
+    },
+    {
+      "q": "Why is cross-entropy loss used to train logistic regression instead of mean squared error on the sigmoid output?",
+      "choices": [
+        "MSE on a sigmoid is non-convex in the weights and its gradient shrinks near saturated predictions, stalling learning; cross-entropy stays convex with a gradient that doesn't vanish the same way",
+        "MSE cannot be computed when the target is a probability",
+        "Cross-entropy uses less memory during backpropagation",
+        "Cross-entropy is numerically smaller, so training finishes faster"
+      ],
+      "answer": 0,
+      "explanation": "Squaring the sigmoid output creates a non-convex loss surface with flat regions where the sigmoid saturates, so gradient descent can stall far from the optimum. Cross-entropy's gradient reduces to the clean `(p−y)·x` form because the sigmoid's derivative cancels the log-loss's derivative — no vanishing-gradient trap. The \"smaller/faster\" and memory options are surface-level guesses that skip the actual gradient math."
+    },
+    {
+      "q": "Your tabular dataset's true decision boundary depends heavily on interactions between features (e.g., risk depends on income *and* age jointly), and you haven't hand-engineered interaction terms. What's the most effective fix?",
+      "choices": [
+        "Increase the L2 regularization strength",
+        "Train longer with more gradient descent epochs",
+        "Switch to a model that learns interactions automatically, like a gradient-boosted tree",
+        "Lower the learning rate for smoother convergence"
+      ],
+      "answer": 2,
+      "explanation": "Plain logistic regression's decision boundary is linear in log-odds space over the given features — it structurally cannot represent interactions it wasn't given as explicit terms, however well it's optimized. More epochs, a smaller learning rate, or more regularization only change how well you fit the linear model you specified; they don't add capacity for interactions. Trees/GBMs (or manual feature crosses) fix the real mismatch: model capacity, not optimization."
+    },
+    {
+      "q": "After a data pipeline change, your training set becomes perfectly linearly separable. What happens if you train an unregularized logistic regression on it, and how do production libraries typically guard against this?",
+      "choices": [
+        "Training converges quickly to a perfect, well-calibrated model",
+        "The optimizer automatically falls back to a linear regression fit",
+        "The sigmoid outputs hit exactly 1.0, the gradient becomes exactly zero, and training stops cleanly",
+        "The loss can always be lowered further by scaling the weights up, so training never converges and weights diverge; libraries like scikit-learn default to L2-regularized (\"penalized\") logistic regression to bound the weights"
+      ],
+      "answer": 3,
+      "explanation": "On separable data the likelihood keeps improving as `‖w‖→∞` (pushing predictions ever closer to 0/1), so there's no finite maximum — this is why scikit-learn's `LogisticRegression` regularizes by default (`C=1.0`) rather than leaving it optional the way OLS does. The last option is the tempting-but-wrong story: the sigmoid only *asymptotes* toward 1, it never reaches it exactly, so the gradient shrinks but never hits zero and weights keep growing (slowly) forever without a penalty term."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "You're deploying a logistic regression model as a real-time risk-scoring service. Beyond raw accuracy/AUC, what do you check before shipping it?",
+      "a": "- **Calibration** — plot a reliability curve (predicted probability vs. observed frequency); if downstream logic thresholds on the score or computes expected cost, miscalibration is worse than mediocre AUC.\n- **Regularization strength** (`C`/`lambda`) tuned on a validation set, not left at the library default — especially with high-dimensional/sparse features where quasi-separation is easy to hit.\n- **Class imbalance handling** — `class_weight`, resampling, or a business-driven threshold instead of the default 0.5.\n- **Drift monitoring** — log-odds are additive, so feature drift shows up as a shift in the score distribution over time; also track coefficient stability across retrains for explainability/compliance."
+    },
+    {
+      "q": "Derive the gradient of the cross-entropy loss for logistic regression with respect to the weights, and explain why it has that form.",
+      "a": "With `p = σ(w·x+b)` and `L = -[y·log(p) + (1-y)·log(1-p)]`:\n```\n∂L/∂p = -(y/p) + (1-y)/(1-p)\n∂p/∂z = p(1-p)                    (sigmoid derivative)\n∂L/∂w = (∂L/∂p)(∂p/∂z)·x = (p - y)·x\n```\nThe `p(1-p)` from the sigmoid's derivative exactly cancels the `p(1-p)`-shaped denominators from the log-loss derivative, leaving the clean `(p−y)·x` — the same \"error × input\" shape as linear regression's gradient. That cancellation is *why* cross-entropy is paired with sigmoid rather than squared error: the combination gives a well-behaved, non-vanishing gradient."
+    },
+    {
+      "q": "In production, your logistic regression's test AUC looks great but nearly every predicted probability is 0.001 or 0.999, and the learned coefficients are enormous and keep growing on retrains. What's happening, and how do you fix it?",
+      "a": "This is separability/quasi-separability: some feature (or combination) almost perfectly determines the label, so unregularized MLE pushes `‖w‖→∞` chasing an unreachable perfect fit. AUC (rank-based) still looks fine even as the probabilities themselves become extreme and uncalibrated. Fix: increase L2 (or add L1 to force sparsity and identify the culprit feature), audit for a leaking feature (e.g., one only populated after the label is known), and recalibrate (Platt scaling/isotonic regression) before using the scores as real probabilities downstream."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "cross-entropy-loss",
+    "gradient-descent",
+    "linear-regression",
+    "neural-networks-mlp",
+    "support-vector-machines"
+  ],
+  "followUps": [
+    "cross-entropy-loss",
+    "neural-networks-mlp",
+    "support-vector-machines"
+  ],
+  "metadata": {
+    "inputHash": "ea18a02fd4f83851",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T10:06:33Z"
+  }
+}

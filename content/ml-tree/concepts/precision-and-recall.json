@@ -1,0 +1,104 @@
+{
+  "id": "precision-and-recall",
+  "title": "Precision and Recall",
+  "definition": "Precision is the fraction of predicted positives that are true positives, TP/(TP+FP); recall is the fraction of actual positives the model correctly finds, TP/(TP+FN).",
+  "summary": "Precision answers \"when the model predicts positive, can I trust it?\"; recall answers \"of everything actually positive, how much did I catch?\" Both are read off the same confusion matrix you already know, but from different rows/columns, and both move in opposite directions as you slide the classification threshold. In production, which one you optimize for is a business-cost decision, not a modeling one.",
+  "objectives": [
+    "Derive precision and recall from confusion-matrix cells and state what each answers",
+    "Explain why precision and recall trade off as the classification threshold moves",
+    "Diagnose why high accuracy can hide near-zero recall under class imbalance",
+    "Pick which metric to prioritize given an asymmetric cost of FP vs. FN",
+    "Know when PR-AUC is the right call over ROC-AUC, and why single-point comparisons mislead"
+  ],
+  "lesson": "You already have the four confusion-matrix cells. Precision and recall just read two different slices of it:\n\n- **Precision = TP / (TP + FP)** — the predicted-positive column. \"When I fire, am I right?\"\n- **Recall = TP / (TP + FN)** — the actual-positive row. \"Of all true positives, how many did I find?\" (a.k.a. sensitivity, TPR)\n\nThese aren't two independent knobs — they're two views of one threshold. Every scoring classifier (logistic regression, GBM, NN) turns a continuous score into a label by thresholding. Lower the threshold and more cases get called positive: recall rises (you catch more true positives) but precision falls (you also sweep in more false positives). Raise it and the reverse happens. Sweep the threshold across its full range and you get the precision-recall curve — there is no threshold-free \"the precision\" of a model, only \"precision at threshold t\" or \"precision at recall x.\"\n\n**Worked example.** 1,000 transactions, 10 truly fraud. At threshold t the model flags 20, 8 of which are real fraud: TP=8, FP=12, FN=2, TN=978. Precision = 8/20 = 0.40, Recall = 8/10 = 0.80. Lower the threshold to flag 60 and you might catch all 10 (recall=1.0), but precision collapses because you've pulled in far more false positives — that's the tradeoff working as intended, not a bug to fix.\n\n**Key gotcha:** each metric is blind to one error type. A model that flags *everything* gets recall = 1.0 and looks flawless on that axis while being useless (precision → base rate, near 0). A model that only fires on the single case it's most sure about can hit precision = 1.0 with recall near 0. Reporting either number alone — worse, at an unstated or cherry-picked threshold — is exactly how a model that \"looks great in the deck\" quietly underperforms in production. Always report both, at a named operating point, or report the whole curve.",
+  "examples": "**1. Reading the numbers off a confusion matrix**\n\n```python\nfrom sklearn.metrics import confusion_matrix, precision_score, recall_score\n\ny_true = [1]*10 + [0]*990                       # 10 real fraud cases / 1000\ny_pred = [1]*8 + [0]*2 + [1]*12 + [0]*978        # model flags 20, 8 correct\n\ntn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()\nprint(tp, fp, fn, tn)                  # 8 12 2 978\nprint(precision_score(y_true, y_pred)) # 0.40\nprint(recall_score(y_true, y_pred))    # 0.80\n```\n\n**2. Same dataset, different thresholds — the tradeoff made concrete**\n\n| Threshold | Flagged | TP | FP | FN | Precision | Recall |\n|---|---|---|---|---|---|---|\n| 0.90 | 6  | 6  | 0  | 4 | 1.00 | 0.60 |\n| 0.70 | 20 | 8  | 12 | 2 | 0.40 | 0.80 |\n| 0.30 | 60 | 10 | 50 | 0 | 0.17 | 1.00 |\n\n```python\nfrom sklearn.metrics import precision_recall_curve\nimport numpy as np\n\nprecisions, recalls, thresholds = precision_recall_curve(y_true, scores)\nok = recalls[:-1] >= 0.80                        # target: recall >= 0.8\nbest = np.argmax(precisions[:-1] * ok)           # highest precision meeting it\nchosen_threshold = thresholds[best]\n```",
+  "tradeoffs": "The threshold sets where you sit on the curve; the right point is decided by the relative cost of a false positive vs. a false negative, not by which metric sounds better. Recall-first (lower threshold): medical screening, fraud alerts routed to a human queue, severe content moderation — missing a true positive is expensive, and a downstream stage absorbs the extra false positives. Precision-first (higher threshold): any fully-automated action with no human in the loop — auto-reject, auto-block, auto-charge — where a false positive directly harms a real user and nothing catches it. Use Fβ when you need one scalar for model selection or a CI gate (β>1 weights recall, β<1 weights precision), and for imbalanced classes prefer PR-AUC over ROC-AUC for comparing models, ROC-AUC's FPR is diluted by a huge true-negative count and stays deceptively high even as precision collapses. Whatever you pick, monitor it post-deployment: data drift shifts the score distribution and silently moves your realized operating point away from the one you validated.",
+  "diagnosticQuiz": [
+    {
+      "q": "In binary classification, what does precision measure?",
+      "choices": [
+        "The fraction of all predictions that are correct",
+        "The fraction of actual positives that are correctly predicted",
+        "The fraction of actual negatives that are correctly predicted",
+        "The fraction of predicted positives that are actually positive"
+      ],
+      "answer": 3,
+      "explanation": "Precision = TP/(TP+FP) — it only looks at the predicted-positive column. \"Fraction of actual positives correctly predicted\" describes recall (C), and \"fraction of actual negatives correctly identified\" describes specificity/TNR, a different quantity entirely. Accuracy (A) folds in both classes over the whole dataset, which is a distinct, often misleading, aggregate."
+    },
+    {
+      "q": "A fraud model flags 40 transactions as fraud; 25 of those are truly fraudulent. There are 50 fraudulent transactions total in the dataset. What is the model's recall?",
+      "choices": [
+        "25/50 = 0.50",
+        "40/50 = 0.80",
+        "25/40 = 0.63",
+        "15/50 = 0.30"
+      ],
+      "answer": 0,
+      "explanation": "Recall = TP/(TP+FN) = TP / (all actual positives) = 25/50 = 0.50. Option A (25/40) is the model's precision, not recall — the classic mix-up between the two metrics. Options C and D are distractors built from mismatched numerators/denominators (FP/actual-positives, and flagged/actual-positives) that don't correspond to any standard metric."
+    },
+    {
+      "q": "A rare-disease model (1% prevalence) hits 99% accuracy but only 5% recall. What does this indicate?",
+      "choices": [
+        "The model rarely predicts positive, so it misses most true cases despite few overall errors",
+        "The model is excellent because accuracy is high",
+        "Recall is irrelevant when the base rate is low",
+        "The model has high precision because accuracy is high"
+      ],
+      "answer": 0,
+      "explanation": "At 1% prevalence, predicting \"negative\" for everyone already scores ~99% accuracy, so a high accuracy figure is nearly uninformative here. 5% recall means the model is catching almost none of the true positives — it has essentially defaulted to \"always negative,\" which the accuracy number hides completely. This is exactly why accuracy is a poor metric under imbalance; A and C reflect the misconception that one high aggregate number implies good performance on the minority class, when precision and recall can each independently be terrible."
+    },
+    {
+      "q": "You're building an auto-reject gate for loan applications, fully automated, no human review before rejection. Wrongly auto-rejecting a good applicant is far more costly than letting a few risky ones through to a downstream manual check. Which should you prioritize at this gate?",
+      "choices": [
+        "Maximize recall, even at the cost of precision",
+        "Maximize F1 score directly",
+        "Maximize precision, even at the cost of recall",
+        "Metric choice doesn't matter as long as accuracy is high"
+      ],
+      "answer": 2,
+      "explanation": "The costly error here is a false positive (auto-rejecting a good applicant), so the gate should prioritize precision — \"when I reject, am I right\" — accepting lower recall, since the risky applicants that slip through get caught by the secondary manual review anyway. This is a standard production pattern: fully-automated action steps should be high-precision, low-recall gates that only act on confident cases and defer the rest downstream. Maximizing recall (A) would auto-reject more good applicants, the exact expensive mistake; optimizing F1 (C) assumes precision and recall matter equally, which ignores the stated asymmetric cost."
+    },
+    {
+      "q": "Model A reports precision 0.90 at its default threshold; Model B reports precision 0.75 at its default threshold. What's wrong with concluding \"Model A is better\"?",
+      "choices": [
+        "There is no mistake, higher precision always means a better model",
+        "Recall should always be preferred over precision, so the comparison is moot",
+        "Precision alone ignores recall, and thresholds define different operating points, models should be compared via the full precision-recall curve or PR-AUC, not a single point",
+        "Precision is not a valid metric for fraud detection"
+      ],
+      "answer": 2,
+      "explanation": "A single precision number depends entirely on the (possibly different, possibly cherry-picked) threshold each model happens to report at — a model can look better at one threshold and worse at another. Comparing single points without also reporting recall, or better, comparing precision-recall curves / PR-AUC across the full range of thresholds, is how the naive \"A wins\" conclusion goes wrong. Option A is exactly that naive mistake."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Your fraud model reports 99.5% accuracy, but the fraud ops team says it's missing real fraud. How do you diagnose this and what do you change?",
+      "a": "- 99.5% accuracy on a ~1%-positive-rate problem is roughly what \"always predict negative\" gets for free — accuracy is uninformative here.\n- Pull the confusion matrix and compute precision/recall directly; the likely finding is very low **recall** even though the headline metric looks fine.\n- Fix: make precision/recall (or PR-AUC) the primary eval metric, retune the decision threshold against a recall target agreed with the fraud team (e.g. \"recall ≥ 0.8\"), and if the model itself under-scores fraud cases rather than just being mis-thresholded, address it with class weighting or resampling.\n- Ship with an explicit, monitored operating point — not the default 0.5 threshold."
+    },
+    {
+      "q": "How do you pick a decision threshold before shipping a binary classifier to production?",
+      "a": "- Don't default to 0.5 — it's only \"correct\" when FP and FN cost the same and classes are balanced, which is rarely true.\n- Build the precision-recall curve on a held-out validation set, then pick the point satisfying the actual constraint: a cost matrix (minimize `FP·cost_fp + FN·cost_fn`) or a hard SLA like \"precision ≥ 0.9\" or \"recall ≥ 0.8.\"\n- Treat the threshold as a policy parameter separate from the model — it can be retuned from fresh data without retraining, and should be re-validated periodically since score distributions drift."
+    },
+    {
+      "q": "When would you use PR-AUC over ROC-AUC, and why does it matter?",
+      "a": "- Use PR-AUC when the positive class is rare (fraud, disease, defect detection); ROC-AUC is fine when classes are roughly balanced or you care about ranking symmetrically across both classes.\n- Mechanism: ROC's x-axis is FPR = FP/(FP+TN). Under heavy imbalance TN is huge, so FPR stays small even as FP accumulates — ROC-AUC can look great while precision quietly collapses.\n- PR-AUC's two axes (precision, recall) are built only from TP/FP/FN, no TN in either denominator, so it directly reflects how usable the model's positive predictions actually are."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "confusion-matrix",
+    "decision-threshold",
+    "f1-score",
+    "roc-and-pr-curves"
+  ],
+  "followUps": [
+    "decision-threshold",
+    "f1-score",
+    "roc-and-pr-curves"
+  ],
+  "metadata": {
+    "inputHash": "aa09abc71eeab08e",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T09:29:36Z"
+  }
+}

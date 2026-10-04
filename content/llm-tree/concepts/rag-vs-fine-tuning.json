@@ -1,0 +1,98 @@
+{
+  "id": "rag-vs-fine-tuning",
+  "title": "RAG vs Fine-Tuning",
+  "definition": "RAG and fine-tuning are two distinct ways to adapt a frozen-weights LLM to a domain: RAG retrieves and injects external documents into the prompt at inference time, while fine-tuning permanently updates the model's weights via additional training on task-specific examples.",
+  "summary": "RAG is the right tool for knowledge that's large, volatile, or must be attributable — you update a document store instead of retraining, and you can cite sources. Fine-tuning is the right tool for shaping behavior that should become the model's default — tone, output schema, tool-calling conventions, domain-specific reasoning style — since it costs nothing extra at inference time. In production the two are usually complementary, not competing: fine-tune for consistent behavior, retrieve for the facts.",
+  "objectives": [
+    "Explain the mechanistic difference: prompt-time context injection (RAG) vs. permanent weight update (fine-tuning).",
+    "Map failure modes to the right fix: staleness/hallucination/attribution → RAG; inconsistent tone/format/tool-calls → fine-tuning.",
+    "Reason about production tradeoffs — latency, infra (vector DB/embeddings), update cost, and context-window budget.",
+    "Recognize the core gotcha: fine-tuning is a poor way to inject facts and can increase confident hallucination.",
+    "Decide when to combine both in one system rather than treating the choice as either/or."
+  ],
+  "lesson": "An LLM's weights are a compressed, frozen snapshot of everything it saw in training — ask it something outside that snapshot, or something that changed since, and it either doesn't know or confidently guesses. There are exactly two levers to fix that: change what's *in the context* (RAG) or change *the weights* (fine-tuning).\n\nRAG treats the model as a closed system and works entirely at inference time: embed the query, run a nearest-neighbor search over an embedding index of your documents, splice the top-k chunks into the prompt, and let the model answer conditioned on that text — an open-book exam. Nothing about the model changes; you're renting its reasoning/generation ability and supplying the facts yourself.\n\nFine-tuning is a closed-book exam: you run extra gradient-descent steps on curated (input, output) examples so the desired behavior — a tone, an output schema, a domain-specific reasoning style, tool-call conventions — becomes the model's *default*, with no extra prompt tokens or retrieval step needed at inference time.\n\n**Worked example:** a support bot needs (a) today's pricing, which changes daily, and (b) a strict internal JSON schema for its tool calls, which never changes. RAG naturally fits (a) — update a document, no retraining. Fine-tuning naturally fits (b) — bake the schema in once, get compliant output on every call without re-explaining the format in every prompt.\n\n**The gotcha:** fine-tuning is a bad way to inject *facts*. Train on 500 QA pairs about your product and the model doesn't learn \"the underlying facts\" — it learns to imitate the training distribution (specific phrasings, specific pairs) and generalizes poorly to reworded questions. Worse, it becomes more fluent and confident on that topic, so hallucinations on adjacent, untrained facts get *harder* to catch. And once trained, that \"knowledge\" is frozen until the next training run — no edit-a-document freshness. If you need facts that change or must be cited, that's retrieval's job; fine-tuning is for changing behavior, not for being a database.",
+  "examples": "### Example 1 — RAG at inference time (facts, freshness, citations)\n```python\ndef answer(query, k=4, max_ctx_tokens=1500):\n    q_vec = embed(query)                    # reuse the embedding model, not the LLM\n    hits = vector_db.search(q_vec, k=k)     # [(chunk_text, score, source_url), ...]\n    context = pack_until_budget(hits, max_ctx_tokens)\n\n    prompt = f\"\"\"Answer ONLY from the context below. Cite the source for each claim.\n\nContext:\n{context}\n\nQuestion: {query}\"\"\"\n    return llm.generate(prompt)             # model weights: unchanged\n```\nPrices change tomorrow? Re-embed that one doc. No retraining.\n\n### Example 2 — fine-tuning for behavior (schema, tone, tool-calling)\n```python\n# one row of a fine-tuning set — teaches the *format*, not facts\n{\"messages\": [\n    {\"role\": \"system\", \"content\": \"You are BrandBot. Always reply with a tool call.\"},\n    {\"role\": \"user\", \"content\": \"Book a flight to SF on 2026-08-01\"},\n    {\"role\": \"assistant\", \"content\":\n        '{\"tool\": \"book_flight\", \"args\": {\"dest\": \"SFO\", \"date\": \"2026-08-01\"}}'}\n]}\n```\nAfter fine-tuning on a few thousand rows like this, the model emits well-formed tool calls in this schema by default — no formatting instructions to re-paste into every prompt, and no risk of them getting crowded out by a long RAG context.",
+  "tradeoffs": "RAG wins on freshness (edit a doc, not the model), attribution (you can show sources), and cost (no training run) — but it adds retrieval infrastructure (embedding pipeline, vector DB, chunking strategy), inference latency (an extra embedding call + ANN search per request), and a hard ceiling: answer quality is bounded by retrieval quality, and retrieved tokens compete with instructions for context-window budget. Fine-tuning wins on behavior consistency (format/tone/tool-calls) and adds zero inference-time latency or infra — but it's slow and expensive to update (a full training run per change), risks catastrophic forgetting/overfitting on small datasets, gives no citations, and is a poor fit for facts that change or must be auditable. Production systems increasingly use both: fine-tune for stable behavior, RAG for volatile or attributable knowledge, rather than treating the choice as either/or.",
+  "diagnosticQuiz": [
+    {
+      "q": "Which best describes the core mechanistic difference between RAG and fine-tuning?",
+      "choices": [
+        "RAG injects retrieved context into the prompt at inference time; fine-tuning updates model weights via additional training",
+        "RAG modifies model weights via gradient descent; fine-tuning retrieves documents at inference time",
+        "RAG is used only for classification tasks; fine-tuning is used only for generation tasks",
+        "RAG and fine-tuning both require labeled datasets and a retraining run"
+      ],
+      "answer": 0,
+      "explanation": "RAG leaves the model frozen and retrieves relevant text to insert into the prompt, so the model conditions on it like an open-book exam; fine-tuning instead runs additional gradient-descent steps that permanently shift the model's weights. Choice A is the exact reversal of the definitions — an easy mix-up since both terms sound like \"adding knowledge,\" but the mechanism (prompt-time context vs. weight update) is what actually drives every downstream tradeoff. Choices C and D are wrong on scope: RAG doesn't require retraining, and neither technique is exclusive to one task type."
+    },
+    {
+      "q": "A model has an 8,000-token context window. Instructions use 500 tokens, the user query uses 100, and you reserve 1,000 for the model's answer. How many tokens are available for retrieved RAG context?",
+      "choices": [
+        "7400",
+        "5900",
+        "8000",
+        "6400"
+      ],
+      "answer": 3,
+      "explanation": "The available budget for retrieved context is the window minus every fixed reservation — instructions, query, and the output you must leave room for: 8000 − 500 − 100 − 1000 = 6400. Choice B (7400) reflects the common production bug of skipping the output reservation — pack context right up to the limit and the model has no room left to generate, so responses get silently truncated. Choices C and D come from ignoring the reservations entirely or subtracting one of them twice."
+    },
+    {
+      "q": "Why does fine-tuning on a small set of new factual Q&A pairs often fail to reliably teach a model new facts for open-ended questions, even when it answers the training examples correctly?",
+      "choices": [
+        "Because fine-tuning always requires more compute than RAG regardless of dataset size",
+        "Because fine-tuning requires a vector database to store the facts",
+        "Because fine-tuning cannot change model weights, only sampling temperature",
+        "Because gradient updates on a small dataset tend to imitate the specific training examples rather than generalize the underlying fact, and can increase confident hallucination nearby"
+      ],
+      "answer": 3,
+      "explanation": "Fine-tuning on a handful of examples nudges weights toward imitating the training distribution — specific phrasings, specific pairs — rather than installing a generalizable fact the model can recall under rephrasing, and unlike RAG there's no source text at inference time to ground the answer. It can also make the model more fluent and confident in that topic area, so when it errs on nearby, untrained facts the hallucination is harder to catch. Choice A is wrong because compute cost scales with dataset size and hardware, not a fixed rule ranking one method above the other."
+    },
+    {
+      "q": "A support bot needs daily-changing prices and a strict, never-changing internal JSON schema for tool calls. What's the best production architecture?",
+      "choices": [
+        "Fine-tune on the tone + JSON schema (stable behavior) and use RAG for prices/inventory (volatile facts)",
+        "Use RAG only, with no fine-tuning, and put the JSON schema instructions in the system prompt every time",
+        "Fine-tune on all daily price updates so the model always knows current prices",
+        "Avoid both and hardcode all responses in application code"
+      ],
+      "answer": 0,
+      "explanation": "Fine-tuning suits stable, structural behavior because it makes the model comply reliably without spending prompt tokens or competing for attention with a long retrieved context; RAG suits volatile facts because updating the document store doesn't require retraining. Choice A fails because retraining daily is operationally and financially unrealistic and still leaves a staleness gap between runs. Choice B is a legitimate lightweight alternative at small scale, but pure prompt-based formatting instructions get crowded out as retrieved context grows, making them less reliable than weights that already encode the schema."
+    },
+    {
+      "q": "A team fine-tunes on 5,000 internal support tickets to \"teach the model the product.\" After deployment it confidently describes a discontinued feature as current. What's the most likely cause?",
+      "choices": [
+        "The vector database wasn't refreshed",
+        "The RAG chunks were too large",
+        "Fine-tuning has no context window, so it forgot the conversation",
+        "The fine-tuning set encoded stale information as if it were ground truth, and the frozen weights have no way to reflect later changes without retraining"
+      ],
+      "answer": 3,
+      "explanation": "Fine-tuning bakes the training data's claims into the weights as if permanently true, so if that data contains anything stale, the model states it fluently and confidently with no built-in mechanism to flag it as outdated or a source to recheck. This is the classic \"fine-tuning for facts\" trap — it encodes staleness exactly as readily as correct information, and fixing it needs another training run, not a document edit. Choice A describes a real RAG failure mode, not a fine-tuning one, so it doesn't match this scenario."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "When would you choose fine-tuning over RAG in a production system, and what's the biggest risk if you get that call wrong?",
+      "a": "Choose fine-tuning when the goal is **behavior**, not facts — consistent tone, a strict output schema, tool-calling conventions, or a domain-specific reasoning style that should hold with zero extra prompt tokens. Choose RAG when the knowledge is large, changes often, or needs attribution. Get it backwards and you either burn training runs chasing facts that go stale before the next deploy (and confidently hallucinate in between), or you lean on prompt-only instructions for strict formatting that degrades as retrieved context grows and crowds out the instructions."
+    },
+    {
+      "q": "How would you evaluate, in production, whether a RAG-vs-fine-tune decision was the right one?",
+      "a": "For RAG: retrieval precision/recall (are the right chunks coming back), groundedness/citation rate, hallucination rate on held-out factual questions, and latency (embedding + ANN search adds to p50/p99). For fine-tuning: schema/format compliance rate, tone adherence (rubric or classifier), and regression tests against prior capabilities to catch catastrophic forgetting. Either way, A/B against a baseline before full rollout, and track cost per query — training run cost vs. per-request retrieval cost."
+    },
+    {
+      "q": "A stakeholder says, \"let's just fine-tune on our entire knowledge base so we don't need RAG at all.\" How do you respond?",
+      "a": "I'd push back: fine-tuning on a knowledge base is lossy compression of facts, prone to confident hallucination, gives no citations for compliance/trust, and requires a full retrain every time the KB changes — it doesn't scale as the KB grows or turns over. I'd propose a RAG baseline first (cheap, fast to stand up, easy to measure), and only add fine-tuning on top for behavior/format if RAG alone can't hit the tone or schema bar."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "context-window",
+    "token-embeddings"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "8023ddc73778e1d0",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T14:47:18Z"
+  }
+}

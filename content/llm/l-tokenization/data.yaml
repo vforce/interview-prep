@@ -1,0 +1,69 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: l-tokenization
+type: concept
+area: Tokenization & Embeddings
+order: 1
+front: What is tokenization / BPE, and why subwords?
+back: |-
+  Text is split into subword tokens, usually by Byte-Pair Encoding (merge frequent pairs) or unigram. Common words = one token; rare words split into pieces; byte-level fallback handles any string.
+
+  Balances vocab size vs sequence length. Token count ≠ word count — it drives context limits and API cost.
+more: |-
+  Why not characters or words? Characters make sequences too long (attention is O(n²)); whole words give a huge vocab where every typo/rare word is out-of-vocabulary. Subwords are the sweet spot. Gotchas: digits and code tokenize awkwardly, leading whitespace is part of a token (' the' ≠ 'the'), and the same word splits differently mid-sentence vs at the start. Non-English text costs far more tokens per character.
+
+  ## BPE in action — a toy example
+
+  **Corpus:** `low low low lower newer`
+
+  **Step 0 — start with characters + end-of-word marker:**
+  ```
+  l o w </w>   ×3
+  l o w e r </w>   ×1
+  n e w e r </w>   ×1
+  ```
+
+  **Count pair frequencies, pick the most common, merge:**
+  ```
+  Round 1: "lo" appears 4× → merge → lo
+  Round 2: "low" appears 4× → merge → low
+  Round 3: "er</w>" appears 2× → merge → er</w>
+  Round 4: "ew" appears 2× → merge → ew
+  ...
+  ```
+  After enough merges:
+  ```
+  "lower"  → [low] [er</w>]
+  "newer"  → [n] [ew] [er</w>]   (shares the er</w> token)
+  "lowest" → [low] [est</w>]     (hypothetical — reuses low)
+  ```
+
+  ---
+
+  ## Real GPT-2 tokens (tiktoken)
+
+  ```python
+  import tiktoken
+  enc = tiktoken.get_encoding("cl100k_base")  # GPT-4 encoding
+
+  enc.encode("Hello")          # → [9906]          1 token
+  enc.encode("hello")          # → [15339]         1 token (different!)
+  enc.encode("tokenization")   # → [31981, 2065]   2 tokens
+  enc.encode("tokenizatoin")   # → [5263, 1413, 266, 258, 4011]  5 tokens (typo = rare)
+  enc.encode("12345")          # → [4513, 2231]    2 tokens  (digits chunk oddly)
+  enc.encode(" the")           # → [279]           1 token
+  enc.encode("the")            # → [1820]          DIFFERENT token — leading space matters
+  ```
+
+  ---
+
+  ## Why this matters practically
+
+  | String | Tokens | Notes |
+  |--------|--------|-------|
+  | `"ChatGPT"` | 2 | `Chat` + `GPT` |
+  | `"Schrödinger"` | 4 | rare word, splits |
+  | `"你好"` (nǐ hǎo) | 3–5 | CJK costs more |
+  | `"======"` | 1–3 | runs of symbols pack oddly |
+
+  **Key intuition:** BPE is greedy compression. It learns merge rules from the training corpus, so tokens reflect *what text looked like at training time*. Code and math tokenize badly because those domains were underrepresented early on.

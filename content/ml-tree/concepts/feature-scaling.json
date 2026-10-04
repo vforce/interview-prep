@@ -1,0 +1,106 @@
+{
+  "id": "feature-scaling",
+  "title": "Feature Scaling",
+  "definition": "Feature scaling is the preprocessing step of transforming numeric features onto a shared scale (e.g., via standardization or min-max normalization) so that differences in raw units or magnitude don't distort distance calculations, gradient-based optimization, or regularization penalties.",
+  "summary": "Many ML algorithms are sensitive to the absolute magnitude of a feature's values, not just the information it carries — unscaled features can dominate distance metrics, slow gradient descent, or get penalized unfairly by regularization. Feature scaling (standardization or min-max normalization) puts every feature on a comparable range so the model responds to signal rather than to arbitrary units. Tree-based models are the main exception, since they split on per-feature thresholds independently of scale.",
+  "objectives": [
+    "Explain why distance-based and gradient-based models are scale-sensitive but tree-based models aren't.",
+    "Compute standardization (z-score) and min-max scaling by hand on a small feature vector.",
+    "Spot the data-leakage bug of fitting a scaler before the train/test split.",
+    "Choose between StandardScaler, MinMaxScaler, and RobustScaler given the model and outlier profile.",
+    "Treat a fitted scaler as a versioned production artifact, not a one-off script step."
+  ],
+  "lesson": "Most distance metrics and gradient updates treat every feature's raw numeric units as directly comparable. If one feature is square footage (500–5000) and another is bedroom count (1–5), a Euclidean distance or a gradient step is numerically dominated by square footage — not because it's more predictive, but because its numbers are bigger. Feature scaling removes this artifact by putting every feature on a common scale before the model sees it.\n\nTwo workhorses: **standardization** (z-score), `z = (x - μ) / σ`, centers each feature at 0 with unit variance; **min-max scaling**, `x' = (x - min) / (max - min)`, compresses each feature into [0, 1]. Standardization is the default for anything gradient-based or regularized, since it doesn't assume bounded inputs; min-max suits already-bounded inputs (pixel values, or a model that expects [0, 1]).\n\nWorked intuition: with unscaled features, the loss surface for gradient descent is stretched along the low-variance axis and squashed along the high-variance one — a narrow valley. Gradient descent zig-zags across the valley walls instead of running down it, needing far more iterations to converge. Scale both features to comparable variance and the contours become roughly circular, so a single learning rate heads straight at the minimum.\n\n**The gotcha:** always `fit` the scaler on the training fold only, then `transform` train, validation, and test with those frozen parameters. Fitting on the full dataset (or worse, train+test combined) leaks the test distribution's mean/variance into training — a subtle data leakage bug that inflates validation metrics and won't reproduce in production, where you never get to see future data in advance.",
+  "examples": "**Example 1 — hand-computing both formulas.** House square footage: `[800, 1200, 2000, 3000, 5000]`. Mean μ = 2400, population std σ ≈ 1502. Min = 800, max = 5000.\n\n| sqft (x) | z-score `(x-2400)/1502` | min-max `(x-800)/4200` |\n|---|---|---|\n| 800  | -1.065 | 0.000 |\n| 1200 | -0.799 | 0.095 |\n| 2000 | -0.266 | 0.286 |\n| 3000 |  0.400 | 0.524 |\n| 5000 |  1.731 | 1.000 |\n\nNote the z-scores sum to ~0 (mean-centered) and the min-max column is bounded in [0, 1].\n\n**Example 2 — leakage-safe production pipeline:**\n\n```python\nfrom sklearn.pipeline import Pipeline\nfrom sklearn.preprocessing import StandardScaler\nfrom sklearn.linear_model import LogisticRegression\nfrom sklearn.model_selection import train_test_split, cross_val_score\n\nX_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=0)\n\npipe = Pipeline([\n    (\"scaler\", StandardScaler()),   # refit on each CV fold's training slice\n    (\"clf\", LogisticRegression()),\n])\n\ncross_val_score(pipe, X_train, y_train, cv=5)   # no leakage: scaler never sees a fold's held-out rows\npipe.fit(X_train, y_train)                       # final fit on all of X_train\npipe.score(X_test, y_test)                       # X_test is only ever transformed, never fit on\n```",
+  "tradeoffs": "Use scaling whenever the model consumes raw numeric magnitude directly: distance-based (KNN, k-means, SVM/RBF), gradient-optimized (linear/logistic regression, neural nets), regularized (L1/L2 penalize coefficient magnitude, which is scale-dependent), or variance-defined (PCA). Skip it for tree-based models (decision trees, random forest, GBM/XGBoost) — splits threshold one feature at a time, so scaling is pure overhead with zero effect on the learned model. When a feature has heavy outliers, prefer `RobustScaler` (median/IQR) over `StandardScaler`, since a few extreme values inflate the mean/std and compress everything else into a tiny range. In production, treat the fitted scaler as part of the model artifact — version it with the model weights, since scaling with different parameters at serving time than at training time is a silent skew bug.",
+  "diagnosticQuiz": [
+    {
+      "q": "What is the primary purpose of feature scaling in machine learning?",
+      "choices": [
+        "To remove outliers from the dataset",
+        "To convert categorical variables into numeric codes",
+        "To transform features onto comparable numeric ranges so no single feature dominates due to its raw magnitude or units",
+        "To increase the number of features available to the model"
+      ],
+      "answer": 2,
+      "explanation": "Scaling equalizes the numeric range of features so distance metrics, gradient steps, and regularization penalties respond to signal rather than to arbitrary units (dollars vs. counts vs. percentages). It doesn't add features (A), delete outliers (C — values get compressed, not removed), or encode categories (D, a separate preprocessing step entirely)."
+    },
+    {
+      "q": "A feature has mean 50 and standard deviation 10 in the training set. What is its standardized (z-score) value for a raw reading of 65?",
+      "choices": [
+        "1.5",
+        "0.3",
+        "15",
+        "6.5"
+      ],
+      "answer": 0,
+      "explanation": "z = (x − μ) / σ = (65 − 50) / 10 = 1.5. Getting 6.5 comes from dividing the raw value by σ without subtracting the mean first; getting 15 comes from subtracting the mean but forgetting to divide by σ; getting 0.3 comes from dividing by the mean instead of the standard deviation. The formula always centers first, then rescales by spread."
+    },
+    {
+      "q": "Why does gradient descent typically converge faster once features are scaled to similar ranges?",
+      "choices": [
+        "Unscaled features stretch the loss surface into narrow elliptical contours, causing zig-zag updates; scaled features make the contours closer to circular, so updates head straight at the minimum",
+        "Scaling reduces the number of parameters the model needs to learn",
+        "Gradients are undefined unless inputs are normalized",
+        "Scaling turns a non-convex loss into a convex one"
+      ],
+      "answer": 0,
+      "explanation": "When features have very different variances, the loss surface curves more sharply along the low-variance axis than the high-variance one, forming a narrow valley that gradient descent oscillates across instead of descending directly. Scaling doesn't change the parameter count (A) or the loss's convexity (C) — those depend on the model and loss function, not input units. Gradients are perfectly well-defined on unscaled data (D); the issue is optimization efficiency, not computability."
+    },
+    {
+      "q": "For which of these models is feature scaling generally unnecessary?",
+      "choices": [
+        "Logistic regression with L2 regularization",
+        "Gradient-boosted decision trees (e.g., XGBoost)",
+        "K-Nearest Neighbors",
+        "SVM with an RBF kernel"
+      ],
+      "answer": 1,
+      "explanation": "Tree-based models split on one feature at a time against a learned threshold — a monotonic rescaling just relocates the threshold, so the learned structure and predictions are unchanged. KNN and RBF-kernel SVM depend directly on distance calculations, and L2-regularized logistic regression penalizes coefficient magnitude, so all three behave differently (usually worse) on unscaled data."
+    },
+    {
+      "q": "What's wrong with calling `scaler.fit()` on the full dataset before splitting into train and test sets?",
+      "choices": [
+        "It raises a shape-mismatch error at fit time",
+        "It leaks the test set's mean and variance into the \"training\" transform, giving an overly optimistic estimate of real-world performance",
+        "StandardScaler only supports fitting on a single feature at a time",
+        "Nothing — scaling is deterministic, so fit order has no effect on results"
+      ],
+      "answer": 1,
+      "explanation": "Fitting on the combined data means the scaler's parameters — and therefore the model built on top of them — have implicitly \"seen\" statistics from data the model should never access at training time, which is classic data leakage. The fix is to fit the scaler on the training fold only, then transform validation/test/production data with those frozen parameters (a `Pipeline` does this automatically across CV folds). The other options are simply false: there's no such feature-count restriction or shape error, and fit order absolutely changes the resulting parameters."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Your KNN classifier performs much worse than a colleague's random forest on the same dataset. What's the first thing you'd check, and why?",
+      "a": "Check whether the features are on comparable scales. KNN's distance metric is dominated by whichever feature has the largest raw range (e.g., income in thousands drowns out age in tens) regardless of predictive value, while random forest is naturally scale-invariant since it splits one feature at a time on a threshold. Fix: standardize the features — fitting only on the training fold — and re-evaluate KNN; the gap should shrink substantially if scale was the cause."
+    },
+    {
+      "q": "How do you wire feature scaling into a cross-validated training pipeline without leaking test information?",
+      "a": "Wrap the scaler and model together in an `sklearn.pipeline.Pipeline` and pass the *pipeline* — not pre-scaled data — into `cross_val_score`/`GridSearchCV`, so the scaler refits on only each fold's training portion. For the true holdout set, fit the final pipeline once on all of the training data, then only call `.transform()`/`.predict()` on test or production data — never `.fit()` again. Persist the fitted scaler as part of the model artifact so serving code can't drift from training-time parameters."
+    },
+    {
+      "q": "A production feature (transaction amount) has heavy-tailed outliers. Which scaler would you choose, and what's the risk of the default choice?",
+      "a": "Prefer `RobustScaler` (median/IQR) over `StandardScaler` — a handful of extreme transactions inflate the mean and standard deviation, which compresses the bulk of normal values into a tiny range near zero, right where the model needs the most resolution. A log (or log1p) transform before scaling is also common for strictly-positive, right-skewed monetary features. In production, also monitor the live feature distribution against the training-time distribution, since scaling parameters fit on stale data silently degrade as the real distribution drifts."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "k-means-clustering",
+    "k-nearest-neighbors",
+    "principal-component-analysis",
+    "supervised-learning-basics",
+    "support-vector-machines"
+  ],
+  "followUps": [
+    "k-means-clustering",
+    "k-nearest-neighbors",
+    "principal-component-analysis",
+    "support-vector-machines"
+  ],
+  "metadata": {
+    "inputHash": "0b620725c5129ffa",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T09:56:44Z"
+  }
+}

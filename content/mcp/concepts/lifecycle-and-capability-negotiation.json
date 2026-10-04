@@ -1,0 +1,108 @@
+{
+  "id": "lifecycle-and-capability-negotiation",
+  "title": "Lifecycle and Capability Negotiation",
+  "definition": "Lifecycle and Capability Negotiation is the handshake — an `initialize` request/response followed by an `initialized` notification — through which an MCP client and server agree on a protocol version and declare which optional feature areas (tools, resources, prompts, sampling, roots, etc.) each side actually supports before either one is used.",
+  "summary": "Before an MCP client and server can exchange tool calls, resource reads, or prompts, they run a lifecycle handshake: agree on a shared protocol version, then exchange nested capability objects describing exactly which optional feature areas and sub-behaviors (list-change notifications, resource subscriptions, sampling, and so on) each side implements. This mirrors patterns like LSP's `initialize`/`initialized` sequence, and it exists because MCP clients and servers are built and versioned independently — neither can assume the other supports everything it does. Calling a method before the handshake completes, or before its specific capability was declared, is one of the most common classes of production MCP bugs.",
+  "objectives": [
+    "Name the three MCP lifecycle phases and which JSON-RPC messages belong to each.",
+    "Trace how a `protocolVersion` mismatch is resolved inside the `initialize` exchange.",
+    "Read a nested `capabilities` object and identify which feature areas and sub-behaviors are actually supported.",
+    "Guard client/server code so capability-gated methods are only called after negotiation confirms support.",
+    "Explain why the `initialized` notification, not the `initialize` response, marks the true start of normal operation."
+  ],
+  "lesson": "MCP clients and servers are built and versioned independently — a six-month-old desktop client might talk to a brand-new weekend-project server. Before either side can trust the other to support a given method, they need a handshake: agree on a protocol version, then declare which optional feature areas each side actually implements. That's the lifecycle (three phases), and capability negotiation is what happens inside phase one.\n\nBuilding on the JSON-RPC 2.0 messages you already know — `initialize` is a request (has an id, expects a result), `initialized` is a notification (no id, no reply):\n\n1. **Initialization** — client sends `initialize` with `{protocolVersion, capabilities, clientInfo}`. Server replies with `{protocolVersion, capabilities, serverInfo}`. Client sends the `initialized` notification. Until that notification goes out, neither side should rely on anything beyond `ping`.\n2. **Operation** — normal traffic: `tools/list`, `tools/call`, `resources/read`, `prompts/get`, `sampling/createMessage`, etc. — each valid only if the matching capability was actually declared.\n3. **Shutdown** — no dedicated protocol message. For stdio, close stdin and wait for exit (SIGTERM, then SIGKILL, if it hangs); for HTTP-based transports, just close the connection.\n\nVersion negotiation is one round trip: the client proposes its newest supported version; if the server can't speak it, the server counters with a version it does support (ideally its own newest); if the client can't live with that either, it disconnects. No further back-and-forth.\n\nCapability negotiation is nested and finer-grained, and that's where the bugs live. A server might send `tools: {}` and `resources: {subscribe: true, listChanged: true}`; a client might send `sampling: {}`. A missing top-level key means \"I don't support that feature area, period.\" A present-but-empty object means \"base feature yes, optional sub-behaviors no.\"\n\n**The gotcha:** a successful `initialize` response feels like a green light to call anything. It isn't. Two failure modes recur in production: firing a request before the `initialized` notification actually goes out (a race when client code triggers off the response instead of the completed handshake), and calling a method whose *specific sub-capability* was never declared — e.g. subscribing to resource updates when the server only advertised `resources: {}`. The server's reaction (error, silent no-op, something in between) is implementation-defined — now you're debugging someone else's undefined behavior.",
+  "examples": "### Example 1 — the handshake on the wire\n\n**1. Client → Server** (`initialize` request):\n```json\n{\n  \"jsonrpc\": \"2.0\",\n  \"id\": 1,\n  \"method\": \"initialize\",\n  \"params\": {\n    \"protocolVersion\": \"2025-06-18\",\n    \"capabilities\": { \"roots\": { \"listChanged\": true }, \"sampling\": {} },\n    \"clientInfo\": { \"name\": \"acme-client\", \"version\": \"1.2.0\" }\n  }\n}\n```\n\n**2. Server → Client** (`initialize` result):\n```json\n{\n  \"jsonrpc\": \"2.0\",\n  \"id\": 1,\n  \"result\": {\n    \"protocolVersion\": \"2025-06-18\",\n    \"capabilities\": {\n      \"tools\": { \"listChanged\": true },\n      \"resources\": { \"subscribe\": true, \"listChanged\": true },\n      \"logging\": {}\n    },\n    \"serverInfo\": { \"name\": \"acme-file-server\", \"version\": \"0.4.1\" }\n  }\n}\n```\n\n**3. Client → Server** (`initialized` notification — no `id`, no reply):\n```json\n{ \"jsonrpc\": \"2.0\", \"method\": \"notifications/initialized\" }\n```\n\nOnly after step 3 may the client call `tools/call` — and only because step 2 actually declared `tools`. The server never declared `prompts`; calling `prompts/get` here is out of contract even though the connection is fully \"initialized.\"\n\n### Example 2 — a production-style lifecycle guard (Python)\n\n```python\nfrom enum import Enum, auto\n\nclass Phase(Enum):\n    UNINITIALIZED = auto()\n    NEGOTIATING = auto()\n    OPERATION = auto()\n\nclass LifecycleError(RuntimeError):\n    pass\n\nclass McpClientSession:\n    \"\"\"Enforces MCP's handshake rules before allowing gated calls.\"\"\"\n\n    def __init__(self):\n        self.phase = Phase.UNINITIALIZED\n        self.server_capabilities = {}\n\n    def build_initialize_request(self, protocol_version, client_capabilities):\n        if self.phase is not Phase.UNINITIALIZED:\n            raise LifecycleError(\"initialize already sent\")\n        self.phase = Phase.NEGOTIATING\n        return {\n            \"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"initialize\",\n            \"params\": {\n                \"protocolVersion\": protocol_version,\n                \"capabilities\": client_capabilities,\n                \"clientInfo\": {\"name\": \"acme-client\", \"version\": \"1.2.0\"},\n            },\n        }\n\n    def handle_initialize_result(self, result):\n        if self.phase is not Phase.NEGOTIATING:\n            raise LifecycleError(\"unexpected initialize result\")\n        self.server_capabilities = result[\"capabilities\"]\n        self.phase = Phase.OPERATION          # about to send `initialized`\n        return {\"jsonrpc\": \"2.0\", \"method\": \"notifications/initialized\"}\n\n    def build_tool_call(self, name, arguments):\n        if self.phase is not Phase.OPERATION:\n            raise LifecycleError(\"tools/call before handshake completed\")\n        if \"tools\" not in self.server_capabilities:\n            raise LifecycleError(\"server never declared the 'tools' capability\")\n        return {\n            \"jsonrpc\": \"2.0\", \"id\": 2, \"method\": \"tools/call\",\n            \"params\": {\"name\": name, \"arguments\": arguments},\n        }\n```\n\nIn practice you'd use the official SDK's `ClientSession.initialize()`, which runs this exact sequence for you — but when a `list_tools()` call hangs or `call_tool()` throws in production, it's this state machine you're debugging.",
+  "tradeoffs": "The handshake costs one extra round trip per connection — trivial next to the cost of undefined behavior from a version or capability mismatch, so skipping it isn't a real optimization even for a stdio server you fully control. Strict capability checking matters most exactly where you'd be tempted to skip it: multi-tenant servers, fleets with mixed client versions, or any server/client pair you didn't both write yourself. Relaxing the *checks* (not the handshake) is reasonable in a closed dev loop where you know both binaries match, but that shortcut has a habit of shipping to production unnoticed — treat it as debt, not a default. The upside of this design is that a client and server can evolve independently without lockstep releases; the cost is that every capability-gated call site needs a check instead of just calling the method directly, which is exactly what the official SDKs earn their keep hiding.",
+  "diagnosticQuiz": [
+    {
+      "q": "Which sequence correctly describes MCP's lifecycle phases, in order?",
+      "choices": [
+        "Operation → Shutdown → Initialization",
+        "Capability Discovery → Initialization → Sampling",
+        "Initialization → Operation → Shutdown",
+        "Handshake → Sampling → Shutdown"
+      ],
+      "answer": 2,
+      "explanation": "MCP defines exactly three ordered phases: Initialization (version + capability negotiation via `initialize`/`initialized`), Operation (normal traffic, gated by what was negotiated), and Shutdown (transport-level teardown with no dedicated protocol message). A is correct. The third option is the tempting distractor: it invents a separate \"Capability Discovery\" phase and demotes \"Sampling\" to a phase, but capability discovery *is* initialization, and sampling is just one operation-phase feature among many, not a lifecycle stage."
+    },
+    {
+      "q": "A client's `initialize` request proposes `protocolVersion: \"2025-06-18\"`. The server only implements `\"2024-11-05\"` and `\"2025-03-26\"`. What does a spec-compliant server do, and what must the client do if it still can't cope?",
+      "choices": [
+        "Return a JSON-RPC error instead of a normal `initialize` result",
+        "Omit `protocolVersion` from the response so the client assumes its own value",
+        "Reply with a version it supports (ideally its newest); the client disconnects if it can't support that version either",
+        "Echo `\"2025-06-18\"` back and hope the client tolerates the mismatch"
+      ],
+      "answer": 2,
+      "explanation": "Version negotiation is a single round trip: the server can't speak the client's proposal, so it counter-offers a version it does implement — by convention its newest — and the client disconnects if it truly can't handle that either. C is correct. The first option is the seductive wrong answer: a server that just echoes whatever the client proposed, without validating it actually implements that version, works fine in demos where both sides happen to match and then produces undefined behavior the moment a real version skew shows up."
+    },
+    {
+      "q": "Why does the client send a separate `initialized` notification instead of the server just starting normal operation right after sending the `initialize` response?",
+      "choices": [
+        "JSON-RPC 2.0 mandates a notification after every request/response pair",
+        "It lets the server charge the client for connection time",
+        "It gives the client an explicit point to confirm it accepted the negotiated version/capabilities, since the server can't otherwise know the client is ready",
+        "It's a legacy no-op kept only for backward compatibility with LSP"
+      ],
+      "answer": 2,
+      "explanation": "The server's `initialize` response only reflects the server's half of the deal — the server has no way to know the client actually accepted the negotiated version/capabilities until the client says so. `initialized` is that explicit readiness signal, and only after it may either side (besides ping/logging) rely on the operation phase having begun. D is correct. The first option reflects a misconception imported from generic JSON-RPC: plain JSON-RPC 2.0 has no such pairing requirement at all — this is an MCP-specific lifecycle rule layered on top of the messaging spec."
+    },
+    {
+      "q": "A client wants to rely on being notified whenever the server's tool list changes at runtime. Which capability must be declared, and by which side?",
+      "choices": [
+        "The server must declare `tools: {listChanged: true}` — it's the side that would send the notification",
+        "The client must declare `tools: {listChanged: true}` in its own capabilities",
+        "Nothing is needed; `notifications/tools/list_changed` is sent unconditionally by all servers",
+        "The client must poll `tools/list` on a timer regardless of capabilities"
+      ],
+      "answer": 0,
+      "explanation": "Capabilities are declared by whichever side performs the behavior — the server is the one that would emit `notifications/tools/list_changed`, so it's the server's `tools.listChanged` flag that determines whether that notification can ever arrive. A is correct. The second option is the common gotcha: assuming capability declaration always belongs to the consumer of a feature rather than its producer; here the client only ever receives this notification and has no reciprocal capability to declare to \"unlock\" it."
+    },
+    {
+      "q": "A server starts handling `resources/read` calls as soon as its transport connects, without waiting for the `initialized` notification. What's the concrete production risk?",
+      "choices": [
+        "None — `initialize`/`initialized` is purely advisory and has no effect on server behavior",
+        "This is required behavior for low-latency transports like stdio",
+        "It only delays log output, not functional requests",
+        "The server may act on a version/capability set the client never actually confirmed, so behavior can silently diverge the moment a client fails negotiation (unsupported version, missing capability)"
+      ],
+      "answer": 3,
+      "explanation": "Skipping the wait works only by accident — as long as every client happens to accept whatever the server offered. The real risk surfaces the moment a client shows up that *doesn't* accept the negotiation: the server has already been serving requests under assumptions that client never agreed to, and behavior silently diverges. C is correct. The last option is the seductive-but-wrong take teams use to justify skipping the guard — the entire operation phase, not just log messages, is gated on that notification."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "A client sends `tools/call` right after receiving the `initialize` response but before sending `initialized`, and your server rejects it. Is the server wrong, and how should the client be structured instead?",
+      "a": "The server is within spec — operation-phase methods (aside from `ping`) aren't guaranteed valid until the client's `initialized` notification actually goes out, so rejecting early calls is correct defensive behavior. The fix belongs on the client: model the connection as an explicit state machine (`uninitialized → negotiating → operation`) and block or queue any capability-gated outgoing calls until `initialized` has actually been sent — don't fire them from an event handler that races against the notification going out."
+    },
+    {
+      "q": "You need to roll a fleet of MCP servers from protocol version `2024-11-05` to `2025-06-18` without breaking clients that haven't updated yet. What's the rollout strategy?",
+      "a": "Keep servers multi-version aware during the migration — accept `initialize` requests proposing either version and reply with whatever the client proposed if supported, otherwise counter-offer the newest one the server implements; don't force a hard cutover. Gate any genuinely new wire behavior behind capability objects, not just the version bump, so old clients never see capabilities they can't use while new clients opt in automatically. Roll gradually, monitor `initialize` failures/disconnects segmented by requested version, and only drop old-version support once telemetry shows it's effectively unused."
+    },
+    {
+      "q": "A server advertises `resources: {subscribe: false}` (or omits `subscribe` entirely). A client calls `resources/subscribe` anyway, assuming \"it probably just no-ops.\" What's wrong with that in production?",
+      "a": "Behavior on an undeclared capability is implementation-defined — some servers error, some silently ignore it, some do something else entirely — so relying on an assumed no-op couples the client to one server's incidental implementation rather than to the protocol contract. The correct approach is to check `capabilities.resources.subscribe` right after initialization and, if it's false or absent, fall back to explicit polling instead of assuming push updates will ever arrive; otherwise you ship a feature that only \"works\" against today's specific server build."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "json-rpc-2-0-messaging",
+    "notifications",
+    "prompts",
+    "resources",
+    "roots-and-logging",
+    "tools"
+  ],
+  "followUps": [
+    "notifications",
+    "prompts",
+    "resources",
+    "roots-and-logging",
+    "tools"
+  ],
+  "metadata": {
+    "inputHash": "2ecdacbdb1143145",
+    "model": "sonnet",
+    "generatedAt": "2026-07-06T06:44:27Z"
+  }
+}

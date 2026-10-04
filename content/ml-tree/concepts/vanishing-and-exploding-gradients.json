@@ -1,0 +1,98 @@
+{
+  "id": "vanishing-and-exploding-gradients",
+  "title": "Vanishing and Exploding Gradients",
+  "definition": "Vanishing and exploding gradients occur when the chain-rule product of many per-layer Jacobians in a deep network or long recurrent sequence shrinks toward zero or grows toward infinity, respectively, so early (or distant-in-time) layers stop learning or training becomes numerically unstable.",
+  "summary": "Gradients backpropagated to early layers are products of many per-layer factors (activation derivative × weight matrix); when those factors are consistently below 1 in magnitude the gradient vanishes exponentially with depth, and when consistently above 1 it explodes. Vanishing shows up as early layers (or long-range dependencies) that never update; exploding shows up as huge updates, diverging loss, or NaNs. Both are fought with the same toolkit: better initialization, normalization, gated/residual architectures, and gradient clipping.",
+  "objectives": [
+    "Derive why gradient magnitude changes exponentially with depth via the chain rule.",
+    "Explain how activation choice (sigmoid/tanh vs. ReLU) affects the per-layer gradient factor.",
+    "Identify vanishing vs. exploding gradients from training symptoms and gradient-norm logs.",
+    "Apply the standard mitigations: init schemes, normalization, residual/gated connections, gradient clipping.",
+    "Explain why RNNs are more exposed to this than feedforward nets of similar depth."
+  ],
+  "lesson": "Backpropagation computes `dL/dh_0` via the chain rule: a product of per-layer Jacobians (activation derivative × weight matrix) between the loss and that layer. If each factor's typical magnitude is <1, the product shrinks exponentially with depth (vanishing); if >1, it grows exponentially (exploding). Depth buys expressive power but multiplies the risk of a degenerate gradient.\n\nWorked example: a deep sigmoid net, `h_l = σ(W_l h_{l-1})`. `σ'(z) = σ(z)(1-σ(z))` maxes out at 0.25 (at z=0) and decays toward 0 in saturation. So each layer contributes at most `~0.25·‖W_l‖` to the gradient chain. Across 20 layers, even in the best case (0.25 per layer, `‖W‖≈1`): `0.25^20 ≈ 9×10⁻¹³` — the gradient reaching layer 1 is numerically dead. This is why sigmoid/tanh deep nets were nearly untrainable before ReLU: ReLU's derivative is exactly 1 for z>0, removing the systematic shrink factor and leaving only the weight matrices' spectral properties to manage.\n\nRNNs are the sharpest case: the same recurrent weight matrix `W_hh` is applied at every timestep, so the gradient through T steps scales with `W_hh^T`. If `W_hh`'s spectral radius (largest eigenvalue magnitude) is <1, gradients vanish exponentially in T; if >1, they explode. Sequence length plays the role of depth, and sequences can run into the hundreds — far \"deeper\" than most feedforward nets.\n\nKey gotcha: vanishing and exploding are the same mechanism (a product of many terms) pulling in opposite directions, so naive fixes trade one for the other — e.g., scaling up weight init to fight vanishing risks exploding instead. Robust fixes target the product directly: normalize activations (BatchNorm/LayerNorm) so each Jacobian stays near 1, add residual connections so the chain has a literal identity term (`I + small`) that can't decay to zero, and clip the gradient norm to cap explosions without touching direction.",
+  "examples": "**1. Decay table for a deep sigmoid net** (per-layer factor ≈ 0.25, `‖W‖≈1`):\n\n```\ndepth L | gradient magnitude at layer 1 (0.25^L)\n1       | 0.25\n5       | 9.8e-4\n10      | 9.5e-7\n20      | 9.1e-13\n```\nWith ReLU + He init (per-layer factor ≈ 1), the gradient stays O(1) regardless of depth — this table is the whole reason ReLU replaced sigmoid as the default hidden activation.\n\n**2. Production diagnostic (PyTorch)** — log per-layer gradient norms every step to catch this before the loss curve does:\n\n```python\ndef grad_norms(model):\n    return {name: p.grad.norm().item()\n            for name, p in model.named_parameters() if p.grad is not None}\n\nloss.backward()\nnorms = grad_norms(model)\n# vanishing: norms shrink by orders of magnitude output -> input layers\n# exploding: any norm >> 1e2, or loss is nan/inf\ntotal_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)\n# total_norm (pre-clip) is itself a great scalar to log over time\n```",
+  "tradeoffs": "ReLU removes sigmoid's saturation-driven vanishing but isn't free — it trades in \"dead ReLUs\" (permanently zero gradient for units stuck at z<0); LeakyReLU/GELU trade a little of that robustness back for extra compute. Gradient clipping is cheap and effectively mandatory for RNNs/Transformers at high LR, but it only bounds exploding gradients — clip by global norm (preserves direction) rather than by value (distorts relative parameter scaling), and clip too aggressively and convergence slows. Residual connections and normalization are close to a free lunch for very deep nets (they're why 100+ layer models train at all) at the cost of extra params/compute, and BatchNorm adds batch-size sensitivity that LayerNorm avoids. LSTMs/GRUs use gating for a near-constant error path, better than vanilla RNNs but still degrading past a few hundred steps; Transformers sidestep the issue by replacing recurrence with attention (direct paths between all positions) at the cost of O(n²) compute/memory. Careful init (Xavier for tanh, He/Kaiming for ReLU) is essentially free and should always be on, but alone isn't sufficient past ~50 layers — pair it with normalization/residuals.",
+  "diagnosticQuiz": [
+    {
+      "q": "What is the vanishing gradient problem, precisely?",
+      "choices": [
+        "The learning rate schedule decays to zero before convergence",
+        "The model's weights shrink toward zero during the forward pass",
+        "Gradients shrink exponentially with depth or sequence length because the chain rule multiplies many sub-unit-magnitude terms, so distant layers barely update",
+        "Gradients become undefined due to division by zero in the loss function"
+      ],
+      "answer": 2,
+      "explanation": "Backprop is a product of per-layer Jacobians; if the typical factor is <1, the product decays exponentially, not linearly or due to an arithmetic error. The other options describe unrelated failure modes (numerical instability, weight decay, LR scheduling) that people sometimes conflate with this because they also \"shrink something.\""
+    },
+    {
+      "q": "A deep sigmoid net has a per-layer gradient factor of at most 0.25 (assuming `‖W‖≈1`). Starting from a gradient of 1.0 at the output, what is the approximate gradient magnitude reaching layer 1 after 10 layers?",
+      "choices": [
+        "~0.025 (0.25 × 10, treated as additive decay)",
+        "~10, gradients accumulate additively across layers",
+        "~9.5×10⁻⁷ (0.25^10)",
+        "~1.0, unchanged, since sigmoid preserves gradient magnitude"
+      ],
+      "answer": 2,
+      "explanation": "The chain rule multiplies the per-layer factors, so it's `0.25^10`, not `0.25 × 10`. The second option is the classic mistake: treating a multiplicative chain as if contributions summed instead of compounded."
+    },
+    {
+      "q": "Why are RNNs especially prone to vanishing/exploding gradients compared to feedforward nets of similar depth?",
+      "choices": [
+        "The same recurrent weight matrix is reused at every timestep, so BPTT involves a matrix power `W_hh^T`; its spectral radius being <1 or >1 compounds over long sequences",
+        "RNNs cannot use backpropagation, only a forward-only update rule",
+        "RNNs always use ReLU activations, which are numerically unstable",
+        "RNNs have more parameters per layer than feedforward nets"
+      ],
+      "answer": 0,
+      "explanation": "Weight sharing across timesteps turns \"depth\" into \"sequence length raised to a matrix power,\" which is a sharper compounding effect than independent per-layer weights in a feedforward net. The activation-function and parameter-count distractors don't capture the actual mechanism (matrix power / weight tying)."
+    },
+    {
+      "q": "A 100-layer image classifier trains fine in its last 20 layers but the first 80 barely update at all. Which fix most directly addresses this?",
+      "choices": [
+        "Add even more layers so gradients have more paths to flow through",
+        "Switch the loss from cross-entropy to MSE",
+        "Uniformly raise the learning rate for every layer",
+        "Add residual/skip connections and normalization (BatchNorm/LayerNorm) so per-layer Jacobians stay near identity"
+      ],
+      "answer": 3,
+      "explanation": "This is the textbook vanishing-gradient symptom in a very deep net; residual connections give the gradient an identity path and normalization keeps per-layer Jacobians near 1, both attacking the product directly. Raising LR uniformly (or adding more plain layers) doesn't fix a multiplicatively-decaying signal and can destabilize the layers that were already training fine."
+    },
+    {
+      "q": "A team fights exploding gradients in an RNN by clipping each gradient element by value rather than clipping the global gradient norm. What's the problem?",
+      "choices": [
+        "There's no real difference; the two are mathematically equivalent",
+        "Element-wise clipping distorts the gradient's relative direction across parameters, biasing updates, whereas norm clipping rescales the whole vector and preserves its direction",
+        "Value clipping converts an exploding-gradient problem into a vanishing-gradient one",
+        "Value clipping is asymptotically more expensive to compute than norm clipping"
+      ],
+      "answer": 1,
+      "explanation": "Norm clipping rescales the entire gradient vector by one scalar, so the update direction is unchanged — only its size is capped. Clipping element-by-value truncates each coordinate independently, changing the vector's direction and effectively re-weighting parameters arbitrarily, which the \"no real difference\" option misses entirely."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "In production, how would you detect whether a deep model is suffering from vanishing or exploding gradients during training, without waiting for the loss curve to tell you?",
+      "a": "Instrument the training loop directly: log per-layer gradient norms each step via `named_parameters()` (or hooks). Vanishing shows norms shrinking by orders of magnitude from output layers to input layers; exploding shows norms spiking or the loss going NaN/inf. Concretely, log the pre-clip total norm returned by `torch.nn.utils.clip_grad_norm_` over time, or add a TensorBoard gradient histogram — either gives an early warning long before the loss plot looks wrong."
+    },
+    {
+      "q": "Your Transformer training run is diverging — loss occasionally spikes to NaN after thousands of otherwise-stable steps. Walk through your triage.",
+      "a": "Check exploding gradients first, since it's cheapest to confirm: log gradient norm pre-clip and see if it spikes right before the NaN step. If so, tighten `clip_grad_norm_`, add/extend LR warmup, and check mixed-precision loss scaling (AMP overflow is a very common culprit). If gradient norms look clean, look past the vanishing/exploding mechanism entirely — unmasked softmax over padding tokens, an epsilon that's too small in LayerNorm, or a corrupt/outlier batch are the usual remaining suspects."
+    },
+    {
+      "q": "Why do residual connections in ResNets/Transformers help with vanishing gradients — what's the exact mechanism?",
+      "a": "A residual block computes `h_l = h_{l-1} + F(h_{l-1})`, so `dh_l/dh_{l-1} = I + dF/dh_{l-1}`. That identity term means every layer contributes a gradient path of exactly 1 in addition to whatever `F` contributes, so the total gradient is a *sum* over paths of many different lengths rather than a single long product — it can't decay to zero just because one `dF/dh` term is small. That's the mechanistic reason 100+ layer residual nets train while comparably deep plain nets don't."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "activation-functions",
+    "backpropagation"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "5b38d83615d405e8",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T10:51:16Z"
+  }
+}

@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: greedy
+fam: arrays
+label: Greedy
+order: 5
+trigger: '''min steps / max reach / can you…'', where a locally-optimal choice looks safe'
+insight: 'prove the local choice can''t hurt, then commit: track farthest reach (Jump Game), a running tank with a reset point (Gas Station), or sort then sweep. Classic exchange-argument problems.'
+probs:
+- {n: Assign Cookies, slug: assign-cookies, d: E}
+- {n: Jump Game, slug: jump-game, d: M}
+- {n: Candy, slug: candy, d: H}

@@ -1,0 +1,30 @@
+# The ONLY human-authored file for the 'mcp' topic. `seed.py` reads this and generates
+# graph.json + curriculum.json + concepts/*.json around it. graph.json is hand-authored
+# alongside so the prerequisite tree is the exact designed one (seed reuses an existing
+# graph.json rather than asking the model to guess edges).
+#   uv run seed.py mcp      # or: make seed TOPIC=mcp
+id: mcp
+title: MCP
+audience: Senior AI Engineer
+difficulty: Intermediate
+concepts:
+  - What Is MCP
+  - Host, Client, and Server
+  - Data and Transport Layers
+  - JSON-RPC 2.0 Messaging
+  - Lifecycle and Capability Negotiation
+  - Tools
+  - Resources
+  - Prompts
+  - Sampling
+  - Elicitation
+  - Roots and Logging
+  - "Transports: stdio vs Streamable HTTP"
+  - Notifications
+  - Security and Authorization
+  - MCP vs Alternatives
+  - Building an MCP Server
+constraints:
+  interview_style: production
+  explanation_style: concise
+  language: Python

@@ -1,0 +1,98 @@
+{
+  "id": "self-attention",
+  "title": "Self-Attention",
+  "definition": "Self-attention is a sequence-to-sequence operation that computes, for each position, a weighted average of all positions' learned value vectors, where the weights are a softmax over the scaled dot products between that position's query vector and every position's key vector.",
+  "summary": "Self-attention lets every token in a sequence dynamically pull information from every other token, with the pulling weights learned from content rather than fixed by distance or order. It is the core operation of the Transformer, replacing recurrence and convolution with a fully parallelizable, content-addressable mixing step. Because any two positions are connected through a single attention computation, it captures long-range dependencies that RNNs struggle to propagate across many steps.",
+  "objectives": [
+    "Derive the scaled dot-product attention formula from Q, K, V projections.",
+    "Compute self-attention weights and output by hand for a small toy sequence.",
+    "Explain why scores are scaled by 1/sqrt(d_k) and what breaks without it.",
+    "Identify self-attention's O(n²) compute/memory cost and name production mitigations (FlashAttention, KV cache, MQA/GQA, sparse attention).",
+    "Explain why positional encodings are required alongside self-attention."
+  ],
+  "lesson": "Self-attention answers one question per token: given everything else in this sequence, what should I pay attention to, and how much? Each token produces three learned projections of its embedding: a query (what it's looking for), a key (what it advertises), and a value (what it hands over if attended to). The relevance of token j to token i is the dot product `q_i · k_j` — high when their vectors point the same way. Softmax over j turns those scores into a probability distribution, and the output for i is the value vectors weighted by that distribution:\n\n```\nAttention(Q, K, V) = softmax(QK^T / sqrt(d_k)) V\n```\n\nWorked example: take the sequence \"The cat sat.\" Each word starts as a fixed embedding with no context. After self-attention, the representation for \"sat\" becomes a mixture that pulls heavily from \"cat\" (its subject) because their learned query/key vectors happen to align, and less from \"The.\" Crucially, this mixing weight comes from content, not position — shuffle the sentence and the same words still find each other. That's exactly why positional encodings must be added separately: self-attention alone is permutation-equivariant and has no built-in notion of order.\n\nThe key gotcha is the scaling factor. Assume Q and K entries are i.i.d. with mean 0, variance 1; each dot product `q_i · k_j` sums d_k independent unit-variance terms, so its variance is d_k, not 1. As d_k grows (64–128 in real models), raw scores get large, softmax saturates toward a near-one-hot distribution, and — since a saturated softmax's Jacobian is nearly zero almost everywhere — gradients vanish through it, the same way they would through a saturated sigmoid. Dividing by sqrt(d_k) renormalizes the variance back to 1 and keeps softmax well-conditioned.\n\nA related implementation gotcha: causal masking must set future positions' scores to `-inf` *before* softmax, not zero out weights after. Masking after softmax leaves the remaining row weights no longer summing to 1, silently breaking the convex-combination guarantee — and if masking happens even later, future tokens have already leaked into the mixed output.",
+  "examples": "**Example 1 — from-scratch causal self-attention (illustrates masking-before-softmax):**\n\n```python\nimport numpy as np\n\ndef self_attention(X, Wq, Wk, Wv, causal=False):\n    Q, K, V = X @ Wq, X @ Wk, X @ Wv          # (n, d_k) each\n    d_k = K.shape[-1]\n    scores = Q @ K.T / np.sqrt(d_k)           # (n, n)\n    if causal:\n        future = np.triu(np.ones_like(scores), k=1).astype(bool)\n        scores[future] = -np.inf              # mask BEFORE softmax\n    weights = np.exp(scores - scores.max(axis=-1, keepdims=True))\n    weights /= weights.sum(axis=-1, keepdims=True)\n    return weights @ V, weights\n\nnp.random.seed(0)\nn, d_model, d_k = 4, 8, 4\nX = np.random.randn(n, d_model)\nWq, Wk, Wv = (np.random.randn(d_model, d_k) for _ in range(3))\nout, attn = self_attention(X, Wq, Wk, Wv, causal=True)\nprint(attn.round(2))\n# each row sums to 1.0; entries above the diagonal are exactly 0\n```\n\n**Example 2 — the production version (fused kernel, no explicit score matrix):**\n\n```python\nimport torch, torch.nn.functional as F\n\n# Q, K, V shaped (batch, heads, seq_len, head_dim)\nout = F.scaled_dot_product_attention(Q, K, V, is_causal=True)\n# dispatches to FlashAttention / memory-efficient backends on supported hardware;\n# never materializes the full (seq_len, seq_len) score matrix in HBM\n```",
+  "tradeoffs": "Self-attention's main advantage is O(1) path length between any two positions — information and gradients flow directly regardless of distance, unlike RNNs (O(n) sequential steps) or CNNs (limited by receptive field/depth). The cost is O(n²·d) time and O(n²) memory in sequence length, since it materializes a full pairwise score matrix — the dominant scaling bottleneck for long-context LLMs. Use plain full self-attention when context lengths are moderate and you want maximum modeling flexibility; move to efficient variants — fused kernels (FlashAttention), sliding-window/sparse attention, or sub-quadratic alternatives (linear attention, state-space models like Mamba) — once context length, latency, or KV-cache memory becomes the bottleneck, accepting some loss of unrestricted long-range mixing for scalability.",
+  "diagnosticQuiz": [
+    {
+      "q": "Which expression is the standard definition of scaled dot-product self-attention for query/key/value matrices Q, K, V with key dimension d_k?",
+      "choices": [
+        "A learned convolution kernel applied to V, parameterized by Q and K",
+        "(QK^T V) / sqrt(d_k)",
+        "sigmoid(QK^T) V",
+        "softmax(QK^T / sqrt(d_k)) V"
+      ],
+      "answer": 3,
+      "explanation": "The defining formula normalizes QK^T similarity scores with a row-wise softmax (so weights over positions sum to 1) after scaling by 1/sqrt(d_k), then mixes V by those weights. The sigmoid option reflects a common confusion with gating mechanisms (e.g., LSTM gates), which produce independent per-element values rather than a normalized distribution across positions."
+    },
+    {
+      "q": "If every entry of Q and K is i.i.d. with mean 0 and variance 1, what is the variance of a single raw dot-product score q_i · k_j (before scaling), for key dimension d_k?",
+      "choices": [
+        "d_k^2",
+        "d_k",
+        "1",
+        "sqrt(d_k)"
+      ],
+      "answer": 1,
+      "explanation": "q_i · k_j sums d_k independent terms, each with variance 1 (Var(q·k) = E[q²]E[k²] = 1 for independent zero-mean, unit-variance q, k), and variances of independent terms add, giving d_k total. This is precisely why the score is divided by sqrt(d_k) — to restore unit variance; answering \"1\" reflects the mistake of assuming the dot product's variance doesn't grow with dimensionality."
+    },
+    {
+      "q": "What best explains why self-attention is described as \"content-based routing\" rather than positional routing?",
+      "choices": [
+        "Attention weights are fixed by each token's index and recomputed only during training",
+        "Attention only mixes information between adjacent tokens, similar to a convolution kernel",
+        "Self-attention requires a recurrent pass over the sequence to propagate information between distant tokens",
+        "Attention weights are computed from the similarity between each token's query and every other token's key, so any two tokens can connect directly regardless of distance"
+      ],
+      "answer": 3,
+      "explanation": "Routing weights come from learned Q/K similarity on content, not from sequence position or a fixed neighborhood, giving self-attention its O(1) path length between arbitrary tokens. The convolution-like option is a common misconception carried over from CNN intuition, where mixing is local and position-fixed rather than content-driven and global."
+    },
+    {
+      "q": "In which production scenario would you most likely replace vanilla full self-attention with a sparse/windowed or sub-quadratic alternative?",
+      "choices": [
+        "Serving a model over 200K-token documents where the O(n²) score matrix and KV cache no longer fit in memory or latency budget",
+        "Fine-tuning a small encoder on a classification task with short, fixed-length inputs",
+        "Running a single forward pass on a batch size of 1 with a 128-token prompt",
+        "Classifying single sentences of under 50 tokens"
+      ],
+      "answer": 0,
+      "explanation": "The quadratic memory/compute cost of full self-attention only becomes a practical bottleneck at long sequence lengths, which is exactly where sparse, windowed, or linear/state-space alternatives earn their added complexity. At short sequence lengths (the other options), full self-attention is cheap and simplest, so replacing it would be premature optimization."
+    },
+    {
+      "q": "A causal (autoregressive) self-attention implementation is leaking information from future tokens. What is the most likely bug?",
+      "choices": [
+        "The value projection Wv has a bias term",
+        "The mask sets future positions' scores to -inf after softmax has already been computed, instead of before",
+        "The scaling factor 1/sqrt(d_k) was omitted",
+        "Multi-head attention was used instead of single-head attention"
+      ],
+      "answer": 1,
+      "explanation": "The causal mask must zero out (via -inf) future positions' raw scores before softmax, so they get exactly zero probability in the normalized weights; softmax the unmasked scores first and future tokens have already leaked into the output regardless of any masking applied afterward. Forgetting the 1/sqrt(d_k) scale is a real bug, but it causes softmax saturation and poor gradient flow, not future-token leakage — a common conflation of a stability bug with a correctness bug."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Self-attention is O(n²) in sequence length — walk through why, and how production systems mitigate it.",
+      "a": "- `QK^T` compares every query against every key: an (n, d_k) × (d_k, n) matmul producing an (n, n) score matrix, so both compute and that matrix's memory are O(n²).\n- Mitigations: **FlashAttention**-style fused kernels don't change asymptotic complexity but avoid materializing the (n, n) matrix in HBM, fusing softmax+matmul in SRAM for large constant-factor speed/memory wins; **sparse/local/windowed attention** (e.g., Longformer) restricts each query to a subset of keys, giving O(n·w); **linear attention / state-space models** (e.g., Mamba) avoid forming the n×n matrix at all, giving O(n); at the serving layer, bounding or chunking context length caps n directly."
+    },
+    {
+      "q": "In autoregressive decoding, where's the actual bottleneck in self-attention, and how do KV caching and MQA/GQA address it?",
+      "a": "- Without caching, generating token t would recompute K, V for all prior tokens at every step. The **KV cache** stores each layer's K, V for previously generated tokens, so each decode step only computes Q for the new token and attends against the cache — O(n) total compute across a generation instead of O(n²).\n- The bottleneck shifts to memory bandwidth: every step reads the entire (growing) KV cache from HBM, scaling with `batch × heads × seq_len × head_dim`. **Multi-Query Attention** (one shared K/V head) and **Grouped-Query Attention** (a small group of query heads share one K/V head) shrink the cache and bytes read per step, trading a little quality for meaningfully higher decode throughput — why most production LLMs (Llama 2/3 70B, etc.) use GQA over full multi-head attention."
+    },
+    {
+      "q": "A model that worked fine bidirectionally starts producing degenerate output after switching to causal attention for generation — what do you check first?",
+      "a": "- Confirm the causal mask is applied to raw scores **before** softmax (`-inf` on future positions), not as a post-hoc zeroing of weights or outputs — the latter leaves rows not summing to 1 or leaks future information into an already-mixed output.\n- Check the mask's triangular direction and off-by-one: token i should attend only to positions ≤ i — an inverted or shifted mask silently trains the model in the wrong causal direction.\n- Add a unit test: perturb only token j's input and assert output at position i < j is exactly unchanged — this catches leakage that's invisible from loss curves alone."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "activation-functions",
+    "backpropagation"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "8c6a7ba8e7d6fc9c",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T11:27:51Z"
+  }
+}

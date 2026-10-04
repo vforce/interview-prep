@@ -1,0 +1,27 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: k-prefill-decode
+type: concept
+area: Inference & KV Cache
+order: 17
+front: Prefill vs decode phases of LLM inference?
+back: |-
+  Prefill: process the entire prompt in parallel in one pass, populating the KV cache — COMPUTE-bound. Sets time-to-first-token.
+
+  Decode: generate one token at a time, each reusing and extending the KV cache — MEMORY-BANDWIDTH-bound (little math, lots of cache reads). Sets per-token speed.
+more: |-
+  ## Two regimes, one model
+
+  | | Prefill | Decode |
+  |---|---|---|
+  | Tokens/pass | all *P* prompt | 1 (×batch) |
+  | Op shape | GEMM (mat×mat) | GEMV (mat×vec) |
+  | Bound by | compute (FLOPs) | HBM bandwidth |
+  | Arith. intensity | high | low (~batch) |
+  | Latency metric | TTFT | per-token (ITL) |
+
+  **Why decode is bandwidth-bound:** to emit one token you stream *every weight* from HBM once, doing only ~1 MAC per weight. Llama-70B fp16 = 140 GB; on an A100 (~2 TB/s): `140/2000` = **70 ms/token floor → ~14 tok/s** at batch 1 — independent of the GPU's 312 TFLOP/s, most of which sits idle.
+
+  The A100 ridge point is `312e12 / 2e12` ≈ **156 FLOP/byte**; decode runs at ~`batch` FLOP/byte, so you need batch in the **hundreds** to become compute-bound.
+
+  **Fixes:** *continuous batching* (vLLM/Orca) packs many sequences per step to amortize the weight read; *speculative decoding* drafts *k* tokens cheaply and verifies them in one parallel pass, converting wasted bandwidth into useful compute. Prefill already saturates the GPU, so its lever is just chunking to cap TTFT.

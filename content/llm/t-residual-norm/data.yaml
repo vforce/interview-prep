@@ -1,0 +1,30 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: t-residual-norm
+type: concept
+area: Transformer Block
+order: 15
+front: Role of residual connections and layer norm?
+back: |-
+  Residuals (x + sublayer(x)) give gradients a direct highway through depth → very deep nets stay trainable; they also let each block make incremental edits to a shared 'residual stream'.
+
+  LayerNorm stabilises activation scale. Pre-norm (normalise before the sublayer) is now standard — more stable than the original post-norm.
+more: |-
+  ## Residual stream
+  `x + sublayer(x)` gives gradients a direct path through all L layers (no vanishing) and reframes each block as making **small additive edits** to one shared representation — the residual stream that later layers read and write.
+
+  ## Pre-norm vs post-norm
+  ```
+  post (orig):  x ← LN(x + Sublayer(x))
+  pre  (now):   x ← x + Sublayer(LN(x))
+  ```
+  Pre-norm keeps the residual path **identity/un-normalized**, so signal flows clean to the top → trains deep stacks stably, often without learning-rate warmup. Post-norm can give slightly better final quality but is finicky past ~12 layers.
+
+  ## LayerNorm vs RMSNorm
+  ```
+  LayerNorm: y = γ ⊙ (x − μ)/√(σ²+ε) + β     # center + scale + bias
+  RMSNorm:   y = γ ⊙ x /√(mean(x²)+ε)        # scale only
+  ```
+  RMSNorm drops mean-subtraction and the β bias — ~1 fewer reduction over d, empirically no quality loss, so Llama, T5, and Gemma all use it.
+
+  **Gotcha:** norm statistics are over the **feature** dim (per token), independent of sequence length or batch — unlike BatchNorm, which is why Transformers avoid BN entirely.

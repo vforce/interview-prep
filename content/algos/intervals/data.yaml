@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: intervals
+fam: arrays
+label: Intervals
+order: 4
+trigger: overlapping ranges, scheduling, merge
+insight: sort by START to merge; sort by END for greedy keep-most / remove-fewest
+probs:
+- {n: Merge Intervals, slug: merge-intervals, d: M}
+- {n: Non-overlapping Intervals, slug: non-overlapping-intervals, d: M}
+- {n: Minimum Interval to Include Each Query, slug: minimum-interval-to-include-each-query, d: H}

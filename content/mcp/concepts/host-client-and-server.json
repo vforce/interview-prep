@@ -1,0 +1,100 @@
+{
+  "id": "host-client-and-server",
+  "title": "Host, Client, and Server",
+  "definition": "MCP's Host is the LLM-facing application (e.g., Claude Desktop or Claude Code) that embeds one or more Clients, where each Client keeps a private, 1:1 stateful JSON-RPC connection to exactly one Server — the separate process that actually exposes that connection's tools, resources, and prompts.",
+  "summary": "The Host owns the conversation, the UX, and consent decisions, and can embed many Clients at once. Each Client is a lightweight protocol object — not the LLM — that negotiates capabilities and holds session state for exactly one Server connection. Servers are mutually isolated processes (local via stdio, or remote via HTTP) that only the Host can see across, which is what makes MCP's multi-integration model safe to compose.",
+  "objectives": [
+    "Explain the 1:1 client-server connection model and why the host manages multiple clients instead of one.",
+    "Trace the message path for a tool call across host → client → server → back.",
+    "Identify why the host, not the client or server, is the security/consent boundary.",
+    "Choose stdio vs. HTTP transport for a server based on production trust/deployment constraints.",
+    "Spot the \"client = LLM\" and \"server = network service\" misconceptions."
+  ],
+  "lesson": "MCP splits \"the app that talks to an LLM\" into three roles precisely so that adding one more integration doesn't mean trusting it as much as every other integration you already have.\n\n```\n                    HOST\n        (owns the LLM loop, user consent,\n         merges tools from every client)\n          |            |            |\n        1:1          1:1          1:1\n          |            |            |\n     Client A      Client B      Client C     <- one stateful session per server\n          |            |            |\n     Server A      Server B      Server C     <- isolated processes, don't see each other\n     (GitHub)       (Slack)      (Postgres)\n```\n\nThe **Host** is the process the user or the LLM's control loop actually runs in (Claude Desktop, Claude Code, your own agent runtime). It decides what gets merged into the LLM's context and is the only place permission prompts live.\n\nA **Client** is not the LLM and not a separate app — it's the protocol object the Host instantiates, one per Server, to hold that *stateful, 1:1* connection: it runs the `initialize()` capability handshake and remembers what that one Server offers. A Host wired to 5 servers holds 5 independent `ClientSession`s, never one shared one.\n\nA **Server** is a separate process or service — usually a local subprocess over stdio, sometimes remote over HTTP — that implements tools/resources/prompts and has no visibility into any other server the Host happens to be using.\n\nConcretely: the LLM decides to call `list_pull_requests` → the Host looks up which Client owns that tool name → that Client alone sends the JSON-RPC `tools/call` down its private transport → the GitHub server runs it, using credentials that never leave its own process → the response comes back up the same Client → the Host feeds it into the LLM's context.\n\n**Key gotcha:** the isolation is the point, not an accident of implementation. A hang or compromised call inside the Slack server cannot touch the Postgres server's connection or credentials — only the Host sees across all of them. Collapsing everything into one \"mega-server\" deletes the exact boundary MCP was built to give you, even though it looks like less code to run.",
+  "examples": "### Example 1 — one Client, one Server\n\n```python\nimport asyncio\nfrom mcp import ClientSession, StdioServerParameters\nfrom mcp.client.stdio import stdio_client\n\ngithub_server = StdioServerParameters(command=\"uvx\", args=[\"mcp-server-github\"])\n\nasync def main():\n    async with stdio_client(github_server) as (read, write):\n        async with ClientSession(read, write) as client:\n            await client.initialize()                 # capability handshake\n            tools = (await client.list_tools()).tools\n            result = await client.call_tool(\n                \"list_pull_requests\", {\"repo\": \"acme/backend\", \"state\": \"open\"}\n            )\n            print(result.content)\n\nasyncio.run(main())\n```\n\nOne `ClientSession` = one connection = one server. To also read Slack, you don't reuse this client — you open a second, independent one.\n\n### Example 2 — a Host fanning out to N servers (the real production shape)\n\n```python\nfrom contextlib import AsyncExitStack\n# ClientSession, StdioServerParameters, stdio_client imported as in Example 1\n\nSERVER_CONFIGS = {\n    \"github\": StdioServerParameters(command=\"uvx\", args=[\"mcp-server-github\"]),\n    \"slack\":  StdioServerParameters(command=\"uvx\", args=[\"mcp-server-slack\"]),\n    \"fs\":     StdioServerParameters(command=\"npx\", args=[\"-y\", \"@mcp/server-filesystem\", \"/data\"]),\n}\n\nclass Host:\n    def __init__(self):\n        self._stack = AsyncExitStack()\n        self.clients: dict[str, ClientSession] = {}   # 1 client per server\n        self.tool_owner: dict[str, str] = {}           # \"list_pull_requests\" -> \"github\"\n\n    async def connect_all(self):\n        for name, params in SERVER_CONFIGS.items():\n            read, write = await self._stack.enter_async_context(stdio_client(params))\n            client = await self._stack.enter_async_context(ClientSession(read, write))\n            await client.initialize()\n            self.clients[name] = client\n            for t in (await client.list_tools()).tools:\n                self.tool_owner[t.name] = name          # route future calls\n\n    async def call(self, tool_name: str, args: dict):\n        owner = self.tool_owner[tool_name]\n        return await self.clients[owner].call_tool(tool_name, args)\n```\n\nN servers in config → N long-lived `ClientSession`s → one routing table, so the LLM sees a single merged tool list but every call still dispatches 1:1 to the server that owns it.",
+  "tradeoffs": "Splitting by Server (one server per integration/trust domain) gives isolation, independent restarts, and clear auditing of which credentials live where — at the cost of N subprocesses/handshakes to manage and a routing layer in the Host to avoid tool-name collisions. A monolithic \"one server does everything\" design is operationally simpler but throws away the isolation MCP exists for: a bug or prompt-injected call there can reach every credential it holds, not just the one the LLM meant to use. Split by *trust/blast-radius boundary* (e.g., \"read-only wiki search\" vs. \"prod deploy trigger\"), not by every individual tool — one server per tool is safe but wasteful, one server for everything is efficient but unsafe. Use stdio for same-machine, single-user setups; move to HTTP/Streamable HTTP only when a server genuinely must be shared across hosts or users, and budget for real auth (OAuth/tokens) once you do.",
+  "diagnosticQuiz": [
+    {
+      "q": "Which statement correctly describes the Client's role in MCP's architecture?",
+      "choices": [
+        "A client holds one stateful, 1:1 connection to a single server and is instantiated by the host per server",
+        "A client is another name for the LLM making the tool-call decisions",
+        "A client can hold simultaneous connections to several servers to reduce overhead",
+        "A client is the component that implements tools and resources"
+      ],
+      "answer": 0,
+      "explanation": "Per the MCP spec, clients live inside the host and maintain a private 1:1 session with one server, handling protocol version and capability negotiation for that connection. The tempting wrong answers conflate \"client\" with either the LLM itself or a multiplexer — neither is right: the LLM never speaks MCP directly, and multiplexing across servers is the Host's job (holding many clients), not any single client's."
+    },
+    {
+      "q": "A host's config lists 4 MCP servers: filesystem, GitHub, Slack, and an internal deploy-tool server. Under the standard MCP architecture, how many `ClientSession` objects will the host hold once connected to all of them, regardless of how many tools each server exposes?",
+      "choices": [
+        "16 — one client per server per tool",
+        "4 — one client per server, independent of tool count",
+        "It depends on how many of the tools call each other",
+        "1 — one client multiplexes every server connection"
+      ],
+      "answer": 1,
+      "explanation": "MCP fixes the client-server relationship at 1:1, so the client count tracks the number of *servers*, never the number of *tools* a server happens to expose. The \"16\" distractor is the classic mistake of scaling clients with tool count instead of connection count."
+    },
+    {
+      "q": "Why does MCP insert a per-server Client between the Host and each Server instead of having the Host open raw connections to servers itself?",
+      "choices": [
+        "To reduce the number of network round-trips per tool call",
+        "To encapsulate per-connection protocol state (handshake, capabilities, session) and isolate each server's session from every other one",
+        "To let a single server serve multiple hosts at once",
+        "Because JSON-RPC requires a dedicated object per message type"
+      ],
+      "answer": 1,
+      "explanation": "The Client owns one connection's lifecycle and capability negotiation, so the Host needs no bespoke per-server glue, and a problem in one session can't leak into another. The other options describe true but incidental MCP properties (a server *can* serve multiple hosts; JSON-RPC *is* the wire format) — neither explains why the Client abstraction itself exists."
+    },
+    {
+      "q": "You're adding LLM access to both a read-only internal wiki and a production deploy pipeline that needs strict audit logging. From a production MCP design standpoint, what should you do?",
+      "choices": [
+        "Skip MCP entirely and call both APIs directly from the prompt",
+        "Give the wiki server the deploy pipeline's credentials too, in case it needs them later",
+        "Build two separate MCP servers (one per trust domain), each reached through its own client under the same host",
+        "Expose both through one MCP server so the LLM has a single, simple tool list"
+      ],
+      "answer": 2,
+      "explanation": "Different trust/blast-radius levels belong in different servers so a bug or injected instruction against the low-risk wiki tool can't touch deploy credentials it was never given; the host still merges both into one tool list, so there's no UX cost. Sharing credentials \"just in case\" or merging trust domains into one server are exactly the shortcuts that erase MCP's isolation guarantee."
+    },
+    {
+      "q": "A teammate says: \"The MCP client is basically just the LLM calling tools directly.\" What's the flaw in that statement?",
+      "choices": [
+        "Nothing — that's an accurate description",
+        "The client is a host-owned protocol connector for one server's session; the LLM never speaks MCP itself and only sees results the host relays back",
+        "The client is actually the component that runs the language model",
+        "Clients only exist when the transport is HTTP, not stdio"
+      ],
+      "answer": 1,
+      "explanation": "The LLM operates purely through the host's tool-call abstraction (\"call this function with these arguments\"); the host translates that into a real client → server JSON-RPC call and translates the response back. Treating the LLM as \"the client\" hides the host's mediation — exactly the layer where consent and safety checks are supposed to happen."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Walk me through what happens, at the host/client/server level, when an MCP-enabled agent calls a tool like `list_pull_requests`.",
+      "a": "The LLM, seeing the merged tool list the host gave it, decides to call `list_pull_requests`. The host looks up which live `ClientSession` owns that tool name (built from each client's `list_tools()` at startup) and forwards the call to only that client. That client serializes it as a JSON-RPC `tools/call` request down its private transport (stdio pipe or HTTP) to the GitHub server — no other client or server observes this. The server executes it using credentials that live only in its own process, and returns the JSON-RPC response on the same connection. The host receives it through that client, appends it to the LLM's context, and the LLM continues. The interview-relevant point: at no step does the LLM, or any other server, see the GitHub server's internals — the host is the only component with cross-server visibility."
+    },
+    {
+      "q": "Why does MCP insert a Client object between Host and Server instead of having the Host talk to servers directly? What production problem does that solve?",
+      "a": "It collapses two concerns into one clean abstraction: protocol/session state and trust isolation. The client owns the per-server handshake (`initialize`, capability negotiation, protocol version), so the host needs no per-server glue code — every server looks like the same `ClientSession` interface no matter what it does. More importantly in production: because each client-server pair is its own connection, a slow, buggy, or compromised server can only affect its own session — it can't read another server's credentials or reach it except through its own client. Without that boundary, \"add an MCP server\" would mean \"extend every existing integration's blast radius to this new, less-trusted code.\""
+    },
+    {
+      "q": "In production, would you deploy an MCP server over stdio or HTTP, and what does that choice change about the host's responsibilities?",
+      "a": "stdio when the server and host share a trusted machine — the host spawns it as a subprocess; simplest option, no network exposure, the process boundary is your only sandboxing. HTTP (Streamable HTTP) when the server is remote or shared across multiple hosts/teams — now the host must also own real auth (OAuth/tokens), TLS, and rate limiting, and can't assume the server is trustworthy just because it speaks MCP correctly. The protocol layer itself (JSON-RPC messages, tool schemas) doesn't change either way — only the transport and the security posture around it do, which is exactly what gets missed when a stdio/localhost demo gets promoted straight to a shared HTTP deployment without re-reviewing trust assumptions."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "data-and-transport-layers",
+    "what-is-mcp"
+  ],
+  "followUps": [
+    "data-and-transport-layers"
+  ],
+  "metadata": {
+    "inputHash": "9d0b58c8b52fdcc2",
+    "model": "sonnet",
+    "generatedAt": "2026-07-06T06:30:24Z"
+  }
+}

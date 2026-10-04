@@ -1,0 +1,24 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: softmax
+type: kata
+area: Activations & Losses
+order: 35
+title: Numerically-stable softmax
+prompt: Implement a numerically-stable softmax over a list of logits (use math.exp). The output must sum to 1 and must not overflow on large inputs like [1000, 1000].
+sig: 'def softmax(logits):'
+stub: "import math\n\ndef softmax(logits):\n    \n    return probs\n"
+reference: |-
+  import math
+
+  def softmax(logits):
+      m = max(logits)                      # subtract the max for stability
+      exps = [math.exp(x - m) for x in logits]
+      s = sum(exps)
+      return [e / s for e in exps]
+test: |
+  def _v(a, b): return len(a) == len(b) and all(abs(x - y) < 1e-6 for x, y in zip(a, b))
+  r = softmax([0.0, 0.0, 0.0]); assert _v(r, [1/3, 1/3, 1/3]), r
+  r = softmax([1000.0, 1000.0]); assert _v(r, [0.5, 0.5]), ("must be overflow-safe", r)
+  r = softmax([1.0, 2.0, 3.0]); assert abs(sum(r) - 1.0) < 1e-9 and r[0] < r[1] < r[2], r
+  print("PASS - 3 cases")

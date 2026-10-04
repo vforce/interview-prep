@@ -1,0 +1,99 @@
+{
+  "id": "json-rpc-2-0-messaging",
+  "title": "JSON-RPC 2.0 Messaging",
+  "definition": "JSON-RPC 2.0 is a stateless, transport-agnostic RPC protocol using JSON message envelopes (request, response, and notification objects correlated by an `id`) that MCP adopts wholesale as the wire format for every client↔server exchange.",
+  "summary": "MCP does not invent its own message format — it layers directly on JSON-RPC 2.0, so every `tools/call`, `resources/read`, or `initialize` exchange is just a JSON-RPC request/response pair, and one-way signals like progress updates are JSON-RPC notifications. This gives MCP request correlation (via `id`), a standard error shape, and transport independence (stdio, SSE, HTTP) for free — but it also means tool-execution failures must be modeled as normal JSON-RPC *successes* carrying an `isError` flag, not as JSON-RPC errors.",
+  "objectives": [
+    "Identify the three JSON-RPC 2.0 message shapes MCP uses: request, response, and notification.",
+    "Explain how the `id` field lets a client correlate a response to its request on transports that can reorder messages.",
+    "Distinguish a JSON-RPC protocol error (`error` member) from an MCP tool-execution failure (`result.isError`).",
+    "Apply the standard JSON-RPC error codes, including the reserved server-error range, when implementing an MCP server."
+  ],
+  "lesson": "You already know MCP's transport layer moves bytes (stdio, SSE, streamable HTTP) between client and server — JSON-RPC 2.0 is the message format riding on top, regardless of transport. MCP didn't invent a bespoke RPC framing; it reuses a ~10-year-old, one-page spec that already solved \"invoke a named method with params, get a correlated result back.\" That reuse is deliberate: every transport just needs to move JSON-RPC objects, and MCP's own design effort stays focused on method names (`tools/call`, `resources/read`, …) and schemas, not RPC plumbing.\n\nThree envelope shapes, all sharing `\"jsonrpc\": \"2.0\"`:\n\n```\nRequest:        {\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{...}}\nResponse (ok):  {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{...}}\nResponse (err): {\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32602,\"message\":\"Invalid params\"}}\nNotification:   {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{...}}  # no \"id\"\n```\n\nA **request** demands a response; a **notification** has no `id`, so there's nothing to correlate and no reply is expected — MCP uses this for `notifications/progress`, `notifications/cancelled`, `notifications/tools/list_changed`, where the caller shouldn't block on an ack.\n\n**Worked flow:** client sends `id:42, method:\"tools/call\"`. While the tool runs, the server may emit any number of `notifications/progress` messages (no id). When finished, it sends exactly one response with `id:42` — `result` or `error`, never both.\n\n**The key gotcha — where failure lives.** JSON-RPC's `error` member is for *protocol*-level failure only: bad method, bad params, parse failure (codes -32700..-32603). If the *tool itself* fails — API timeout, file not found — that is not a JSON-RPC error. MCP reports it as a normal successful response whose `result` carries `isError: true` plus `content` describing the failure. This lets the failure text reach the model's context so it can reason about or recover from it, instead of surfacing as a transport exception the client must special-case. Engineers who reflexively throw a JSON-RPC `error` for a failed tool call break exactly this — the model never sees why it failed.",
+  "examples": "**1. Correlating requests to responses over an async transport**\n\nResponses can arrive out of send-order once a server processes calls concurrently. A real client tracks in-flight calls by `id`:\n\n```python\nimport asyncio\nimport itertools\nimport json\n\nclass MCPClient:\n    def __init__(self, send):\n        self._send = send                      # write bytes to the transport\n        self._next_id = itertools.count(1)\n        self._pending = {}                     # id -> asyncio.Future\n\n    async def call(self, method: str, params: dict) -> dict:\n        req_id = next(self._next_id)\n        fut = self._pending[req_id] = asyncio.get_running_loop().create_future()\n        self._send(json.dumps({\n            \"jsonrpc\": \"2.0\", \"id\": req_id, \"method\": method, \"params\": params\n        }).encode())\n        return await fut                        # resolved by on_message below\n\n    def on_message(self, raw: bytes):\n        msg = json.loads(raw)\n        if \"id\" not in msg:\n            return self._handle_notification(msg)     # e.g. notifications/progress\n        fut = self._pending.pop(msg[\"id\"], None)\n        if fut and not fut.done():\n            fut.set_result(msg.get(\"result\", msg.get(\"error\")))\n```\n\nThe `_pending` dict is the whole trick: `id` is the only thing that lets the client match a late-arriving response to the call that triggered it, regardless of send order.\n\n**2. Protocol error vs. tool-execution error (server side)**\n\n```python\ndef handle_tools_call(req: dict) -> dict:\n    try:\n        name = req[\"params\"][\"name\"]\n    except KeyError:\n        # malformed request -> JSON-RPC protocol error\n        return {\"jsonrpc\": \"2.0\", \"id\": req.get(\"id\"),\n                \"error\": {\"code\": -32602, \"message\": \"Invalid params: 'name' required\"}}\n\n    try:\n        output = run_tool(name, req[\"params\"].get(\"arguments\", {}))\n        return {\"jsonrpc\": \"2.0\", \"id\": req[\"id\"],\n                \"result\": {\"content\": [{\"type\": \"text\", \"text\": output}], \"isError\": False}}\n    except ToolExecutionError as e:\n        # the tool ran but failed -> still a JSON-RPC SUCCESS, isError flags it\n        return {\"jsonrpc\": \"2.0\", \"id\": req[\"id\"],\n                \"result\": {\"content\": [{\"type\": \"text\", \"text\": str(e)}], \"isError\": True}}\n```",
+  "tradeoffs": "Reusing JSON-RPC 2.0 gives MCP a tiny, battle-tested wire format, transport independence, and free request correlation/error semantics — any language with a JSON parser can speak it. The cost: JSON-RPC alone has no native streaming of partial results (MCP layers that on via notifications), no auth or versioning (MCP adds its own `initialize` handshake and capability negotiation), and its base-spec batch-request feature isn't something you can assume an arbitrary MCP endpoint supports — confirm both ends' spec version before relying on it. Use the framing exactly as MCP prescribes; adding custom envelope fields breaks clients that validate strictly against the spec.",
+  "diagnosticQuiz": [
+    {
+      "q": "What are the three JSON-RPC 2.0 message types MCP relies on?",
+      "choices": [
+        "Query, mutation, and subscription",
+        "Request, response, and notification",
+        "Call, ack, and error",
+        "Request, response, and heartbeat"
+      ],
+      "answer": 1,
+      "explanation": "JSON-RPC 2.0 defines exactly request (has `id`, expects a response), response (`result` XOR `error`, matches the request's `id`), and notification (no `id`, no response expected). MCP uses all three — `tools/call` is a request, `notifications/progress` is a notification. The other options aren't JSON-RPC vocabulary."
+    },
+    {
+      "q": "A server wants a custom application error code that won't collide with JSON-RPC's own reserved codes. Which range is set aside for implementation-defined server errors?",
+      "choices": [
+        "-32700 to -32800",
+        "Any negative integer is safe — JSON-RPC reserves nothing",
+        "-32000 to -32099",
+        "-1 to -99"
+      ],
+      "answer": 2,
+      "explanation": "JSON-RPC 2.0 reserves -32768 to -32000 for predefined/protocol errors, explicitly carving out -32000 to -32099 for \"implementation-defined server errors.\" Codes like -32700 (parse error) or -32602 (invalid params) already live inside that band, so picking near them — or assuming nothing is reserved — risks colliding with codes a client treats as protocol-level."
+    },
+    {
+      "q": "Intuitively, why does MCP send tool progress updates as JSON-RPC notifications instead of requests?",
+      "choices": [
+        "Notifications use a separate, faster transport channel",
+        "The server may emit zero to many of them, and the client isn't meant to block waiting for an ack on each",
+        "A single JSON-RPC connection can only carry one request",
+        "Notifications are JSON-RPC's mechanism for streaming raw binary data"
+      ],
+      "answer": 1,
+      "explanation": "A long tool call can emit any number of progress events; treating each as a request would force pointless acks and burn `id` values on messages nobody needs to await. Omitting `id` is precisely what marks a message as fire-and-forget in JSON-RPC. The other options misstate JSON-RPC's transport and connection model."
+    },
+    {
+      "q": "You want to batch several MCP tool calls into a single JSON array to cut round trips. What's the production-safe approach?",
+      "choices": [
+        "Batching only exists for binary RPC protocols, not JSON-RPC",
+        "Don't assume batching works — confirm the MCP spec revision and the server's declared support before relying on it",
+        "Send the array — JSON-RPC 2.0's base spec allows request batching",
+        "Merge all calls into one request by putting a list inside `params`"
+      ],
+      "answer": 1,
+      "explanation": "JSON-RPC 2.0 does define a batch array in its base spec, but MCP's own support for it isn't something a production client can assume across arbitrary servers — verify before relying on it. Merging calls into one request's `params` throws away per-call `id` correlation, and batching is a real (if here inconsistently relied-upon) JSON-RPC feature, not a binary-only concept."
+    },
+    {
+      "q": "A tool call reaches the server fine, but the underlying API it wraps times out. How should a spec-compliant MCP server report this?",
+      "choices": [
+        "Drop the connection so the client retries the call",
+        "Send a notification in place of a response",
+        "Return a JSON-RPC `error` object with code -32603 (Internal error)",
+        "Return a successful JSON-RPC response with `result.isError` set to `true`"
+      ],
+      "answer": 3,
+      "explanation": "The RPC call itself succeeded — the server received a valid request and executed the tool; only the tool's own logic failed. MCP models that as a successful response carrying `isError: true` inside `result`, so the failure text reaches the model's context. A JSON-RPC `error` is reserved for protocol-level failures (bad method/params/parse), not for a tool that ran and failed."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Why did MCP choose JSON-RPC 2.0 instead of designing its own message protocol?",
+      "a": "JSON-RPC 2.0 already solves the core problem — named method invocation with params, request/response correlation via `id`, and a standard error shape — in a tiny, transport-agnostic spec. Reusing it means MCP works unmodified over stdio, SSE, or streamable HTTP, and any language with a JSON parser can implement a client or server. It also keeps MCP's design effort focused on its own layer — method names, capability negotiation, schemas — instead of re-solving RPC framing that's been stable for years."
+    },
+    {
+      "q": "A teammate wants to return a JSON-RPC `error` object because a tool call's downstream API returned a 500. Do you agree?",
+      "a": "No. The JSON-RPC request was well-formed and the server successfully invoked the tool — the failure is in the tool's own execution, not the protocol layer. MCP models that as a normal successful response with `result.isError: true` and a `content` block describing what went wrong. That distinction matters in production: it lets the failure reach the model's context so it can reason about or retry it, rather than surfacing as a transport-level exception the client has to special-case, and it keeps JSON-RPC `error` reserved for genuine protocol problems."
+    },
+    {
+      "q": "Under load, your MCP client occasionally attaches the wrong tool result to the wrong pending call. Where do you look first?",
+      "a": "The request/response correlation logic — the map keyed by JSON-RPC `id` that resolves a pending future/callback when a response arrives. Over an async transport, responses legitimately arrive out of send-order under concurrency, so the likely root cause is reusing an `id` before its prior call resolved, comparing `id`s across mismatched JSON types (`\"7\"` vs `7`), or code that matches by arrival order instead of by `id`. The fix is unconditional: generate a unique `id` per outstanding request and dispatch strictly by `id` lookup, never by position."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "data-and-transport-layers",
+    "lifecycle-and-capability-negotiation"
+  ],
+  "followUps": [
+    "lifecycle-and-capability-negotiation"
+  ],
+  "metadata": {
+    "inputHash": "ce6bee8de6b96fc0",
+    "model": "sonnet",
+    "generatedAt": "2026-07-06T06:39:20Z"
+  }
+}

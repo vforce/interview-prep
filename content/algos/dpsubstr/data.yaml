@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: dpsubstr
+fam: dp
+label: DP Substring/Palindrome
+order: 24
+trigger: palindromic substrings/subseq, largest square
+insight: expand-around-center, or dp[i][j] depends on dp[i+1][j−1] (fill by length). LPS(s)=LCS(s, reversed s)
+probs:
+- {n: Palindromic Substrings, slug: palindromic-substrings, d: M}
+- {n: Longest Palindromic Subsequence, slug: longest-palindromic-subsequence, d: M}
+- {n: Palindrome Partitioning II, slug: palindrome-partitioning-ii, d: H}

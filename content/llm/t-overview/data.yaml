@@ -1,0 +1,34 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: t-overview
+type: concept
+area: Transformer Block
+order: 9
+front: What is the Transformer architecture at a high level?
+back: |-
+  A stack of identical blocks; each block = multi-head self-attention + a position-wise feed-forward network, each wrapped in a residual connection and layer norm.
+
+  No recurrence or convolution — the whole sequence is processed in parallel; positional encodings inject order. Original = encoder-decoder (Vaswani 2017); most LLMs are decoder-only.
+more: |-
+  Each block refines a shared **residual stream**. Pre-norm form (now standard):
+  ```
+  h = x + MHA(LN(x))      # mix across tokens
+  y = h + FFN(LN(h))      # transform each token
+  ```
+
+  ## Param split per block (hidden = d)
+  Attention = `W_Q,W_K,W_V,W_O`, each d×d → **4d²**.
+  FFN (4× expand) = `W_1 (d×4d)` + `W_2 (4d×d)` → **8d²**.
+  Total ≈ **12d²** per layer, so FFN holds **~⅔** of non-embedding params.
+
+  Sanity check on GPT-3: L=96, d=12288 → 12·96·12288² ≈ **174B** ✓.
+
+  ## Real depths
+  | Model | Layers | d_model |
+  |---|---|---|
+  | BERT-base | 12 | 768 |
+  | GPT-2 small | 12 | 768 |
+  | Llama-2 7B | 32 | 4096 |
+  | GPT-3 175B | 96 | 12288 |
+
+  **Gotcha:** "no recurrence" buys full parallelism in training but means every token must be re-encoded at inference — hence the KV-cache. Vaswani's 2017 original was encoder-decoder for translation; decoder-only won for LLMs because one causal stack scales cleanly and does in-context learning.

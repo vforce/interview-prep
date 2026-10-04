@@ -1,0 +1,210 @@
+{
+  "id": "bm25",
+  "title": "BM25",
+  "definition": "BM25 is a probabilistic bag-of-words ranking function that scores a document's relevance to a query using saturating term-frequency weights, inverse document frequency, and document-length normalization.",
+  "summary": "BM25 improves on raw TF-IDF by capping the benefit of repeated term matches (saturation) and correcting for document-length bias, giving a fast, interpretable lexical relevance score that needs no training or GPU. It's the default similarity function in Lucene/Elasticsearch/OpenSearch, and in modern RAG stacks it remains the sparse-retrieval half of hybrid search, catching exact-match terms (IDs, error codes, jargon, acronyms) that dense embeddings often miss.",
+  "objectives": [
+    "Derive the BM25 formula and explain each term's role: TF saturation (k1), IDF, and length normalization (b).",
+    "Explain why BM25 improves on raw TF-IDF, especially for repeated terms and long documents.",
+    "Implement a BM25 scorer/ranker from scratch in Python.",
+    "Combine BM25 with dense embedding retrieval via hybrid search (e.g., Reciprocal Rank Fusion) and justify why.",
+    "Identify production failure modes: tokenizer drift, stale corpus statistics, and parameter tuning across domains."
+  ],
+  "lesson": "BM25 (\"Best Matching 25\") scores document relevance to a query using three ideas: term frequency (more query-term occurrences = more relevant), inverse document frequency — IDF (rarer terms across the corpus carry more signal), and length normalization (long documents shouldn't win just by containing more words).\n\nThe key improvement over raw TF-IDF is **saturation**: each additional occurrence of a term contributes less. Whether \"python\" appears 3 times or 30 times in a doc, its score contribution converges instead of growing linearly. This is controlled by `k1` (typically 1.2–2.0); higher `k1` means slower saturation, closer to raw TF.\n\nThe **length normalization** term (controlled by `b`, typically 0.75) compares a document's length to the corpus average. Without it, long documents score higher purely by having more words and more chances to match. `b=0` disables normalization; `b=1` applies it fully.\n\n```\nscore(D,Q) = Σ_t∈Q  IDF(t) · f(t,D)·(k1+1) / (f(t,D) + k1·(1-b+b·|D|/avgdl))\nIDF(t)     = ln( (N - n(t) + 0.5) / (n(t) + 0.5) + 1 )\n```\n`N` = corpus size, `n(t)` = docs containing `t`, `f(t,D)` = term frequency in `D`, `|D|` = doc length.\n\nWorked example: doc A = \"the cat sat on the mat\" (6 tokens), doc B = \"the dog chased the cat\" (5 tokens), query = \"cat\". Both contain \"cat\" once (`f=1`), but B is shorter than the corpus average — BM25 scores it higher (0.508 vs 0.470) than A despite identical raw term frequency, because the match is \"denser\" relative to document size. That's length normalization doing its job.\n\n**Key gotcha**: BM25 is purely lexical — it matches tokens, not meaning. \"car\" and \"automobile\" are unrelated to it, and it requires *consistent tokenization* (lowercasing, stemming) at both index time and query time. In production, an analyzer upgrade that changes tokenization on one side but not the other is a classic silent-regression bug: nothing errors, relevance just quietly degrades.",
+  "examples": "**1. BM25 from scratch, matching the worked example above**\n\n```python\nimport math\nfrom collections import Counter\n\nclass BM25:\n    def __init__(self, corpus_tokens, k1=1.5, b=0.75):\n        self.k1, self.b = k1, b\n        self.docs = corpus_tokens\n        self.N = len(corpus_tokens)\n        self.doc_lens = [len(d) for d in corpus_tokens]\n        self.avgdl = sum(self.doc_lens) / self.N\n        self.tf = [Counter(d) for d in corpus_tokens]\n        df = Counter(t for d in corpus_tokens for t in set(d))\n        self.idf = {\n            t: math.log((self.N - n + 0.5) / (n + 0.5) + 1)\n            for t, n in df.items()\n        }\n\n    def score(self, query_tokens, doc_idx):\n        dl, s = self.doc_lens[doc_idx], 0.0\n        for t in query_tokens:\n            if t not in self.idf:\n                continue\n            f = self.tf[doc_idx][t]\n            denom = f + self.k1 * (1 - self.b + self.b * dl / self.avgdl)\n            s += self.idf[t] * f * (self.k1 + 1) / denom\n        return s\n\n    def rank(self, query_tokens):\n        scores = [self.score(query_tokens, i) for i in range(self.N)]\n        return sorted(range(self.N), key=lambda i: scores[i], reverse=True)\n\ncorpus = [\n    \"the cat sat on the mat\".split(),\n    \"the dog chased the cat\".split(),\n    \"python raises a keyerror when key missing\".split(),\n]\nbm25 = BM25(corpus)\nscores = [round(bm25.score([\"cat\"], i), 3) for i in range(3)]\nassert scores == [0.47, 0.508, 0.0]   # shorter doc B outranks A despite same tf\n```\n\n**2. Production pattern: hybrid retrieval (BM25 + dense) via Reciprocal Rank Fusion**\n\nReal RAG systems rarely use BM25 alone — they fuse it with a dense retriever so exact-match and semantic-match queries both work:\n\n```python\ndef reciprocal_rank_fusion(rankings, k=60):\n    \"\"\"rankings: list of doc-id lists, each already sorted best-first\n    (e.g. one from BM25, one from a vector index).\"\"\"\n    scores = {}\n    for ranking in rankings:\n        for rank, doc_id in enumerate(ranking):\n            scores[doc_id] = scores.get(doc_id, 0.0) + 1.0 / (k + rank + 1)\n    return sorted(scores, key=scores.get, reverse=True)\n\nbm25_top = [\"doc42\", \"doc7\", \"doc19\"]\ndense_top = [\"doc7\", \"doc3\", \"doc42\"]\nfinal = reciprocal_rank_fusion([bm25_top, dense_top])\n```\nThis is what Elasticsearch/OpenSearch's \"hybrid query\", Vespa, and Weaviate implement natively.",
+  "tradeoffs": "BM25 is cheap, requires no training or GPU, is fully interpretable, and is robust out-of-domain — an embedding model can silently underperform on a new vocabulary (legal, medical, code), while BM25's statistics just re-fit from the new corpus. It's the right default first-stage retriever, and it's excellent for exact-match–heavy queries: IDs, SKUs, error codes, function names, acronyms. It's cheap to update incrementally on top of an inverted index (Lucene-style segment merges).\n\nIt has no notion of meaning: synonyms, paraphrases, and cross-lingual queries fail unless the exact tokens match. Avoid using it alone for conversational or paraphrase-heavy queries — that's what dense embeddings are for. The standard production answer is hybrid search: BM25 + dense retrieval fused with RRF or a weighted score combination, giving you both worlds at the cost of running two retrievers.",
+  "diagnosticQuiz": [
+    {
+      "q": "What does BM25 fundamentally compute when ranking a document against a query?",
+      "choices": [
+        "The cosine similarity between TF-IDF vectors of the query and document",
+        "A dense embedding similarity score, re-ranked by exact lexical overlap",
+        "A probabilistic bag-of-words score combining saturating term frequency, inverse document frequency, and document-length normalization",
+        "A neural relevance score learned from labeled query-document pairs"
+      ],
+      "answer": 2,
+      "explanation": "BM25 sums, per query term, an IDF weight times a saturating TF term with length normalization built into the denominator — no learning, no vectors, no embeddings involved. The best distractor is the classic confusion with plain TF-IDF cosine similarity: BM25 shares that lineage but replaces linear TF scaling and cosine normalization with the k1 saturation curve and the b-controlled length term, which is exactly what makes it outperform raw TF-IDF."
+    },
+    {
+      "q": "In the BM25 formula, what is the effect of increasing the k1 parameter?",
+      "choices": [
+        "Term frequency saturates more slowly, so scores behave closer to raw (unsaturated) term frequency",
+        "Document-length normalization becomes stronger, penalizing long documents more",
+        "Term frequency saturates faster, so repeated terms contribute almost nothing beyond the first occurrence",
+        "Rare terms receive a larger IDF boost relative to common terms"
+      ],
+      "answer": 0,
+      "explanation": "The lesson states higher k1 means slower saturation, closer to raw TF — a larger k1 lets the numerator's linear growth in f(t,D) dominate longer before the denominator flattens it out. The tempting wrong answer assumes \"turning up a knob\" should mean \"more of the effect it's named after\" (more saturation), but it's the reverse: small k1 saturates aggressively (diminishing returns kick in fast), while large k1 approaches unsaturated raw counting. Note k1 doesn't touch b or IDF — those are independent parameters."
+    },
+    {
+      "q": "In the worked example, document A (\"the cat sat on the mat\", 6 tokens) and document B (\"the dog chased the cat\", 5 tokens) both contain \"cat\" exactly once, yet document B scores higher (0.508 vs 0.470). Why?",
+      "choices": [
+        "Document B contains more distinct query terms than document A",
+        "Document B has a higher IDF value for \"cat\" than document A does",
+        "The k1 parameter saturates document B's term frequency less than document A's",
+        "Document B is shorter relative to the corpus average length, so length normalization boosts its score for the same term frequency"
+      ],
+      "answer": 3,
+      "explanation": "IDF(t) for \"cat\" is a corpus-wide constant, not document-specific, so it can't be the cause and doesn't differ between A and B. With identical f(t,D)=1, the only lever left is the (1-b+b·|D|/avgdl) term in the denominator: document B is shorter than the corpus average, shrinking that term and the whole denominator, which boosts its score — the \"denser match\" intuition the lesson describes."
+    },
+    {
+      "q": "According to the lesson, in which scenario is BM25 alone (without a dense retriever) the most appropriate choice?",
+      "choices": [
+        "Searching logs or code for exact error codes, SKUs, or function names in an unfamiliar domain",
+        "A cross-lingual search where queries and documents are in different languages",
+        "A semantic FAQ matcher where users phrase the same question many different ways",
+        "A conversational chatbot answering paraphrased natural-language questions"
+      ],
+      "answer": 0,
+      "explanation": "BM25 needs no training and is robust out-of-domain because its statistics simply re-fit to whatever corpus it sees, and it excels at exact-match-heavy queries like IDs, SKUs, error codes, and function names. The other options all require matching meaning rather than tokens (paraphrase, cross-lingual, synonymy) — exactly the blind spot the lesson flags as the reason production systems pair BM25 with dense embeddings via hybrid search."
+    },
+    {
+      "q": "What is the \"classic silent-regression bug\" the lesson warns about for BM25 in production?",
+      "choices": [
+        "An analyzer/tokenizer upgrade applied at index time but not query time (or vice versa), so tokens stop matching",
+        "Using BM25 alongside a dense retriever without reciprocal rank fusion",
+        "Forgetting to recompute IDF values as the corpus grows",
+        "Setting k1 or b to out-of-range values that crash the scoring function"
+      ],
+      "answer": 0,
+      "explanation": "BM25 matches tokens literally, so index-time and query-time tokenization (lowercasing, stemming) must stay identical; if only one side is upgraded, nothing errors — matching documents just quietly stop matching and relevance degrades. Stale IDF (option A) is a real maintenance issue but not the silent, error-free failure mode the lesson names, and skipping RRF fusion (option D) is a suboptimal design choice, not a regression — BM25 alone still functions correctly."
+    },
+    {
+      "q": "In the BM25 formula, what happens when the length-normalization parameter `b` is set to 0?",
+      "choices": [
+        "Length normalization is disabled entirely; document length no longer affects the score",
+        "Length normalization is maximized, so long documents are penalized the most",
+        "Term-frequency saturation is disabled, so score grows linearly with raw term frequency",
+        "IDF weighting is disabled, so all terms contribute equally regardless of rarity"
+      ],
+      "answer": 0,
+      "explanation": "With `b=0`, the denominator's length term `(1-b+b·|D|/avgdl)` collapses to `1` for every document, so `|D|` relative to `avgdl` has zero effect on the score — exactly what \"b=0 disables normalization\" means. The best distractor (B) describes the opposite extreme, which is what pushing `b` toward 1 does; swapping which end of the `b` range does what is the most common way this parameter gets misremembered."
+    },
+    {
+      "q": "The lesson's IDF formula is `IDF(t) = ln( (N - n(t) + 0.5) / (n(t) + 0.5) + 1 )`. What problem does the trailing \"+1\" inside the logarithm solve?",
+      "choices": [
+        "It converts the natural logarithm into a base-10 logarithm for numerical stability",
+        "It guarantees every term gets an equal baseline IDF regardless of frequency",
+        "It prevents IDF from becoming negative or zero for terms that appear in more than half the documents",
+        "It amplifies the score contribution of rare terms exponentially"
+      ],
+      "answer": 2,
+      "explanation": "Without the \"+1,\" a term appearing in more than half the corpus (`n(t) > N/2`) drives the ratio below 1, making `ln(...)` negative — which would *subtract* from a document's score for matching a common word. Adding 1 shifts the argument so it approaches 1 (not below) as `n(t)→N`, keeping IDF non-negative in the worst case. This is a real, deliberate fix used in production BM25 implementations, not a cosmetic tweak."
+    },
+    {
+      "q": "The lesson describes BM25's core improvement over raw TF-IDF as \"saturation.\" Which statement best captures what that means?",
+      "choices": [
+        "Additional occurrences of a term beyond the first contribute progressively less, so the score converges rather than growing linearly",
+        "Terms that occur only once in a document are excluded from scoring entirely",
+        "Doubling a term's occurrences in a document always doubles that term's contribution to the score",
+        "Saturation caps the total document score at a fixed maximum value regardless of query length"
+      ],
+      "answer": 0,
+      "explanation": "Saturation means each extra occurrence of a query term adds progressively less to the score — the lesson's example is \"python\" appearing 3 vs. 30 times converging rather than scaling up 10x. Option A describes literally the opposite behavior (unbounded linear growth), which is what raw TF-IDF does and precisely what BM25 was designed to fix. `k1` tunes *how fast* saturation kicks in, but the diminishing-returns shape itself is the saturation concept."
+    },
+    {
+      "q": "In the Reciprocal Rank Fusion (RRF) example, each document's fused score comes from `1/(k + rank + 1)` using its *rank position* in each list, not its raw BM25 or cosine-similarity score. Why use rank position instead of raw scores?",
+      "choices": [
+        "Raw similarity scores are not available from most vector databases",
+        "Rank position is faster to compute than a dot product or cosine similarity",
+        "BM25 scores and dense-retriever similarity scores live on incompatible scales, so combining raw scores directly would let whichever retriever produces larger numbers dominate",
+        "Using ranks instead of scores guarantees the fused list exactly matches the BM25 ranking"
+      ],
+      "answer": 2,
+      "explanation": "BM25 scores are unbounded and corpus-dependent, while dense-retriever cosine similarities are typically bounded (e.g., roughly [0,1]) — summing or averaging them directly means whichever retriever's numbers happen to run larger silently dominates the fusion. RRF sidesteps this by discarding raw magnitudes entirely and using only *where* each doc landed in each ranking, which is always comparable across retrievers regardless of their underlying scoring math."
+    },
+    {
+      "q": "Per the tradeoffs discussed, why is BM25 well-suited to a production system that ingests a constant stream of new documents?",
+      "choices": [
+        "It can be updated incrementally on top of an inverted index (e.g., Lucene-style segment merges) without retraining or re-embedding",
+        "It produces higher recall than dense retrieval on every query type",
+        "It automatically understands synonyms and paraphrases, reducing the need for a second retriever",
+        "It requires a GPU only during index updates, not during query time"
+      ],
+      "answer": 0,
+      "explanation": "The lesson notes BM25 \"is cheap to update incrementally on top of an inverted index,\" meaning new documents just get merged into the index's statistics — no retraining, no recomputing embeddings for the whole corpus, unlike a dense retriever. Option B is directly contradicted by the lesson: BM25 has \"no notion of meaning,\" and its cheap incremental updates are a *consequence* of being purely statistical, not evidence it understands language."
+    },
+    {
+      "q": "In the reference implementation, `df = Counter(t for d in corpus_tokens for t in set(d))` is used before taking IDF. Why does the code iterate over `set(d)` instead of `d` directly?",
+      "choices": [
+        "So the average document length (avgdl) can be computed from unique terms only",
+        "So each document contributes at most once per term to n(t), regardless of how many times that term repeats inside the document",
+        "So terms that never repeat within any document are excluded from the vocabulary entirely",
+        "So IDF can be computed without knowing N, the total number of documents"
+      ],
+      "answer": 1,
+      "explanation": "BM25's n(t) is *document frequency* — the count of documents containing t at least once — not the total number of times t occurs across the corpus. `set(d)` collapses each document to its unique tokens before counting, so a document where \"cat\" appears 5 times still adds only 1 to n(\"cat\"); skipping that step and counting over `d` directly would compute something closer to collection frequency, inflating n(t) and distorting IDF's ratio (it could even push n(t) above N)."
+    },
+    {
+      "q": "A BM25 index has already computed `avgdl` for its corpus. A new, unusually long document is now added. For length normalization to remain correct when scoring the *previously existing* documents on future queries, which precomputed value must be refreshed?",
+      "choices": [
+        "Only the IDF table, since avgdl only affects term rarity, not length",
+        "Nothing; avgdl is fixed once computed and doesn't participate in per-document scoring",
+        "Only `doc_lens` for the new document; existing documents don't reference avgdl",
+        "avgdl (the corpus-wide average document length), since every document's normalization term `(1 - b + b·|D|/avgdl)` depends on it"
+      ],
+      "answer": 3,
+      "explanation": "`avgdl` is a single corpus-wide number that every document's normalization factor divides by — it's not stored per-document. Adding a document changes the corpus's total token count and N, so the true average shifts, meaning every existing document's normalization term is technically computed against a stale average until avgdl is recomputed. This is why real systems refresh corpus-level aggregates on ingest rather than treating them as write-once constants."
+    },
+    {
+      "q": "Standard BM25 systems (e.g., Lucene-based search engines) build an inverted index rather than storing documents the way the toy `BM25` class does (a Python list of per-document `Counter`s). What does the inverted index map?",
+      "choices": [
+        "Each query string to a cached ranking, so repeated queries skip scoring entirely",
+        "Each document ID to the full sorted list of terms it contains, for re-tokenization at query time",
+        "Each term to a postings list of (document ID, term frequency) pairs — the documents that contain it and how often",
+        "Each document to its cosine-similarity neighbors, precomputed for hybrid search"
+      ],
+      "answer": 2,
+      "explanation": "The inverted index is \"inverted\" relative to the documents themselves: instead of doc → terms, it stores term → postings list of (doc ID, term frequency), so a query only has to fetch postings for its own terms and touch those documents, never the whole corpus. This is what lets BM25 retrieval scale with the number of matching postings rather than with N. Option B describes a forward index (doc → terms), which is closer to what the toy class's list of per-document Counters approximates — useful for teaching, but not how production engines organize storage."
+    },
+    {
+      "q": "In `self.tf = [Counter(d) for d in corpus_tokens]`, per-document term counts are built over every token in every document at construction time. Why must this happen for *all* terms in each document, rather than only for terms that later appear in a query?",
+      "choices": [
+        "The set of future queries isn't known at indexing time, and re-scanning document text per query would defeat the purpose of an index",
+        "Query terms are matched against `avgdl`, not against `self.tf`, so this step is unrelated to querying",
+        "BM25 requires every document to have the same vocabulary size before IDF can be computed",
+        "Only terms with f(t,D) > 1 need to be stored; single-occurrence terms are dropped during indexing"
+      ],
+      "answer": 0,
+      "explanation": "Indexing is necessarily query-agnostic — you can't know in advance which terms someone will eventually search for — so a real system tokenizes and counts every term in every document once, up front, and reuses those counts for whatever queries arrive later. The alternative, re-tokenizing and re-counting a document's text on every query that touches it, is exactly the linear rescan an inverted index exists to eliminate. Single-occurrence terms matter too: in the lesson's own worked example, \"cat\" has f=1 in both documents, and that count still has to be indexed for BM25 to score it at all."
+    },
+    {
+      "q": "A document D was indexed yesterday. Today, an unrelated new document is added to the same BM25 corpus. Which of these stays exactly the same for D, even though corpus-level statistics shift?",
+      "choices": [
+        "avgdl, used in D's length-normalization term `(1 - b + b·|D|/avgdl)`",
+        "N, the total corpus size used whenever D's IDF terms are looked up",
+        "The IDF of any term D shares with the newly added document",
+        "D's own per-term counts f(t,D) and its length |D|, since both depend only on D's content"
+      ],
+      "answer": 3,
+      "explanation": "f(t,D) and |D| are properties of D's own tokenized text, fixed the moment D was indexed — adding a different document elsewhere in the corpus can't change what's inside D. N, avgdl, and the IDF of shared terms are all corpus-wide aggregates recomputed over the *entire* collection, so they shift the instant the collection does, even though D's own text never changed. This is precisely why incremental indexing means appending a new document's postings is cheap, while keeping every downstream aggregate perfectly fresh in real time generally is not — production systems (e.g., Lucene segment merges) tolerate brief staleness rather than pay that cost synchronously."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "How does BM25 differ from raw TF-IDF, and why does that distinction matter in practice?",
+      "a": "Raw TF-IDF weights terms by frequency roughly linearly, so a document repeating a keyword 50 times can dominate purely from repetition, and it has no length correction, so long documents are favored just by containing more words. BM25 adds **saturation** — via `k1` — so each additional occurrence contributes diminishing score, and **length normalization** — via `b` — so a document isn't rewarded just for being long. In practice this makes BM25 rankings far more robust across heterogeneous corpora (mixed short snippets and long articles), which is why it replaced TF-IDF as the default in Lucene/Elasticsearch/OpenSearch."
+    },
+    {
+      "q": "Your RAG pipeline uses dense retrieval only, and users complain that searching for exact error codes or product SKUs returns irrelevant results. How do you fix it, and why does this happen?",
+      "a": "Add a BM25 (lexical) retriever alongside the dense one and fuse results, e.g. with Reciprocal Rank Fusion or a weighted score combination — most vector DBs (Elasticsearch, OpenSearch, Vespa, Weaviate) support this as \"hybrid search\" natively. The root cause: embedding models compress text into continuous vectors optimized for *semantic* similarity, so rare, high-entropy exact tokens like \"ERR-40921\" or a SKU get smoothed away — nearby vectors may share topic but not the literal string. BM25's IDF term does the opposite: it up-weights exactly those rare tokens, so it's the natural complement, not a replacement."
+    },
+    {
+      "q": "How would you scale BM25 retrieval to a 100M-document corpus in production, and what are the engineering bottlenecks?",
+      "a": "Don't implement it by hand — use an inverted-index engine (Elasticsearch/OpenSearch/Lucene, or Vespa) that shards the index, stores postings lists per term, and computes BM25 incrementally per segment so you never rescan the full corpus per query. Bottlenecks in practice: (1) keeping the index and query-time tokenizer/analyzer in sync — drift silently degrades recall; (2) corpus-statistic staleness (`avgdl`, IDF) under high insert/delete rates — segment-based engines recompute per-segment and merge, avoiding full reindex; (3) memory for postings lists at scale, mitigated by compression (e.g. delta + variable-byte encoding) which these engines handle internally; (4) parameter tuning (`k1`, `b`) doesn't always transfer across domains, so it's worth A/B testing defaults against your actual query distribution rather than assuming Lucene's defaults are optimal."
+    }
+  ],
+  "version": 5,
+  "relatedConcepts": [
+    "hybrid-search"
+  ],
+  "followUps": [
+    "hybrid-search"
+  ],
+  "metadata": {
+    "inputHash": "279f279328ad154e",
+    "model": "sonnet",
+    "generatedAt": "2026-07-03T10:38:04Z",
+    "quizUpdatedAt": "2026-07-04T06:33:40Z"
+  }
+}

@@ -1,0 +1,98 @@
+{
+  "id": "neural-network-regularization",
+  "title": "Neural Network Regularization",
+  "definition": "Neural network regularization covers the training-time techniques beyond weight penalties — dropout, normalization, early stopping, data augmentation — that constrain an over-parameterized network's effective capacity so it fits the underlying pattern instead of memorizing training examples.",
+  "summary": "Because a neural net typically has far more parameters than training examples, L1/L2 weight penalties alone rarely stop memorization. Net-specific regularizers attack overfitting through other levers instead of (or alongside) weight magnitude: Dropout injects stochastic noise into activations, BatchNorm/LayerNorm smooth the optimization landscape, early stopping limits training time, and augmentation enlarges the effective dataset. In production these matter as much at inference time — train/eval mode, decoupled weight decay — as during training.",
+  "objectives": [
+    "Explain how Dropout, BatchNorm, early stopping, and augmentation regularize through mechanisms other than weight-magnitude penalties.",
+    "Apply inverted-dropout scaling and explain why it keeps train/inference activations consistent.",
+    "Distinguish L2-in-the-loss from true decoupled weight decay under Adam vs AdamW.",
+    "Correctly toggle train/eval mode for stochastic regularizers on a production inference path and diagnose bugs when it's wrong.",
+    "Choose and tune a regularization stack for a data/compute regime, and recognize overkill (underfitting) vs insufficient (overfitting)."
+  ],
+  "lesson": "Neural networks are almost always overparameterized relative to their training set, so unlike a linear model — where weight magnitude is the only capacity knob L1/L2 can grab — a net has more places to overfit: co-adapted hidden units, sharp loss landscapes, and simply too many gradient steps. Net-specific regularizers each target one of these knobs.\n\n**Dropout** randomly zeroes a fraction `p` of unit activations each forward pass, forcing every unit to be independently useful rather than co-adapting with specific neighbors — a cheap approximation to training and averaging an exponential ensemble of subnetworks. **BatchNorm/LayerNorm** smooth the loss landscape and reduce sensitivity to weight scale, which incidentally regularizes. **Early stopping** treats the number of gradient steps itself as a capacity knob. **Data augmentation** enlarges the effective training distribution directly.\n\nWorked example — inverted dropout: surviving activations are scaled by `1/(1-p)` at train time so `E[output]` is unchanged regardless of `p`; at inference you just turn the mask off, no rescale needed. A unit with pre-dropout value 3.0 and `p=0.25` that survives becomes `3.0/(1-0.25) = 4.0` during training; at eval time it passes through as `3.0`.\n\n**Key gotcha — L2 and weight decay diverge once you leave plain SGD:**\n\n```\nSGD + L2:   w ← w - lr*(grad + λw)                 # decays w by (1 - lr·λ) each step\nAdam + L2:  w ← w - lr*(grad + λw) / (sqrt(v) + ε)  # decay coupled to per-param sqrt(v)\nAdamW:      w ← w - lr*grad/(sqrt(v) + ε) - lr*λ*w  # decay decoupled from adaptive scaling\n```\n\nUnder SGD, adding `λ‖w‖²` to the loss is just weight decay. Under Adam, the L2 term is divided by the adaptive denominator too, so parameters with large gradient history get decayed *less* — shrinkage becomes coupled to gradient statistics instead of uniform. AdamW decouples it, subtracting `lr·λ·w` directly. So `Adam(weight_decay=...)` ≈ L2-in-loss; `AdamW(weight_decay=...)` = true decoupled decay — migrating between them means re-tuning the value. A second, unrelated but equally common bug: forgetting `model.eval()` leaves Dropout active and BatchNorm on batch (not running) statistics at inference.",
+  "examples": "**Example 1 — inverted dropout (numpy):**\n\n```python\nimport numpy as np\nrng = np.random.default_rng(0)\n\ndef dropout(x, p=0.5, training=True):\n    if not training:\n        return x                       # identity at inference\n    mask = (rng.random(x.shape) > p).astype(x.dtype)\n    return x * mask / (1 - p)          # inverted scaling keeps E[out] == x\n\nx = np.array([1.0, 2.0, 3.0, 4.0])\ndropout(x, p=0.5, training=True)   # e.g. [0. 4. 6. 0.]  — survivors doubled\ndropout(x, p=0.5, training=False)  # [1. 2. 3. 4.]       — unchanged\n```\n\n**Example 2 — decoupled weight decay with param groups (standard production pattern):**\n\n```python\ndecay, no_decay = [], []\nfor name, p in model.named_parameters():\n    if not p.requires_grad:\n        continue\n    if p.ndim <= 1 or \"norm\" in name or \"bias\" in name:\n        no_decay.append(p)     # biases, LayerNorm/BatchNorm gain: don't shrink these\n    else:\n        decay.append(p)\n\noptimizer = torch.optim.AdamW(\n    [{\"params\": decay, \"weight_decay\": 0.1},\n     {\"params\": no_decay, \"weight_decay\": 0.0}],\n    lr=3e-4,\n)\n```\n1-D parameters don't cause overfitting the way weight matrices do, so decaying them toward zero only costs expressiveness. This split is what GPT-2/3-style and ResNet training recipes actually ship.",
+  "tradeoffs": "Dropout adds training-time noise and slows convergence; it's largely redundant with BatchNorm and strong augmentation in modern conv nets but still standard in transformer MLP/attention blocks and classifier heads. Weight decay is nearly free compute-wise, but the wrong value — or decaying norm/bias params, or reusing an Adam-tuned value under AdamW — silently hurts with no obvious error. Early stopping is cheap since you're already validating, but needs a large-enough, reliable held-out set. Augmentation is often the highest-leverage regularizer when transforms are cheap and label-preserving, but a label-breaking transform injects noise instead of regularizing. Prefer stacking several mild regularizers and watching the train/val gap over cranking one aggressive one — an over-regularized stack shows up as underfitting (both train and val suffer) and just burns compute.",
+  "diagnosticQuiz": [
+    {
+      "q": "What does Dropout do, mechanically, during a training forward pass?",
+      "choices": [
+        "Randomly zero a fraction of unit activations and rescale the survivors, on every forward pass",
+        "Randomly drop whole training examples from each mini-batch",
+        "Randomly zero a fraction of the input features once, before training starts",
+        "Add Gaussian noise to the gradients after backpropagation"
+      ],
+      "answer": 0,
+      "explanation": "Dropout zeroes each unit independently with probability `p` on every forward pass and rescales survivors by `1/(1-p)` so expected activation is unchanged. The other options describe related-but-distinct techniques — augmentation-style masking, gradient-noise injection, and batch subsampling."
+    },
+    {
+      "q": "A hidden unit's pre-dropout activation is 3.0. Dropout uses drop-probability p = 0.25, and this unit survives. Using standard inverted dropout, what value does it carry forward during training?",
+      "choices": [
+        "4.0",
+        "2.25",
+        "0.75",
+        "3.0"
+      ],
+      "answer": 0,
+      "explanation": "Inverted dropout scales survivors by `1/(1-p)`: `3.0 / (1 - 0.25) = 4.0`. Answering 3.0 (no rescale) confuses inverted dropout with the older formulation that instead multiplies by `(1-p)` at inference and leaves training activations unscaled."
+    },
+    {
+      "q": "Why does Dropout reduce overfitting?",
+      "choices": [
+        "It prevents units from co-adapting to specific other units, forcing each to be independently useful — approximating an ensemble of subnetworks",
+        "It shrinks weight magnitudes directly, the same way L2 regularization does",
+        "It removes mislabeled or noisy examples from the training set",
+        "It effectively lowers the learning rate, so weights move less per step"
+      ],
+      "answer": 0,
+      "explanation": "Since any unit can vanish on a given pass, no unit can rely on specific co-workers, pushing the network toward redundant, individually useful features. The tempting wrong answer — \"shrinks weights like L2\" — reflects the misconception that all regularizers work by pushing weight values toward zero; dropout is a stochastic architectural regularizer, not a magnitude penalty."
+    },
+    {
+      "q": "You have a large model, a strict compute budget, and a small but reliable held-out validation set. Which regularizer gives a strong accuracy/effort tradeoff with almost no extra tuning?",
+      "choices": [
+        "Sweep L1 penalty strength until validation loss stops decreasing",
+        "Dropout with p = 0.9 on every layer",
+        "Early stopping — checkpoint on validation loss and stop once it stops improving",
+        "Switch the optimizer from AdamW to plain SGD without momentum"
+      ],
+      "answer": 2,
+      "explanation": "Early stopping reuses a validation signal you're already computing and needs no architecture change — about as cheap as regularization gets. `p=0.9` dropout is aggressive enough to underfit; sweeping L1 strength is itself an expensive search; swapping optimizers doesn't reliably regularize and can destabilize training."
+    },
+    {
+      "q": "A production pipeline changes `Adam(params, weight_decay=0.01)` to `AdamW(params, weight_decay=0.01)` with nothing else changed. What should you expect?",
+      "choices": [
+        "The effective regularization strength likely changes, because AdamW applies decay directly to the weights instead of folding it into Adam's adaptive gradient update",
+        "No behavioral difference — `weight_decay` means the same thing in both optimizers",
+        "AdamW silently ignores `weight_decay` and only supports L1 penalties",
+        "AdamW will now decay the learning rate schedule instead of the weights"
+      ],
+      "answer": 0,
+      "explanation": "In Adam, an L2 term in the loss gets divided by the adaptive per-parameter denominator, so its shrinkage is coupled to each parameter's gradient history; AdamW instead subtracts `lr·weight_decay·w` directly, decoupled from that scaling. The same numeric value therefore regularizes differently under the two optimizers — the exact misconception in option A, and a real bug when migrating configs."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "A model's offline validation accuracy is strong, but production accuracy is lower and noisier, especially on batch-size-1 traffic. Regularization-wise, what do you check first, and why?",
+      "a": "First, train/eval mode on the serving path: if `model.eval()` wasn't called, Dropout stays active and BatchNorm keeps using batch statistics instead of its running mean/var — at batch size 1, batch statistics are degenerate, which explains both the drop and the noise. I'd verify the exported artifact (TorchScript/ONNX trace) was actually captured in eval mode, confirm BN running stats were updated during training (enough steps, sane momentum) rather than stuck near init, and rule out any augmentation code path shared between train and inference."
+    },
+    {
+      "q": "How would you set weight decay for a large transformer, and would you apply it uniformly to every parameter?",
+      "a": "Start from a literature-informed default (~0.1 for AdamW on large-LM pretraining) and tune it alongside learning rate, since decoupled decay and the LR schedule interact. Not uniformly: exclude 1-D parameters — biases and LayerNorm/RMSNorm gain/shift — from decay, since shrinking those toward zero doesn't fight overfitting the way weight matrices do and only costs optimization headroom; this decay-matrices-not-norms/biases split is the standard production recipe. I'd also confirm we're actually on AdamW, not Adam-with-L2-in-loss, since the same numeric value means different things under each."
+    },
+    {
+      "q": "You inherit a pipeline using Dropout(0.5) everywhere, weight_decay=0.1, and heavy augmentation. After a data pipeline upgrade doubles the training set, the model starts underfitting. What's your diagnosis and fix?",
+      "a": "The regularization stack was tuned for the old, smaller dataset and is now too strong — underfitting (train *and* val both suffer, not just a train/val gap) is the tell, versus overfitting where only val would lag. I'd back off incrementally rather than all at once: lower dropout first (e.g., 0.5 → 0.1–0.2) or drop it from some layers, retrain and check the train/val gap, then reduce weight decay if still underfitting, and keep augmentation but audit it for label-breaking transforms. The broader point: regularization strength is a hyperparameter tied to the data regime, not a fixed recipe — it should scale down as usable data scales up."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "backpropagation",
+    "l1-and-l2-regularization"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "521d49272356e820",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T10:58:02Z"
+  }
+}

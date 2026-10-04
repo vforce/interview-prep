@@ -1,0 +1,36 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: l-rag
+type: concept
+area: Adaptation & Retrieval
+order: 23
+front: What is RAG, and why use it over fine-tuning?
+back: |-
+  Embed the query, retrieve the most relevant chunks from a vector store, and stuff them into the prompt as context.
+  Adds fresh/proprietary knowledge and curbs hallucination — no retraining needed.
+  Chunking and retrieval quality are the bottleneck: bad retrieval → bad answer.
+more: |-
+  RAG grounds generation in retrieved text instead of relying on parametric memory.
+
+  ## Concrete example
+  A support bot over 10k internal docs:
+  ```
+  Corpus: 10,000 docs × ~2,000 tokens = 20M tokens
+  Chunk : 512 tokens (50 overlap)    → ~43k chunks
+  Embed each chunk → 1536-dim vector in a vector DB
+
+  Query time:
+    embed query → cosine top-k search → k = 5 chunks
+    context injected ≈ 5 × 512 = 2,560 tokens
+    (stuffing all 20M tokens is impossible — blows the window)
+  ```
+  Only ~2.5k of 20M tokens (0.013%) reach the model, so retrieval *is* the system.
+
+  | | RAG | Fine-tuning |
+  |---|---|---|
+  | Adds facts | swap the index | baked into weights |
+  | Freshness | re-index anytime | retrain to update |
+  | Style/format | weak | strong |
+  | Failure mode | wrong chunk retrieved | catastrophic forgetting |
+
+  **Misconception:** RAG doesn't teach new skills or style — it only supplies facts at inference. Fine-tune to change behavior/format, RAG to inject knowledge; the two compose.

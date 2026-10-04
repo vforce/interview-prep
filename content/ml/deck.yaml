@@ -1,0 +1,14 @@
+# Deck-level config for the 'ML' module — coding katas only. The theory now lives in the ml-tree
+# lesson topic (content/ml-tree/). Each kata is <id>/data.yaml (type: kata) + its <id>/quiz.yaml.
+
+key: ml-srs-v1
+tab: ML
+title: ML
+eyebrow: Machine Learning · coding katas
+order: 1
+areas:
+- Classification Metrics
+- Activations & Losses
+- NumPy
+- Pandas
+- PyTorch

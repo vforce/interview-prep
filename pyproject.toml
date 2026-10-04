@@ -1,0 +1,18 @@
+[project]
+name = "interview-prep"
+version = "0"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=2.0.2",
+    "pandas>=2.3.3",
+    "pyyaml",
+    "torch>=2.8",                  # PyTorch katas. CPU wheel; `import torch` ~0.6s of the runner's 6s cap.
+]
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+pythonpath = ["."]                 # tests/ import the root modules (server, quizgen, seed)

@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: dplinear
+fam: dp
+label: DP Linear
+order: 21
+trigger: max/ways along a sequence, dp[i] from dp[i−1]/dp[i−2]
+insight: 'dp[i] = best ending at / using i; usually two rolling vars. Kadane: cur = max(x, cur+x)'
+probs:
+- {n: Climbing Stairs, slug: climbing-stairs, d: E}
+- {n: House Robber, slug: house-robber, d: M}
+- {n: Decode Ways, slug: decode-ways, d: M}

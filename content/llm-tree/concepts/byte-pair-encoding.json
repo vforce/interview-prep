@@ -1,0 +1,97 @@
+{
+  "id": "byte-pair-encoding",
+  "title": "Byte-Pair Encoding",
+  "definition": "Byte-Pair Encoding (BPE) is a subword tokenization algorithm that starts from individual characters (or bytes) and repeatedly merges the most frequent adjacent symbol pair in a training corpus into a new symbol until the vocabulary reaches a target size.",
+  "summary": "BPE sits between character-level and word-level tokenization: frequent words and morphemes collapse into single tokens while rare or unseen words fall back to smaller learned subword pieces, so the vocabulary stays a fixed size with no out-of-vocabulary problem. Training just counts adjacent-symbol frequencies and greedily merges, producing an ordered list of merge rules that gets replayed deterministically — in that exact order — whenever new text is encoded. Most production LLMs (GPT-2/3/4, RoBERTa, LLaMA) use a byte-level variant so any UTF-8 input is representable without ever needing an `<unk>` token.",
+  "objectives": [
+    "Explain how BPE's train-time merge loop turns character/byte frequencies into a subword vocabulary",
+    "Implement BPE training and encoding (merge-order replay) from scratch in Python",
+    "Explain why production LLMs use *byte-level* BPE and what it costs for non-English or code input",
+    "Reason about vocabulary-size trade-offs: sequence length vs. embedding table size vs. per-token training signal",
+    "Diagnose production tokenizer issues: inconsistent number splitting, domain mismatch inflating token cost, and the merge-order gotcha when reimplementing an encoder"
+  ],
+  "lesson": "**Intuition.** BPE is the compromise between word-level tokenization (vocab explodes, OOV words break the model) and character-level tokenization (no OOV, but sequences get long and every \"word\" has to be re-learned from scratch). BPE starts from the smallest units — bytes or characters — and *learns*, from corpus statistics, which combinations are common enough to deserve their own token.\n\n**Training loop:**\n1. Represent every word as a sequence of base symbols, with an end-of-word marker (so a suffix \"est\" isn't confused with the \"est\" inside \"estimate\").\n2. Count every adjacent symbol-pair's frequency across the whole corpus.\n3. Merge the single most frequent pair into a new symbol; record the merge rule.\n4. Repeat 2–3 until the vocabulary hits its target size (30k–100k+ tokens in practice).\n\nYou ship two artifacts: a vocab (symbol → id) and an *ordered* list of merges. Encoding new text replays those merges in the order they were learned — repeatedly merge whichever adjacent pair has the lowest (earliest-learned) rank — rather than recomputing frequencies on the new input, which is meaningless for one short string.\n\n**Worked intuition:** train on \"low\" (×3) and \"lower\" (×2). Pair (l,o) is most frequent (5) → merge to \"lo\"; then (lo,w) is most frequent (5) → merge to \"low\". Now feed the *unseen* word \"loud\": the same rank-0 merge (l,o) still fires, giving `[\"lo\",\"u\",\"d\"]` — BPE generalizes to new words through subwords it already knows, no `<unk>` needed.\n\n**The gotcha:** merge *order* is the model. Re-deriving \"most frequent pair\" per input at encode time — instead of replaying the trained, ordered merge table — is the single most common bug when reimplementing a BPE encoder; it silently produces token ids the pretrained embeddings were never trained on. A second, easy-to-miss gotcha: real tokenizers pretokenize with a regex so merges never cross whitespace/punctuation, and GPT-2-style BPE glues the leading space onto the next word (`_the` ≠ `the`) — so a stray leading space in a prompt can silently change its tokenization.",
+  "examples": "**Example 1 — hand trace.** Corpus: `low` (freq 3), `lower` (freq 2), with end-of-word marker `_`.\n\n```\nword    symbols          freq\nlow     l o w _          3\nlower   l o w e r _      2\n\npair counts:  (l,o)=5  (o,w)=5  (w,_)=3  (w,e)=2  (e,r)=2  (r,_)=2\n\nmerge 1: (l,o) -> \"lo\"     [tie with (o,w); first-seen wins]\n  low   -> lo w _\n  lower -> lo w e r _\n\nrecount: (lo,w)=5  (w,_)=3  (w,e)=2  (e,r)=2  (r,_)=2\n\nmerge 2: (lo,w) -> \"low\"\n  low   -> low _\n  lower -> low e r _\n```\n\nResult: `low` is now atomic; `lower` = `[\"low\",\"e\",\"r\",\"_\"]`. An unseen word like `loud` still benefits — applying learned merge 1 gives `[\"lo\",\"u\",\"d\",\"_\"]` even though \"loud\" never appeared in training.\n\n**Example 2 — minimal Python (train + encode, merge-order replay):**\n\n```python\nfrom collections import Counter\n\ndef get_pair_counts(word_freqs):\n    counts = Counter()\n    for symbols, freq in word_freqs.items():\n        for pair in zip(symbols, symbols[1:]):\n            counts[pair] += freq\n    return counts\n\ndef merge_pair(pair, word_freqs):\n    a, b = pair\n    merged = {}\n    for symbols, freq in word_freqs.items():\n        out, i = [], 0\n        while i < len(symbols):\n            if i < len(symbols) - 1 and symbols[i] == a and symbols[i + 1] == b:\n                out.append(a + b); i += 2\n            else:\n                out.append(symbols[i]); i += 1\n        merged[tuple(out)] = merged.get(tuple(out), 0) + freq\n    return merged\n\ndef train_bpe(corpus, num_merges):\n    word_freqs = {tuple(w) + (\"_\",): f for w, f in corpus.items()}\n    merges = []\n    for _ in range(num_merges):\n        counts = get_pair_counts(word_freqs)\n        if not counts:\n            break\n        best = max(counts, key=counts.get)      # ties -> first-seen pair wins\n        merges.append(best)\n        word_freqs = merge_pair(best, word_freqs)\n    return merges\n\ndef encode(word, merges):\n    rank = {pair: i for i, pair in enumerate(merges)}   # learned order = priority\n    symbols = list(word) + [\"_\"]\n    while True:\n        candidates = [(rank[(symbols[i], symbols[i+1])], i)\n                      for i in range(len(symbols) - 1)\n                      if (symbols[i], symbols[i+1]) in rank]\n        if not candidates:\n            return symbols\n        _, i = min(candidates)                          # lowest rank = highest priority\n        symbols[i:i+2] = [\"\".join(symbols[i:i+2])]\n\nmerges = train_bpe({\"low\": 3, \"lower\": 2}, num_merges=2)\nprint(merges)                     # [('l', 'o'), ('lo', 'w')]\nprint(encode(\"lower\", merges))    # ['low', 'e', 'r', '_']\nprint(encode(\"loud\", merges))     # ['lo', 'u', 'd', '_']  (never seen at train time)\n```",
+  "tradeoffs": "Vocab size is the main knob: larger vocab → shorter sequences (cheaper attention, more context per token) but a bigger embedding/softmax matrix and less training signal per (rarer) token; smaller vocab → longer sequences and more compute per input, but better generalization to morphology. BPE's greedy, frequency-based merges are cheap to train and deterministic to apply, but purely statistical — it can fragment numbers inconsistently (hurting arithmetic) and over-fragment out-of-domain input (code, rare languages, medical text), directly inflating token count, latency, and $ cost in production. Alternatives: WordPiece (BERT) merges by a likelihood/mutual-information score instead of raw frequency; Unigram LM (SentencePiece, T5) prunes from a large vocab and can sample multiple valid segmentations — BPE has no such built-in stochasticity. Prefer (byte-level) BPE for general-purpose, open-vocabulary pretraining where speed, simplicity, and tokenizer ecosystem support (tiktoken, HF tokenizers) matter; reconsider it for narrow, high-volume domains (code, biomedical, non-Latin-script-heavy products) where a domain-adapted vocab measurably cuts tokens/request. Also remember the vocab is effectively frozen after pretraining — adding tokens later means resizing embedding/LM-head matrices and fine-tuning the new rows from scratch.",
+  "diagnosticQuiz": [
+    {
+      "q": "What does BPE training actually do to build a vocabulary?",
+      "choices": [
+        "Removes the least frequent characters from the alphabet until the vocab is small enough",
+        "Trains a neural network to predict optimal token boundaries for each sentence",
+        "Merges the most frequent adjacent pair of symbols in the corpus into a new symbol, repeating until a target vocabulary size is reached",
+        "Splits the corpus into whole words and keeps the top-K most frequent as tokens"
+      ],
+      "answer": 2,
+      "explanation": "This greedy, frequency-driven merge loop is the entire mechanism — it never operates on whole words, and it's additive (build up from atoms) rather than subtractive. The best distractor is \"remove the least frequent characters,\" which reflects the misconception that vocabulary-building starts big and prunes down, when BPE actually starts minimal and merges upward."
+    },
+    {
+      "q": "Corpus: `low` (freq 3) and `lower` (freq 2), both containing the adjacent pair (l,o). What total count does BPE's first counting pass assign to (l,o)?",
+      "choices": [
+        "2",
+        "5",
+        "3",
+        "6"
+      ],
+      "answer": 1,
+      "explanation": "Pair counts are frequency-weighted across the whole corpus: 3 (from \"low\") + 2 (from \"lower\") = 5. The best distractor, 3, reflects forgetting that \"lower\" also contains the (l,o) pair and only counting \"low\"'s contribution."
+    },
+    {
+      "q": "Why does GPT-2's byte-level BPE start from the 256 possible byte values instead of Unicode characters?",
+      "choices": [
+        "Byte-level vocab lets the model do arithmetic more reliably",
+        "Bytes compress better than characters, reducing sequence length",
+        "It makes merges alphabetically ordered, which speeds up encoding",
+        "It guarantees every possible input string can be represented without any unknown/OOV token, regardless of language or symbol set"
+      ],
+      "answer": 3,
+      "explanation": "A 256-symbol byte alphabet covers all UTF-8 text, so any string decomposes into symbols already in the vocab — no `<unk>`, ever. It doesn't inherently shorten sequences (multi-byte UTF-8 characters can need several byte-tokens) or affect ordering. The arithmetic option is the strongest distractor: it plays on a real LLM weakness but misattributes the cause — byte-level-ness is unrelated to inconsistent digit grouping."
+    },
+    {
+      "q": "A production coding assistant shows unexpectedly high token costs on code input even though quality is fine. What's the most likely tokenizer-related cause?",
+      "choices": [
+        "BPE cannot process code because it lacks a formal grammar parser",
+        "The model needs a larger context window to understand code",
+        "The model's BPE vocabulary was trained mostly on natural-language text, so code constructs (indentation, camelCase, symbols) fragment into many more tokens than in-domain prose would",
+        "Byte-level BPE always produces exactly one token per character for code"
+      ],
+      "answer": 2,
+      "explanation": "Tokenizer efficiency is corpus-dependent — a vocab whose merges came mostly from prose has no merges for code idioms, so code falls back to many short tokens, directly increasing tokens/request and cost. The \"lacks a grammar parser\" option is the strongest distractor: it sounds authoritative but is false — BPE is deliberately grammar-agnostic; that's the point of a statistical tokenizer."
+    },
+    {
+      "q": "A team reimplements BPE encoding by computing adjacent-pair frequencies *within each new input string* and merging whichever pair is locally most frequent, ignoring the trained merges.txt order. What's the bug?",
+      "choices": [
+        "Encoding must replay the learned merge rules in their original training order (lowest rank first); recomputing \"most frequent pair\" locally per input ignores the trained priority and yields token ids the model's embeddings were never trained on",
+        "There is no bug — this is exactly how BPE encoding works",
+        "They should recount frequency across the whole training corpus again for every new input, not just the input string",
+        "BPE encoding doesn't use merges at all at inference time, only during training"
+      ],
+      "answer": 0,
+      "explanation": "Merge rank *is* the learned priority — the earliest-learned merge must always apply first wherever it matches. Recomputing frequency on a single (often short) input is a different, ill-defined computation that silently diverges from the frozen merge table. \"Merges are training-only\" is the best distractor — plausible if you think of BPE purely as a corpus-statistics step, but encoding fundamentally requires replaying those exact rules."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Why does GPT-2 use byte-level BPE instead of word-level tokenization, and what's the production trade-off?",
+      "a": "A byte-level base vocab (256 symbols) guarantees any input — code, emoji, any language — is representable with zero `<unk>` tokens, unlike a word-level vocab which needs OOV handling and balloons across languages. Learned merges then keep common subwords as single tokens, keeping sequences short enough for the O(n²) attention budget. The production trade-off: non-Latin scripts and other under-represented domains still fragment into more bytes/tokens relative to English, inflating latency and per-request cost for exactly those users — a real i18n and pricing consideration."
+    },
+    {
+      "q": "A team wants to add domain-specific tokens (e.g., medical codes) to a pretrained model's BPE vocabulary. What does this actually require, and what's the risk?",
+      "a": "It means extending `vocab.json` with new ids and inserting new merge rules, then resizing the model's embedding matrix and LM head to add rows for the new ids. Those new rows start with no pretrained signal (random or averaged init), so the model needs real fine-tuning before it uses the new tokens well — ship it without that and you've added tokens the model can't yet use. It's also a breaking change: any cached ids/inputs assumed the old vocab, and inserted merges must sit at a sensible priority or existing merges pre-empt them."
+    },
+    {
+      "q": "A production LLM makes arithmetic mistakes on multi-digit numbers it clearly \"understands\" conceptually. How does BPE contribute, and how is it mitigated?",
+      "a": "Standard BPE tokenizes digits like any other text, so the same numeral position doesn't map to a stable token — \"1234\" might be one token while \"5678\" splits into \"567\"+\"8\" — breaking positional digit arithmetic. Mitigation is to special-case numbers in the tokenizer: some LLM tokenizers force single-digit tokens, others cap digit runs to small fixed groups (e.g., ≤3 digits) — trading a few extra tokens per number for consistent, comparable digit representations."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "tokenization"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "6af9e4e6b7a7aed6",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T13:15:34Z"
+  }
+}

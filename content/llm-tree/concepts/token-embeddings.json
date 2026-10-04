@@ -1,0 +1,102 @@
+{
+  "id": "token-embeddings",
+  "title": "Token Embeddings",
+  "definition": "Token embeddings are the rows of a learned matrix **E ∈ ℝ^(V×d)** that a transformer looks up by token ID to convert each discrete token into the dense continuous vector it actually computes on.",
+  "summary": "After tokenization turns text into integer IDs, the embedding layer indexes a `(vocab_size, d_model)` matrix to fetch one vector per ID — this is the first learned layer of every transformer LLM. Nothing forces the geometry; the vectors start as noise and acquire semantic/syntactic structure purely as a byproduct of minimizing the next-token loss. In production this table is often the largest single \"dumb\" parameter block in a model — cheap to store per-token but sensitive to initialization, resizing, and quantization choices.",
+  "objectives": [
+    "Explain the embedding lookup mechanically and where it sits relative to positional encoding.",
+    "Compute embedding-table parameter count and its share of total model size at different scales.",
+    "Explain weight tying between input embeddings and the output LM head, and when to skip it.",
+    "Reason about vocab size vs. embedding dimension tradeoffs and their effect on serving cost.",
+    "Diagnose production symptoms of undertrained or newly-added token embeddings."
+  ],
+  "lesson": "**Intuition.** Tokenization gives you integers, but the integer *value* carries no meaning — token 4291 isn't \"closer\" to 4292 in any linguistic sense. The embedding layer fixes this: a matrix `E` of shape `(vocab_size, d_model)`, where row `E[i]` is the vector for token `i`. Lookup is literally `E[token_id]` — indexing, not computation. It's the only place where the discrete, symbolic world of tokens touches the continuous world the rest of the network operates in.\n\nNothing forces similar tokens toward similar vectors — `E` starts as random noise. Structure emerges purely from gradient descent on the next-token objective: if \"cat\" and \"dog\" are interchangeable in enough contexts, backprop nudges their rows in correlated directions over millions of updates, because that reduces loss for both. It's the distributional hypothesis, realized as an emergent property rather than an explicit design.\n\n**Worked example.** GPT-2 small: vocab 50,257, d_model 768 → `E` has 50,257 × 768 ≈ 38.6M params, ~31% of the model's ~124M total. Llama 2 7B: vocab 32,000, d_model 4,096 → the input table alone is 131M params, but only ~1.9% of 6.7B total. At small scale the embedding table is a big deal; at large scale it barely registers.\n\n**The key gotcha.** A row of `E` is only as good as its gradient signal. A token that exists in the vocab but rarely (or never) appears in pretraining data keeps an embedding near its random init — it never got pulled anywhere meaningful. Feed it to the model and behavior near-randomizes: the \"glitch token\" phenomenon (e.g., the widely-cited `SolidGoldMagikarp` case). This resurfaces every time you add tokens post-hoc — a new `<tool_call>` special token bolted onto a fine-tune starts in exactly this undertrained state. Never assume a freshly resized embedding row is usable until it's actually seen enough training examples containing that token.",
+  "examples": "**Lookup + parameter count:**\n```python\nimport torch, torch.nn as nn\n\nvocab_size, d_model = 32_000, 4096\nembed = nn.Embedding(vocab_size, d_model)   # E: (V, d), randomly initialized\n\ntoken_ids = torch.tensor([1, 42, 31_999])   # produced by the tokenizer\nvectors = embed(token_ids)                  # shape: (3, 4096) — pure row lookup\n\nprint(sum(p.numel() for p in embed.parameters()))  # 131,072,000\n```\n\n**Weight tying (input embedding == output head):**\n```python\nclass TinyLM(nn.Module):\n    def __init__(self, vocab_size, d_model):\n        super().__init__()\n        self.tok_emb = nn.Embedding(vocab_size, d_model)\n        self.lm_head = nn.Linear(d_model, vocab_size, bias=False)\n        self.lm_head.weight = self.tok_emb.weight  # same (V, d) matrix, used both ways\n\n    def forward(self, hidden_from_transformer):\n        return self.lm_head(hidden_from_transformer)  # (B, T, d) -> (B, T, V)\n```\nGPT-2 ties (saves `V·d` params, regularizes — Press & Wolf, 2017). Llama-family models keep `tok_embeddings`/`output` separate: at 7B+ scale the saved params are noise, and untying frees the output projection from also having to double as a good *input* representation.",
+  "tradeoffs": "Bigger `d_model` gives richer per-token representation but its cost shows up mainly in attention/FFN compute, not the embedding table itself. Bigger vocab shortens sequences (fewer tokens per input → cheaper attention, more effective context) but grows the embedding *and* LM-head matrices linearly and thins training signal per rare token, worsening the undertrained-token problem. Tie embeddings for small-to-mid models to save params and regularize; untie for very large or large-vocab/multilingual models where the two roles benefit from separate capacity. When quantizing for serving, many pipelines leave the embedding table and LM head at higher precision than transformer-block weights — memory-cheap relative to the rest of the model, but errors there corrupt the very first representation everything downstream builds on.",
+  "diagnosticQuiz": [
+    {
+      "q": "In a transformer LLM, what is a \"token embedding\"?",
+      "choices": [
+        "A one-hot encoded vector representing the token's position in the vocabulary",
+        "A fixed sinusoidal vector encoding the token's position in the sequence",
+        "A lookup vector from a learned matrix that maps a discrete token ID to a dense continuous representation",
+        "The byte-pair merge rule used by the tokenizer to form the token"
+      ],
+      "answer": 2,
+      "explanation": "Token embeddings are rows of a learned matrix `E ∈ ℝ^(V×d)`; lookup for token id `i` is simply `E[i]`. One-hot vectors are the conceptual input to that lookup (`embedding = one_hot @ E`) but are never materialized in practice — that's the misconception the first option reflects. Sinusoidal vectors describe positional encoding, a separate additive signal; BPE merge rules belong to the tokenizer, a layer earlier."
+    },
+    {
+      "q": "A model has vocab size V = 32,000 and embedding dimension d = 4,096, with tied input/output embeddings. How many parameters does the embedding table contribute, counted once since it's tied?",
+      "choices": [
+        "~131 million",
+        "~262 million",
+        "~4 million",
+        "~32,000"
+      ],
+      "answer": 0,
+      "explanation": "Params = V × d = 32,000 × 4,096 = 131,072,000 ≈ 131M. 262M is the *untied* case, where a separate LM head doubles the count — a common mix-up when the model in question doesn't actually tie. The other two options drop the `d` multiplier or the `V` multiplier entirely."
+    },
+    {
+      "q": "The embedding matrix starts as small random noise before training. Why do semantically similar tokens (e.g., \"king\"/\"queen\") end up with nearby vectors after pretraining, despite never being directly supervised to be \"similar\"?",
+      "choices": [
+        "The tokenizer's BPE merge order places related tokens next to each other in the vocabulary, and adjacent rows are initialized similarly",
+        "Gradient descent on the next-token prediction objective pulls tokens that appear in similar contexts toward similar directions, since similar contexts imply similar useful gradient updates",
+        "Embeddings are explicitly regularized with a cosine-similarity loss between related words during pretraining",
+        "Positional encoding forces tokens occurring at the same sentence position to converge to the same vector"
+      ],
+      "answer": 1,
+      "explanation": "This is the distributional hypothesis emerging purely from backprop — tokens interchangeable in context receive correlated gradient signal across millions of examples, with no explicit similarity objective involved (ruling out the cosine-loss option, which doesn't exist in standard pretraining). Vocabulary index order is arbitrary and has no bearing on embedding geometry; positional encoding is independent of token identity."
+    },
+    {
+      "q": "You're fine-tuning a pretrained LLM and adding 4 new special tokens (e.g., `<tool_call>`) to the vocabulary. What's best practice for their initial embeddings?",
+      "choices": [
+        "Reuse the embedding of the `<unk>` token exactly, since new tokens are conceptually \"unknown\"",
+        "Leave them at whatever default the framework assigns (often zeros), since fine-tuning will fix it regardless of starting point",
+        "Retrain the entire tokenizer and embedding table from scratch to include the new tokens cleanly",
+        "Resize the embedding matrix and initialize the new rows near the mean (or a small perturbation of the mean) of existing embeddings, then fine-tune"
+      ],
+      "answer": 3,
+      "explanation": "Mean-init keeps new tokens in-distribution with the rest of the embedding space so early forward passes aren't degenerate, and fine-tuning converges faster and more stably than from zeros or an unrelated `<unk>` vector — both of which risk slow or unstable adaptation, and zero-init can distort attention if row norm carries signal. Retraining from scratch is wasteful and defeats the point of reusing a pretrained model."
+    },
+    {
+      "q": "A production LLM occasionally produces bizarre, incoherent completions when a specific rare token (present in the vocabulary but nearly absent from pretraining data) appears in the prompt. What's the most likely root cause?",
+      "choices": [
+        "The positional encoding for that token's sequence position overflowed",
+        "The tokenizer merged the token incorrectly, producing an invalid byte sequence",
+        "The token's embedding row received almost no gradient updates during pretraining, so it sits near its random initialization and behaves like noise to the rest of the network",
+        "The output softmax temperature is miscalibrated specifically for that token"
+      ],
+      "answer": 2,
+      "explanation": "This is the well-documented \"glitch token\" / undertrained-token phenomenon (e.g., `SolidGoldMagikarp`): tokens rarely or never seen in training keep embeddings close to random init, so the model has no learned behavior for them. Tokenizer merge errors aren't a per-token runtime issue at inference; positional encoding doesn't depend on token identity; softmax temperature is a global decoding parameter, not per-token."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "You're designing a new model from scratch and need to pick vocab size and embedding dimension. What do you actually weigh, and how does it hit production?",
+      "a": "Two mostly-independent knobs. Vocab size trades sequence length for table size: a bigger vocab means shorter token sequences for the same text (cheaper attention, better effective context, fewer decode steps) but a larger embedding + LM-head matrix and thinner training signal per rare token — more undertrained-token risk. `d_model` is set by overall model width / scaling-law targets, not by the embedding table in isolation — it's shared by every layer, so it's really a compute/quality decision, and the table's size just rides along as `V × d`. In production I'd also weight vocab choice by domain/language coverage — a poorly-matched vocab silently inflates token counts and $/request — and check what fraction of total params the table is: significant at 100M–1B scale, negligible above ~10B."
+    },
+    {
+      "q": "You need to add domain-specific tokens (e.g., medical codes) to a live, already-deployed LLM's vocabulary. Walk through it.",
+      "a": "Extend the tokenizer, resize `embed_tokens` (and `lm_head` if untied) to `V + k` rows, and initialize the new rows sensibly — mean of existing embeddings, or an average of the subword embeddings the token used to be split into — never zeros. Continue training on data where the new tokens actually appear frequently (full fine-tune, or freeze most of the backbone and tune embeddings + a few top layers / LoRA), and eval on both the new domain and general benchmarks to catch forgetting. The sharp production risk: token IDs are now incompatible with the old tokenizer/model pair, so tokenizer and model must be versioned and shipped together — any client caching prompts, KV-caches, or doing its own tokenization has to update in lockstep, or it silently feeds the new model token IDs computed under the old vocabulary."
+    },
+    {
+      "q": "Would you tie the input embedding and output head for a new 70B-parameter model? Why or why not?",
+      "a": "Lean untied at that scale. Tying (Press & Wolf, 2017) saves `V·d` params and regularizes, which mattered when that table was a meaningful fraction of total params — GPT-2-era models. At 70B, `V·d` (tens to a couple hundred million) is under 1% of total params, so the memory argument disappears; what's left is that tying forces one matrix to simultaneously be a good *input representation* space and a good *output-direction* space for the softmax — related but not identical jobs. Llama-family models untie for this reason. I'd only tie if the deployment target were itself memory- or param-constrained, e.g., a small on-device model, where the savings are actually felt."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "rag-vs-fine-tuning",
+    "tokenization",
+    "transformer-overview"
+  ],
+  "followUps": [
+    "rag-vs-fine-tuning",
+    "transformer-overview"
+  ],
+  "metadata": {
+    "inputHash": "8976d927ceb9b37c",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T13:19:10Z"
+  }
+}

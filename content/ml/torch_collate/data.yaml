@@ -1,0 +1,63 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: torch_collate
+type: kata
+area: PyTorch
+order: 47
+title: collate_fn for variable-length sequences (PyTorch)
+prompt: >-
+  Rung 2. The moment you say "sequences", the interviewer asks for a `collate_fn` — the default one
+  calls `torch.stack`, which needs identical shapes and so explodes on ragged input. A batch is a
+  list of 1-D LongTensors of differing lengths. Return `(padded, mask, lengths)`: `padded` is (B, L)
+  right-padded with `pad_id`, where L is the longest sequence *in this batch* (not a global max —
+  that is the point of padding per-batch); `mask` is a bool (B, L), True on real tokens; `lengths`
+  is a LongTensor (B,). Build the mask without a Python loop.
+sig: 'def collate(batch, pad_id=0):'
+stub: "import torch\n\ndef collate(batch, pad_id=0):\n    # pad to the longest sequence in THIS batch; mask = arange(L) < lengths[:, None]\n    \n    return padded, mask, lengths\n"
+reference: |
+  import torch
+
+  def collate(batch, pad_id=0):          # batch: a list of B 1-D LongTensors, all different lengths
+      # Why this function has to exist: the default collate calls torch.stack, and stack demands
+      # identical shapes. Ragged sequences blow up. So you pad them into a rectangle yourself.
+      lengths = torch.tensor([len(s) for s in batch], dtype=torch.long)    # (B,)
+
+      # Pad to the longest sequence IN THIS BATCH, not to a global maximum. A batch of short
+      # sequences then stays a small tensor, and you burn no compute on padding you didn't need.
+      L = int(lengths.max())
+
+      # full((B, L), pad_id) pre-fills the whole rectangle with padding; then overwrite the real
+      # prefix of each row. (Building the padding first means you never have to append to it.)
+      padded = torch.full((len(batch), L), pad_id, dtype=torch.long)       # (B, L)
+      for i, s in enumerate(batch):
+          padded[i, :len(s)] = s         # slice-assign copies s into the first len(s) slots of row i
+
+      # The mask, with no loop — broadcast a ROW of positions against a COLUMN of lengths:
+      #   arange(L)[None, :]   (1, L)    0, 1, 2, ..., L-1        [None, :] adds a leading axis
+      #   lengths[:, None]     (B, 1)    each row's true length   [:, None] adds a trailing axis
+      #   (1, L) < (B, 1)  ->  (B, L)    True exactly where position < that row's length
+      # Memorise this shape pun: (1, L) against (B, 1) fills a (B, L) grid. It's everywhere —
+      # attention masks, causal masks, padding masks.
+      mask = torch.arange(L)[None, :] < lengths[:, None]                   # (B, L) bool
+      return padded, mask, lengths
+test: |
+  import torch
+
+  batch = [torch.tensor([5, 6, 7]), torch.tensor([8]), torch.tensor([1, 2, 3, 4])]
+  p, m, l = collate(batch, pad_id=0)
+
+  assert tuple(p.shape) == (3, 4), tuple(p.shape)             # L = 4, the longest in this batch
+  assert p.dtype == torch.long, p.dtype
+  assert m.dtype == torch.bool, m.dtype
+  assert l.tolist() == [3, 1, 4], l.tolist()
+  assert p.tolist() == [[5, 6, 7, 0], [8, 0, 0, 0], [1, 2, 3, 4]], p.tolist()
+  assert m.tolist() == [[True, True, True, False],
+                        [True, False, False, False],
+                        [True, True, True, True]], m.tolist()
+  assert int(m.sum()) == 8, "mask must be True on exactly the 3+1+4 real tokens"
+
+  # pad_id is honoured, and L is recomputed per batch
+  p2, _, _ = collate([torch.tensor([9]), torch.tensor([1, 2])], pad_id=-100)
+  assert p2.tolist() == [[9, -100], [1, 2]], p2.tolist()
+
+  print("PASS - 8 checks")

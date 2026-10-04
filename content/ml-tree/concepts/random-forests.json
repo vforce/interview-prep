@@ -1,0 +1,97 @@
+{
+  "id": "random-forests",
+  "title": "Random Forests",
+  "definition": "A Random Forest is an ensemble learner that trains many decision trees on bootstrap-resampled subsets of the data — each tree considering only a random subset of features at every split — and aggregates their predictions (majority vote for classification, averaging for regression) to reduce variance relative to any single tree.",
+  "summary": "Random Forests combine bagging (bootstrap sampling of rows) with random feature subsampling at each split to grow many decorrelated decision trees, then average or vote across them. Decorrelating the trees is the whole point: averaging correlated predictors only reduces variance down to a floor set by that correlation, not to zero. In exchange for some interpretability and inference cost, this gives a low-tuning-effort model with built-in validation (out-of-bag score) and feature importance estimates.",
+  "objectives": [
+    "Explain how bagging and random feature subsampling decorrelate trees, and why decorrelation — not tree count — drives variance reduction.",
+    "Compute/interpret the ensemble variance formula ρσ² + (1−ρ)σ²/n and its implications for tuning `n_estimators` vs `max_features`.",
+    "Use out-of-bag (OOB) scoring as free validation and know its limitations (e.g., time-ordered or grouped data).",
+    "Distinguish impurity-based feature importance from permutation importance and know which to trust in production.",
+    "Justify, in an interview, when Random Forest beats or loses to gradient boosting or a single tree under production constraints (latency, tuning budget, interpretability)."
+  ],
+  "lesson": "Random Forests fix decision trees' biggest weakness: variance. A single deep tree memorizes its training set — perturb the data slightly and the splits change a lot, so predictions swing. Averaging many trees cancels that noise, but only if the trees' errors are somewhat independent. Bootstrap sampling rows (bagging) alone doesn't decorrelate trees enough: if one feature is a much stronger predictor than the rest, nearly every bootstrap tree still splits on it near the root, so the trees end up alike and highly correlated. Random Forests add a second randomization — at each split, only a random subset of features (typically √p for classification, p/3 for regression) is even considered as a candidate. That forces weaker or different features to compete for splits, further decorrelating the trees.\n\nThe math behind why this works: averaging n identically-distributed predictors, each with variance σ² and pairwise correlation ρ, gives an ensemble variance of\n\n```\nVar = ρσ² + (1 − ρ)σ²/n\n```\n\nAs n → ∞, the second term vanishes, leaving a floor of ρσ². More trees help only up to that floor — past a few hundred, extra `n_estimators` barely move accuracy. What actually lowers the floor is lowering ρ via `max_features` (and, to a lesser degree, bootstrap sampling). This is the core intuition: tuning a Random Forest is mostly about managing the `max_features` bias/variance/correlation trade-off, not about stacking on more trees. Because trees are fit completely independently (unlike boosting), training also parallelizes almost linearly across cores (`n_jobs=-1`).\n\nKey gotcha: each tree trains on a bootstrap sample (~63.2% of rows, drawn with replacement), leaving ~36.8% out-of-bag (OOB) per tree — a free validation signal with no separate holdout needed. But two traps: OOB error is optimistic when rows aren't truly independent (time series, grouped/duplicated records); and the default `.feature_importances_` (impurity/Gini-based) is biased toward high-cardinality and continuous features, and splits credit across correlated features so each looks weaker than it really is. For production feature-importance decisions, prefer permutation importance or SHAP.",
+  "examples": "**1. Fitting with the levers that matter, plus the importance pitfall:**\n\n```python\nfrom sklearn.ensemble import RandomForestClassifier\nfrom sklearn.inspection import permutation_importance\n\nrf = RandomForestClassifier(\n    n_estimators=500,\n    max_features=\"sqrt\",   # candidate features per split -> decorrelates trees\n    max_depth=None,        # deep trees: low bias, high variance (by design)\n    oob_score=True,        # free validation, no held-out split needed\n    n_jobs=-1,              # trees are independent -> near-linear speedup\n    random_state=0,\n)\nrf.fit(X_train, y_train)\n\nprint(rf.oob_score_)                 # proxy for held-out accuracy\nprint(rf.feature_importances_)       # Gini importance -- biased, sanity-check it\n\nperm = permutation_importance(rf, X_val, y_val, n_repeats=10, random_state=0)\nprint(perm.importances_mean)         # more reliable, especially for correlated features\n```\n\n**2. Why adding trees past a point is wasted compute** — per-tree variance σ² = 1.0, pairwise correlation ρ = 0.25 (typical once `max_features=\"sqrt\"` is decorrelating trees on correlated tabular features):\n\n| n_estimators | Var(average) = ρσ² + (1−ρ)σ²/n |\n|---|---|\n| 1    | 1.000 |\n| 10   | 0.325 |\n| 100  | 0.258 |\n| 1000 | 0.2508 |\n\nGoing 10 → 100 trees still helps meaningfully; 100 → 1000 barely does (0.258 → 0.2508). Grid-searching `n_estimators` past a few hundred is usually wasted compute — tune `max_features` / `max_depth` / `min_samples_leaf` instead.",
+  "tradeoffs": "**Use it when:** you want a strong, low-effort baseline on tabular data with mixed types and no scaling/imputation requirements; training must be fast and parallelizable; you have limited data and want OOB validation instead of sacrificing a validation split; you need robustness to noisy labels/outliers without careful tuning.\n\n**Avoid or reconsider when:** inference latency or memory is tightly budgeted — traversing hundreds of trees per prediction is far slower than a linear model, single tree, or distilled model; you need the best achievable accuracy on tabular data and can afford tuning plus longer sequential training (gradient boosting — XGBoost/LightGBM/CatBoost — usually wins there); you need to extrapolate beyond the training range (all tree methods fail at this); or you need transparent, single-path interpretability (a single shallow tree or a linear model is easier to explain than 500 trees, even with SHAP on top).",
+  "diagnosticQuiz": [
+    {
+      "q": "Which statement best defines a Random Forest?",
+      "choices": [
+        "A sequential ensemble where each new tree fits the residual errors of the previous trees' combined prediction",
+        "A single decision tree pruned via cost-complexity pruning after fitting",
+        "A single tree whose splits are chosen via k-fold cross-validation instead of a training-set impurity criterion",
+        "An ensemble of decision trees, each trained on a bootstrap sample of the data with a random subset of features considered at each split, whose predictions are combined by majority vote or averaging"
+      ],
+      "answer": 3,
+      "explanation": "Random Forest = bagging (bootstrap rows) + random feature subsets per split + majority vote/averaging. The first choice describes post-hoc pruning of a single tree; the third describes boosting (sequential, residual-fitting) — the most common confusion, since both are tree ensembles, but boosting reduces bias sequentially while Random Forest reduces variance via parallel, independent trees."
+    },
+    {
+      "q": "A Random Forest's individual trees have variance σ² = 1.0 and pairwise correlation ρ = 0.25. Using Var(average of n trees) = ρσ² + (1−ρ)σ²/n, what does the ensemble's variance approach as `n_estimators` → ∞?",
+      "choices": [
+        "0",
+        "0.25",
+        "1.0",
+        "0.75"
+      ],
+      "answer": 1,
+      "explanation": "As n→∞ the (1−ρ)σ²/n term vanishes, leaving the variance floor ρσ² = 0.25×1.0 = 0.25. The tempting wrong answer is 0, assuming enough trees drive variance away entirely — that's only true if trees were uncorrelated (ρ=0); correlation between trees, caused by shared strong features, sets a hard floor that no amount of additional trees can beat."
+    },
+    {
+      "q": "Why does Random Forest restrict each split to a random subset of features instead of considering all features, as a single decision tree does?",
+      "choices": [
+        "It only speeds up training and has no effect on prediction accuracy",
+        "It decorrelates the trees — without it, a few dominant features would make most trees split the same way near the root, keeping the pairwise correlation (and thus the ensemble's variance floor) high",
+        "It guarantees that every feature appears in every tree at least once",
+        "It lowers the bias of each individual tree by forcing it to consider more diverse splits"
+      ],
+      "answer": 1,
+      "explanation": "Bagging rows alone isn't enough to decorrelate trees when one or two features are much stronger predictors than the rest — almost every bootstrap sample still splits on them first. Restricting candidate features per split forces diversity. The tempting wrong answer (lower bias) is backwards: restricting features per split typically raises each tree's individual bias slightly in exchange for lower ensemble variance — a trade-off, not a pure win for the individual tree."
+    },
+    {
+      "q": "You're deploying a tabular fraud model with a strict 20ms p99 inference budget. Which factor most argues against using a large Random Forest here?",
+      "choices": [
+        "Predicting requires traversing every tree in the ensemble (e.g., 500 trees), which is far slower than a single tree or linear model at inference time",
+        "Random Forests cannot be trained in parallel, so retraining under load is slow",
+        "Random Forests require feature scaling, which adds preprocessing latency",
+        "Random Forests can't handle categorical features without one-hot encoding"
+      ],
+      "answer": 0,
+      "explanation": "Random Forest inference cost scales with `n_estimators` — you must traverse every tree and aggregate, unlike a single tree or a linear model. That's the real production constraint. The scaling and encoding claims are false (trees don't need feature scaling and handle categoricals reasonably), and the parallelism claim inverts reality — training parallelizes trivially across independent trees; it's inference that doesn't get cheaper with more trees."
+    },
+    {
+      "q": "Your Random Forest's built-in `.feature_importances_` (Gini/impurity-based) ranks a domain-critical feature as near-zero importance. What's the most likely explanation?",
+      "choices": [
+        "The feature is truly useless and should be dropped immediately",
+        "The model needs more trees before importances stabilize",
+        "Impurity importance is only valid for regression, not classification",
+        "Impurity-based importance is biased toward high-cardinality/continuous features and splits credit between correlated features, so a feature correlated with another can look weaker than it really is"
+      ],
+      "answer": 3,
+      "explanation": "Gini/impurity importance has two well-known biases: it favors features with more possible split points (high-cardinality/continuous), and it divides \"credit\" among correlated features so each one under-reports its true contribution. The safe production fix is permutation importance or SHAP, not dropping the feature or blindly adding more trees."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "A production Random Forest fraud model (500 trees, `max_depth=20`) is missing its 20ms p99 latency SLA. How do you fix it without a full retrain?",
+      "a": "First confirm the time is going to tree traversal, not feature computation — with 500 deep trees it almost always is. Then, cheapest levers first: (1) reduce `n_estimators` — since variance reduction floors out at ρσ², pruning from 500 to ~150 trees (validated on OOB/held-out) often costs negligible accuracy; (2) cap `max_depth` / raise `min_samples_leaf` to shorten each tree's traversal path; (3) compile the ensemble to a faster runtime (e.g., treelite, ONNX) instead of per-tree Python-level traversal; (4) if still short, distill into a single smaller model or a compact gradient-boosted model tuned for the accuracy/latency point. Full retrain is the last resort, not the first move."
+    },
+    {
+      "q": "Feature importance from your Random Forest disagrees with a domain expert's intuition about a key feature. How do you investigate before trusting either side?",
+      "a": "Don't trust `.feature_importances_` at face value — it's impurity-based, so it's biased toward high-cardinality/continuous features and splits credit among correlated features. Recompute with permutation importance (or SHAP) on a held-out set, which measures actual predictive contribution rather than split-selection bias. Check the correlation matrix: if the domain feature correlates strongly with another feature already ranked high, that explains a diluted score without the feature being useless. Then ablate — drop the correlated proxy and refit, and see if the domain feature's importance rises. Only conclude the feature doesn't matter after ruling out these mechanical biases."
+    },
+    {
+      "q": "When would you pick Random Forest over gradient boosting (XGBoost/LightGBM) for a production tabular model, or vice versa?",
+      "a": "Pick Random Forest for a fast, low-tuning-effort baseline that's robust to noisy labels/outliers, where training must parallelize — trees fit independently, so `n_jobs=-1` scales near-linearly — and you don't have time to carefully tune learning rate/regularization. Pick gradient boosting when squeezing maximum accuracy per latency/size budget matters: boosted trees usually reach a target accuracy with far fewer, shallower trees than a forest, which directly lowers p99 inference cost, at the price of slower sequential training and more careful tuning to avoid overfitting. In practice: Random Forest as the quick, robust baseline; boosting as the tuned, latency-optimized production model once the baseline has proven worth beating."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "decision-trees"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "5f0f2636d7271d97",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T10:29:59Z"
+  }
+}

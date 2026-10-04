@@ -1,0 +1,97 @@
+{
+  "id": "normalization-batch-and-layer",
+  "title": "Normalization (Batch and Layer)",
+  "definition": "Batch Normalization and Layer Normalization both standardize a layer's pre-activation values to zero mean and unit variance before applying a learned per-channel scale and shift, but BatchNorm computes those statistics across the batch (and spatial dimensions) per feature, while LayerNorm computes them across the feature dimension per individual example.",
+  "summary": "Both techniques exist to keep a network's internal activations well-scaled during training, which stabilizes gradients and allows higher learning rates. They differ only in which axis they reduce over: BatchNorm pools statistics across examples in a mini-batch (and needs frozen running statistics at inference), while LayerNorm computes statistics independently per example (and behaves identically at train and test time). That distinction is why CNNs default to BatchNorm and Transformers/LLMs default to LayerNorm or RMSNorm.",
+  "objectives": [
+    "Derive and compute BatchNorm's and LayerNorm's forward pass (mean, variance, normalize, affine) by hand on a small example.",
+    "Explain precisely which axis each method reduces over, and why that determines batch-size dependence.",
+    "Diagnose the classic BatchNorm train/eval mismatch bug that silently corrupts production inference.",
+    "Justify which normalization to use for CNNs vs. Transformers/sequence models, including small-batch and variable-length-sequence cases.",
+    "Describe two production techniques: SyncBatchNorm for distributed training and BatchNorm folding for inference latency."
+  ],
+  "lesson": "Both BatchNorm (BN) and LayerNorm (LN) do the same two steps — standardize, then apply a learned affine transform `y = γx̂ + β` — so gradients flowing back through them stay well-scaled instead of drifting as activations grow or shrink across layers and training steps; that's what lets you use higher learning rates and train deeper nets reliably. The entire difference between them is which axis gets reduced.\n\nFor an activation tensor shaped `(N=batch, H=features)` — for conv nets, add spatial dims and reduce per-channel over N,H,W:\n- BatchNorm reduces over N (and spatial dims): one mean/variance per feature, computed across all examples in the mini-batch.\n- LayerNorm reduces over H: one mean/variance per example, computed across that example's own features.\n\n**Worked example — same numbers, different axis.** Take one feature's values across a batch of 4: `x = [2, 4, 4, 8]`.\n```\nmean = 4.5\nvariance = ((2-4.5)² + (4-4.5)² + (4-4.5)² + (8-4.5)²) / 4 = (6.25+0.25+0.25+12.25)/4 = 4.75\nx̂ = (x - 4.5) / sqrt(4.75 + ε) ≈ [-1.15, -0.23, -0.23, 1.61]\n```\nThat's exactly BatchNorm's computation if `[2,4,4,8]` is one feature across 4 examples — and exactly LayerNorm's computation if `[2,4,4,8]` is one example's 4 features. The arithmetic (`x.mean(axis=0)` vs `x.mean(axis=1)`) is identical; what changes is the statistical assumption. BatchNorm assumes the batch is a representative sample of the feature's distribution; LayerNorm assumes nothing about the batch and treats every example independently.\n\n**The key gotcha:** BatchNorm's statistics depend on which other examples happen to be in the mini-batch — fine during training (large, shuffled batches), but at inference you often don't have a representative batch (sometimes just 1 example). So BN keeps an exponential moving average of the mean/variance seen during training (`running_mean`, `running_var`) and switches to those frozen values at eval time — that's what `model.eval()` toggles in PyTorch. Forget it, and BN silently normalizes using whatever tiny batch you're serving, producing garbage. LayerNorm never looks at other examples in the first place, so it has no train/eval mode at all — identical computation at batch size 1 or 1024. That's exactly why Transformers (variable-length sequences, batch-size-1 autoregressive decoding) standardized on LayerNorm/RMSNorm instead of BatchNorm.",
+  "examples": "**1. Same reduction, different axis** — the entire conceptual difference, made concrete on a Transformer-shaped tensor:\n\n```python\nimport numpy as np\n\nx = np.random.randn(8, 512)   # (batch=8, hidden=512), e.g. input to a Transformer block\n\nbn_mean = x.mean(axis=0)      # shape (512,) — one stat per feature, pooled over the 8 samples\nln_mean = x.mean(axis=1)      # shape (8,)   — one stat per sample, pooled over its 512 features\n```\nBatchNorm's stats mix information across examples (shape `(512,)`, one per feature). LayerNorm's stats never leave a single example (shape `(8,)`, one per sample) — which is why it's safe to use with batch size 1.\n\n**2. Why `model.eval()` matters** — simplified BatchNorm forward pass:\n\n```python\ndef batchnorm_forward(x, gamma, beta, running_mean, running_var,\n                       training, momentum=0.1, eps=1e-5):\n    if training:\n        mean, var = x.mean(0), x.var(0)\n        running_mean[:] = (1 - momentum) * running_mean + momentum * mean\n        running_var[:]  = (1 - momentum) * running_var  + momentum * var\n    else:\n        mean, var = running_mean, running_var   # frozen training-time stats, not x's own\n    x_hat = (x - mean) / np.sqrt(var + eps)\n    return gamma * x_hat + beta\n```\nIf `training` is wrongly `True` in production and you serve one example at a time, `var` is exactly 0 for that single sample, so `x_hat` collapses to 0 and the layer outputs the constant `beta` for every input — the activation is silently discarded, not \"blown up.\"",
+  "tradeoffs": "BatchNorm gives a useful implicit-regularization effect and, for CNNs with reasonably large batches (32+), is cheap and battle-tested — but it degrades sharply at small batch sizes, needs cross-device synchronization (SyncBatchNorm) in distributed training, and creates a train/inference discrepancy that's a recurring source of production bugs. LayerNorm is batch-size-independent and computes identically at train and inference, which is why it (or RMSNorm, its cheaper mean-free variant) is the default for Transformers, RNNs, and any serving setup with small, variable, or single-example batches — the tradeoff is a somewhat weaker regularizing effect and, in a CNN, more inference cost than a BatchNorm layer that's been folded into the preceding conv. GroupNorm/InstanceNorm split the difference — per-channel normalization without batch dependence — and are common in detection/segmentation where batches are small but a BatchNorm-like inductive bias is still wanted.",
+  "diagnosticQuiz": [
+    {
+      "q": "What is the precise structural difference between BatchNorm and LayerNorm?",
+      "choices": [
+        "BatchNorm normalizes across the batch dimension per feature; LayerNorm normalizes across the feature dimension per sample.",
+        "BatchNorm is only used in RNNs, LayerNorm is only used in CNNs.",
+        "BatchNorm and LayerNorm both normalize across the batch dimension, but LayerNorm additionally uses learned scale/shift.",
+        "BatchNorm normalizes across the feature dimension per sample; LayerNorm normalizes across the batch dimension per feature."
+      ],
+      "answer": 0,
+      "explanation": "This is the defining structural difference — the axis you reduce over. Reversing it (option A) is the single most common mix-up when engineers first learn these layers. Both layers use learned γ/β (ruling out C), and real-world usage is roughly the opposite of D — LayerNorm dominates Transformers/RNNs, BatchNorm dominates CNNs."
+    },
+    {
+      "q": "For a mini-batch of activations for a single feature, x = [1, 3, 5, 7], what is σ²_B (biased variance, as BatchNorm uses) before adding ε?",
+      "choices": [
+        "5",
+        "20",
+        "4",
+        "2.5"
+      ],
+      "answer": 0,
+      "explanation": "Variance is the mean of squared deviations from the mean: deviations are -3,-1,1,3; squares are 9,1,1,9; summing to 20, divided by m=4 gives 5. A common mistake is forgetting to divide by m and reporting the raw sum of squares (20); another is confusing variance with the mean itself (4)."
+    },
+    {
+      "q": "Why does LayerNorm work well for Transformers and sequence models where BatchNorm often struggles?",
+      "choices": [
+        "LayerNorm requires larger batch sizes to compute stable statistics.",
+        "LayerNorm's statistics are computed per-sample over the feature dimension, so they don't depend on batch size or other examples in the batch, and are identical at train and inference time.",
+        "LayerNorm removes the need for any learned scale or shift parameters.",
+        "LayerNorm only works when all sequences in the batch have the same length."
+      ],
+      "answer": 1,
+      "explanation": "LayerNorm's per-sample statistics never depend on which other examples share the batch, so training-time and inference-time computation are literally the same function — no running-average bookkeeping and no discrepancy at batch size 1 (e.g., autoregressive decoding). Option A inverts the actual dependency (that's BatchNorm's constraint); LayerNorm still learns γ/β (ruling out B); and it operates per-token, so ragged/variable-length sequences are fine (ruling out C)."
+    },
+    {
+      "q": "You're training a batch-size-2-per-GPU object detection model across 8 GPUs, and per-GPU BatchNorm statistics are noisy and inconsistent. What's the standard production fix?",
+      "choices": [
+        "Disable BatchNorm's learned γ and β parameters.",
+        "Switch to computing BatchNorm statistics using only the first GPU's batch.",
+        "Switch to SyncBatchNorm (synchronize statistics across GPUs) or switch to GroupNorm/LayerNorm.",
+        "Increase the learning rate to compensate for noisy statistics."
+      ],
+      "answer": 2,
+      "explanation": "SyncBatchNorm aggregates statistics across all GPUs before normalizing, emulating a larger effective batch; GroupNorm/LayerNorm sidestep the batch dependency entirely — both are standard fixes in detection/segmentation frameworks (e.g., Detectron2) that train with small per-GPU batches. The other options don't address the root cause: noisy statistics from tiny batches."
+    },
+    {
+      "q": "A model gets great validation accuracy but produces terrible results when deployed for single-example (batch size 1) inference. What is the most likely bug?",
+      "choices": [
+        "The model's LayerNorm was misconfigured.",
+        "The model was left in training mode (`model.train()`), so BatchNorm used the current single-example batch statistics instead of the stored running mean/variance.",
+        "The γ and β parameters were not saved with the model checkpoint.",
+        "Batch size 1 is mathematically impossible for any normalization layer."
+      ],
+      "answer": 1,
+      "explanation": "Leaving the model in training mode means BatchNorm computes mean/variance from whatever is in the current forward pass — at batch size 1 that variance is exactly 0, collapsing the output to the constant β and discarding the real input. This is one of the most common real-world BatchNorm bugs, usually traced to a missing `model.eval()` or equivalent inference-mode flag. A missing γ/β (option A) would fail to load with a shape/key error, not silently misbehave, and batch size 1 is a legal, well-defined (if degenerate) case, not an impossible one."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Walk me through what changes in BatchNorm's forward pass between training and inference, and why that split exists.",
+      "a": "During training, BN normalizes each mini-batch using that batch's own mean/variance, and simultaneously updates an exponential moving average of them (`running_mean`, `running_var`). At inference (`model.eval()` in PyTorch), it stops using the current batch's statistics and normalizes with the frozen running averages instead. This exists because inference batches aren't a reliable sample of the data distribution — often it's a single example, or a batch you didn't choose — so reusing training-time population statistics keeps behavior consistent per-input. Forgetting to switch modes is one of the most common BatchNorm bugs in production: at batch size 1 it silently degenerates to outputting the constant `β`, ignoring the actual input."
+    },
+    {
+      "q": "Why do modern LLMs use LayerNorm or RMSNorm instead of BatchNorm?",
+      "a": "LayerNorm normalizes per-token over the feature dimension, so it never depends on batch composition — no running-stat bookkeeping, and identical behavior whether training with batch 256 or generating one token at a time at batch size 1. That's essential for autoregressive decoding and ragged, variable-length sequences, where BatchNorm's batch-dependent statistics would be noisy or ill-defined. Many current LLMs (e.g., LLaMA) go a step further and use RMSNorm, which skips mean-centering and just rescales by the root-mean-square — cheaper, with negligible quality loss."
+    },
+    {
+      "q": "You need to cut inference latency on a deployed CNN. What's a free win related to BatchNorm?",
+      "a": "BatchNorm folding/fusion: at inference BN is just a fixed per-channel affine transform using frozen running stats, so it can be algebraically merged into the preceding conv's weights and bias ahead of time (`W' = W · γ/√(running_var+ε)`, bias folded similarly) — removing the BN op from the compute graph entirely with zero accuracy change. Frameworks automate this (`torch.quantization.fuse_modules`, TensorRT/ONNX Runtime graph optimizations); it's one of the first things to check before more invasive optimization work."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "backpropagation"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "d476d542a6d63df2",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T11:16:56Z"
+  }
+}

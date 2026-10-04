@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: dpbinsearch
+fam: hard
+label: DP + Binary Search
+order: 35
+trigger: sort, then LIS-style placement
+insight: sort cleverly (one dim asc, tie-break desc), then run O(n log n) LIS with bisect on the other dim
+probs:
+- {n: Longest Increasing Subsequence, slug: longest-increasing-subsequence, d: M}
+- {n: Russian Doll Envelopes, slug: russian-doll-envelopes, d: H}
+- {n: Maximum Profit in Job Scheduling, slug: maximum-profit-in-job-scheduling, d: H}

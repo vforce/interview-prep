@@ -1,0 +1,32 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: np_pairwise
+type: kata
+area: NumPy
+order: 42
+title: Pairwise Euclidean distances (NumPy)
+prompt: Given two 2-D arrays A (m x d) and B (n x d), return an m x n array D where D[i, j] is the Euclidean distance between row i of A and row j of B. Use broadcasting — no explicit loops.
+sig: 'def pairwise_dist(a, b):'
+stub: "import numpy as np\n\ndef pairwise_dist(a, b):\n    \n    return d\n"
+reference: |
+  import numpy as np
+
+  def pairwise_dist(a, b):                      # a is (m, d), b is (n, d)
+      # The all-pairs trick: insert a length-1 axis where you want the OTHER array to spread.
+      # None inside an index means "new axis here" (it's np.newaxis; np.expand_dims does the same).
+      #   a[:, None, :]  ->  (m, 1, d)
+      #   b[None, :, :]  ->  (1, n, d)
+      # Broadcasting stretches every length-1 axis to match, so you get all m*n pairs at once,
+      # with no loop: element [i, j] of the result is a[i] - b[j].
+      diff = a[:, None, :] - b[None, :, :]      # (m,1,d) - (1,n,d) -> (m, n, d)
+      # sum over axis 2 (the d axis) collapses it, leaving one distance per (i, j) pair.
+      return np.sqrt((diff ** 2).sum(axis=2))   # (m, n, d) -> (m, n)
+test: |
+  import numpy as np
+  a = np.array([[0.0, 0.0], [1.0, 1.0]])
+  b = np.array([[0.0, 0.0], [3.0, 4.0]])
+  d = pairwise_dist(a, b)
+  assert d.shape == (2, 2), d.shape
+  assert np.isclose(d[0, 0], 0.0) and np.isclose(d[0, 1], 5.0), d
+  assert np.isclose(d[1, 0], np.sqrt(2)), d
+  print("PASS - 3 checks")

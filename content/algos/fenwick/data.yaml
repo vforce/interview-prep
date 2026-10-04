@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: fenwick
+fam: hard
+label: Fenwick / Segment Tree
+order: 36
+trigger: range query + point update, both O(log n)
+insight: BIT for prefix sums with updates; segment tree for general range queries
+probs:
+- {n: Range Sum Query - Mutable, slug: range-sum-query-mutable, d: M}
+- {n: Count of Smaller Numbers After Self, slug: count-of-smaller-numbers-after-self, d: H}
+- {n: Reverse Pairs, slug: reverse-pairs, d: H}

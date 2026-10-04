@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: dp2seq
+fam: dp
+label: DP Two-Sequence
+order: 23
+trigger: two strings/arrays — edit distance, LCS, interleave
+insight: 2D dp[i][j]; on match take diag+1, else combine neighbor states (the combine rule IS the problem)
+probs:
+- {n: Longest Common Subsequence, slug: longest-common-subsequence, d: M}
+- {n: Edit Distance, slug: edit-distance, d: M}
+- {n: Regular Expression Matching, slug: regular-expression-matching, d: H}

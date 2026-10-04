@@ -1,0 +1,368 @@
+{
+  "concepts": [
+    {
+      "id": "what-is-a-language-model",
+      "title": "What is a Language Model",
+      "order": 1,
+      "difficulty": "Beginner",
+      "keyPoints": [
+        "A probability distribution over token sequences, factored via chain rule into ∏ P(xᵢ|x_<i)",
+        "Pretraining minimizes cross-entropy between predicted and actual next token",
+        "Transformer decoder produces each conditional via causal (masked) self-attention",
+        "One model, two uses: score a sequence (perplexity) or generate (autoregressive sampling)",
+        "Optimized for plausible text, not truth — hallucination is structural, not a bug"
+      ]
+    },
+    {
+      "id": "tokenization",
+      "title": "Tokenization",
+      "order": 2,
+      "difficulty": "Intermediate",
+      "keyPoints": [
+        "Converts raw text into integer IDs from a fixed vocabulary",
+        "Subword schemes (BPE/WordPiece/Unigram) avoid word-level OOV and char-level bloat",
+        "BPE: iteratively merge the most frequent adjacent symbol pair",
+        "Common words become 1 token; rare words split into subwords",
+        "Permanent design choice; explains weak arithmetic, letter-counting, multilingual cost skew"
+      ]
+    },
+    {
+      "id": "byte-pair-encoding",
+      "title": "Byte-Pair Encoding",
+      "order": 3,
+      "difficulty": "Intermediate",
+      "keyPoints": [
+        "Subword tokenization: starts from chars/bytes, merges frequent adjacent pairs",
+        "Training: count all adjacent-symbol pairs, merge most frequent, repeat to target vocab size",
+        "Ships two artifacts: vocab + an ordered merge-rule list",
+        "Encoding replays merges in learned order (lowest rank first), never recomputes frequencies",
+        "Gotcha: re-deriving frequency at encode time (not replaying trained order) silently breaks tokenization"
+      ]
+    },
+    {
+      "id": "token-embeddings",
+      "title": "Token Embeddings",
+      "order": 4,
+      "difficulty": "Intermediate",
+      "keyPoints": [
+        "Embedding matrix E ∈ ℝ^(V×d): one row per vocab token",
+        "Lookup is E[token_id] — pure indexing, not computation",
+        "Row geometry starts as noise; meaning emerges from next-token gradient descent",
+        "Rarely-seen tokens stay near random init → 'glitch tokens' (e.g. SolidGoldMagikarp)",
+        "Embedding table dominates params at small scale, negligible at large scale"
+      ]
+    },
+    {
+      "id": "transformer-overview",
+      "title": "Transformer Overview",
+      "order": 5,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Self-attention + feed-forward stack, no recurrence — trains fully in parallel",
+        "Each token computes Q/K/V; attends to all tokens via softmax(qk/√dk)",
+        "Attention is permutation-invariant — position injected via explicit embeddings (sinusoidal/learned)",
+        "Multi-head attention + residual/layer-norm: specialized heads, stable deep stacking",
+        "Gotcha: unscaled dot products saturate softmax — always scale by √dk"
+      ]
+    },
+    {
+      "id": "encoder-vs-decoder",
+      "title": "Encoder vs Decoder",
+      "order": 6,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Only structural diff: self-attention mask — bidirectional (encoder) vs causal (decoder)",
+        "Encoder: every position attends to all positions → good at understanding (BERT, embeddings)",
+        "Decoder: position i attends only to ≤i → matches train/inference for generation (GPT)",
+        "Encoder-decoder (T5): bidirectional encoder + causal decoder, linked via cross-attention",
+        "Gotcha: missing causal mask lets model peek at future token — loss looks great, generation is incoherent"
+      ]
+    },
+    {
+      "id": "feed-forward-network",
+      "title": "Feed-Forward Network",
+      "order": 7,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Two-layer MLP applied independently to each token position",
+        "FFN(x) = W2·σ(W1x + b1) + b2, d_ff usually 4×d_model",
+        "σ is ReLU (original), GELU (BERT/GPT), or SwiGLU (LLaMA)",
+        "~2/3 of a block's params — target for quantization and MoE routing",
+        "Gotcha: no cross-token mixing — that's attention's job, not FFN's"
+      ]
+    },
+    {
+      "id": "logits-and-the-lm-head",
+      "title": "Logits and the LM Head",
+      "order": 8,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Logit = raw unnormalized score per vocab token, pre-softmax",
+        "LM head: linear layer, logits = h @ W^T, shape (vocab_size, d_model)",
+        "Weight tying: LM head reuses input embedding matrix, saves ~524M params",
+        "Training needs logits at every position; generation needs only the last",
+        "Gotcha: slice hidden_states[:, -1:, :] before lm_head, not after"
+      ]
+    },
+    {
+      "id": "positional-encodings",
+      "title": "Positional Encodings",
+      "order": 9,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Self-attention is permutation-equivariant — position must be injected explicitly",
+        "Absolute: sinusoidal (fixed, trig-based) or learned table, added to input embeddings",
+        "Relative: ALiBi penalizes attention scores by distance; RoPE rotates Q/K vectors",
+        "RoPE's dot product depends only on relative offset (m−n), not absolute position",
+        "Gotcha: learned absolute hard-fails past max length; RoPE/sinusoidal silently degrade instead"
+      ]
+    },
+    {
+      "id": "pretraining",
+      "title": "Pretraining",
+      "order": 10,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Self-supervised next-token prediction over trillions of raw tokens",
+        "Loss = mean cross-entropy of -log P(x_t | x_<t)",
+        "Teacher forcing + causal mask: parallel training, sequential inference",
+        "Produces a fluent base model, not instruction-following or safe",
+        "Falling loss ≠ better assistant — that needs SFT/RLHF"
+      ]
+    },
+    {
+      "id": "residual-and-layer-norm",
+      "title": "Residual and Layer Norm",
+      "order": 11,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Residual: y = x + Sublayer(x), not y = F(x)",
+        "Identity term (I + dF/dx) stops gradients vanishing across depth",
+        "LayerNorm: per-token, over features — zero mean/unit variance × gain + bias",
+        "Batch-independent (unlike BatchNorm) — works at batch-size-1, variable-length decoding",
+        "Pre-norm (x + Sublayer(LN(x))) keeps residual stream clean; needs final ln_f"
+      ]
+    },
+    {
+      "id": "self-attention",
+      "title": "Self-Attention",
+      "order": 12,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Weighted average of Value vectors; weights = softmax(QK^T/√d_k)",
+        "Q, K, V = three projections of X; Q·K searches, V is content",
+        "Scale by √d_k — else large d_k saturates softmax, kills gradients",
+        "O(1) path length between any two tokens (vs O(n) for RNNs)",
+        "Permutation-invariant alone — needs positional encodings; O(n²) cost is mainly memory"
+      ]
+    },
+    {
+      "id": "context-window",
+      "title": "Context Window",
+      "order": 13,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Max tokens (prompt + output) attended to in one forward pass",
+        "Absolute embeddings hard-cap length; RoPE/ALiBi generalize but degrade past training range",
+        "Attention is O(n²); KV cache grows linearly, often dominates GPU memory",
+        "Lost in the middle: mid-context info recalled less reliably than edges",
+        "Validate long-context claims with needle-in-a-haystack evals, not spec sheets"
+      ]
+    },
+    {
+      "id": "multi-head-attention",
+      "title": "Multi-Head Attention",
+      "order": 14,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Runs h scaled dot-product attentions in parallel on learned Q/K/V projections",
+        "Split d_model into h heads of size d_k = d_model/h, softmax(QKᵀ/√d_k)V per head",
+        "Concatenate per-head outputs, mix back with final projection W_O",
+        "Same FLOPs/params as single-head — splitting heads is free, not 'spend more get more'",
+        "Reshape bug: use view+transpose not bare reshape, or heads silently scramble (no crash)"
+      ]
+    },
+    {
+      "id": "quadratic-attention-cost",
+      "title": "Quadratic Attention Cost",
+      "order": 15,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "O(n²) compute & memory: every token's query scores every key",
+        "Builds S=QKᵀ (n×n matrix), softmax, then multiplies by V — O(n²·d)",
+        "Projections/MLP scale O(n·d²), linear — attention overtakes them past n≈2·d_model",
+        "FlashAttention: same O(n²) FLOPs, just cuts memory O(n²)→O(n); not linear attention",
+        "KV-cache makes each step O(n), but full generation is still O(n²) total"
+      ]
+    },
+    {
+      "id": "quantization-and-qlora",
+      "title": "Quantization and QLoRA",
+      "order": 16,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Quantization: store weights in fewer bits (INT8/INT4/NF4) to cut memory/compute",
+        "q = round(W/scale), scale = max|W|/(2^(b-1)-1); error bounded by scale/2",
+        "QLoRA: freeze 4-bit NF4 base, train only bf16 LoRA adapters on top",
+        "No gradient touches quantized weights — sidesteps QAT's straight-through estimator",
+        "Blockwise (64-val) + double quantization avoids outlier-feature blowup at 6-7B+ scale"
+      ]
+    },
+    {
+      "id": "rlhf-and-instruction-tuning",
+      "title": "RLHF and Instruction Tuning",
+      "order": 17,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "SFT: imitate curated (instruction, response) pairs via cross-entropy",
+        "RLHF: train reward model on human pairwise comparisons (Bradley-Terry)",
+        "Optimize SFT policy vs. reward model with PPO + KL penalty to SFT",
+        "Reward hacking: policy exploits reward-model blind spots (Goodhart's law)",
+        "DPO: closed-form alternative, skips the unstable RL loop"
+      ]
+    },
+    {
+      "id": "sampling-and-decoding",
+      "title": "Sampling and Decoding",
+      "order": 18,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Decoding = turning per-step logits into a chosen token, autoregressively",
+        "Deterministic: greedy (argmax) or beam search (top-B by cumulative log-prob) maximize sequence likelihood",
+        "Stochastic: sample from softmax(logits/T), truncated via top-k, top-p, or min-p",
+        "Gotcha: max-likelihood text degenerates into repetition loops (Holtzman et al.), so sampling beats greedy for open-ended text",
+        "Correct order: temperature → softmax → top-k → top-p → renormalize → sample"
+      ]
+    },
+    {
+      "id": "scaling-laws",
+      "title": "Scaling Laws",
+      "order": 19,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Power-law relating pretraining loss to params (N), tokens (D), compute (C)",
+        "L(N,D) = E + A/N^α + B/D^β — irreducible entropy + capacity error + data error",
+        "Fit curve on small cheap runs, extrapolate to predict huge runs",
+        "Chinchilla: optimal is N and D scaling equally, ~20 tokens/param (not Kaplan's N≫D)",
+        "Gotcha: Chinchilla-optimal ignores inference cost — over-train smaller models for high-volume serving (LLaMA)"
+      ]
+    },
+    {
+      "id": "hallucination",
+      "title": "Hallucination",
+      "order": 20,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Next-token prediction optimizes plausible text, not verified truth",
+        "Intrinsic (contradicts input) vs extrinsic (unsupported addition) hallucination",
+        "Occurs in open-domain (parametric) and closed-domain (RAG) settings alike",
+        "RLHF worsens it — raters prefer confident answers over hedging",
+        "RAG bounds extrinsic but not intrinsic hallucination — still need verification"
+      ]
+    },
+    {
+      "id": "lora-and-fine-tuning",
+      "title": "LoRA and Fine-Tuning",
+      "order": 21,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Freezes pretrained W; trains low-rank update ΔW = B·A instead",
+        "Works because task-specific weight updates have low intrinsic rank (r≪d) — e.g. r=8 gives 256× fewer trainable params",
+        "Forward pass: h = Wx + (alpha/r)·(B·A)·x; only B,A get gradients, W never moves",
+        "B initialized to zero (A small random) → ΔW=0 at step 0, training starts exactly at pretrained behavior",
+        "Frozen base still needs full GPU memory — QLoRA (4-bit quantized base) needed to fine-tune huge models on one GPU"
+      ]
+    },
+    {
+      "id": "prefill-vs-decode",
+      "title": "Prefill vs Decode",
+      "order": 22,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Prefill: one parallel forward pass over all prompt tokens, builds KV cache",
+        "Decode: sequential loop, one token at a time, reads/extends KV cache",
+        "Prefill is compute-bound (matmul, high arithmetic intensity) → sets TTFT",
+        "Decode is memory-bandwidth-bound (matrix-vector, weights reused for 1 token) → sets TPOT",
+        "Fix decode's low intensity via batching (continuous batching); chunked prefill avoids head-of-line blocking"
+      ]
+    },
+    {
+      "id": "rag-vs-fine-tuning",
+      "title": "RAG vs Fine-Tuning",
+      "order": 23,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Two levers to adapt a frozen LLM: change the context (RAG) vs change the weights (fine-tuning)",
+        "RAG: embed query → nearest-neighbor search → splice top-k chunks into prompt (open-book)",
+        "Fine-tuning: extra gradient steps on (input, output) examples so behavior becomes the default (closed-book)",
+        "Use RAG for facts that are large/volatile/must-cite; fine-tune for tone, schema, tool-call conventions",
+        "Gotcha: fine-tuning on facts teaches imitation not knowledge — frozen, poorly generalized, harder-to-catch hallucinations"
+      ]
+    },
+    {
+      "id": "kv-cache",
+      "title": "KV Cache",
+      "order": 24,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Caches per-layer K/V projections so decode reuses them instead of recomputing",
+        "Works because causal masking makes a token's K/V depend only on itself + earlier tokens",
+        "Prefill computes K/V for the whole prompt in parallel; decode appends one token's K/V per step",
+        "Size = 2 × layers × kv_heads × head_dim × seq_len × batch_size × bytes — often the real GPU-memory bottleneck",
+        "Doesn't cut attention's O(n²) cost, only removes redundant re-projection of past tokens"
+      ]
+    },
+    {
+      "id": "kv-cache-memory",
+      "title": "KV Cache Memory",
+      "order": 25,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "GPU memory holding cached K/V tensors for every past token",
+        "Per token: 2 × n_kv_heads × head_dim × dtype_bytes, × layers",
+        "Scales linearly with seq_len & batch_size — can dwarf model weights",
+        "Decoding is memory-bandwidth-bound: reads the whole cache every step",
+        "Shrunk via GQA/MQA, INT8/FP8 quantization, PagedAttention, sliding-window eviction"
+      ]
+    },
+    {
+      "id": "kv-cache-eviction",
+      "title": "KV Cache Eviction",
+      "order": 26,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Reclaims GPU memory by discarding cached K/V pairs for chosen tokens/sequences",
+        "Token-level: sliding window, StreamingLLM (window + attention-sink tokens), H2O (recent + heavy-hitters by cumulative attention)",
+        "Request-level: scheduler preempts whole sequences — swap to CPU or recompute via re-prefill",
+        "Fails silently — evicted context is just gone, no error, breaks long-context recall tasks",
+        "Different lever than quantization (fewer bytes/token) or prefix caching (reuse, not deletion)"
+      ]
+    },
+    {
+      "id": "kv-cache-tricks",
+      "title": "KV Cache Tricks",
+      "order": 27,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Shrinks/bounds KV cache's memory and HBM-bandwidth cost during decoding",
+        "GQA/MQA: fewer KV heads than query heads — biggest lever (~8x cut)",
+        "Quantize cached K/V to int8/fp8 for cheap, retrain-free savings",
+        "PagedAttention: block-based cache + copy-on-write sharing of shared prefixes",
+        "Sliding-window/attention-sink bounds cache to O(1) — test long-context recall before shipping"
+      ]
+    },
+    {
+      "id": "mqa-and-gqa",
+      "title": "MQA and GQA",
+      "order": 28,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Query heads share fewer K/V heads to shrink the KV cache",
+        "MQA: all query heads share a single K/V head (max compression)",
+        "GQA: query heads split into g groups, each sharing one K/V head",
+        "Dial g: g=1 recovers MQA, g=h recovers MHA; Llama2/3, Mistral use g=8",
+        "Gotcha: saves KV-cache bandwidth only — QK^T/softmax·V FLOPs barely change"
+      ]
+    }
+  ]
+}

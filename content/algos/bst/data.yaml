@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: bst
+fam: trees
+label: BST
+order: 13
+trigger: anything with 'BST' — kth, validate, range
+insight: in-order traversal of a BST is SORTED; validate by passing (low,high) bounds down, not neighbor checks
+probs:
+- {n: Search in a BST, slug: search-in-a-binary-search-tree, d: E}
+- {n: Kth Smallest in a BST, slug: kth-smallest-element-in-a-bst, d: M}
+- {n: Maximum Sum BST in Binary Tree, slug: maximum-sum-bst-in-binary-tree, d: H}

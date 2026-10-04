@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: twoptr
+fam: arrays
+label: Two Pointers
+order: 0
+trigger: sorted array, pair/triple to target, palindrome, container
+insight: sort, fix one index, converge from both ends; skip duplicates or you double-count
+probs:
+- {n: Valid Palindrome, slug: valid-palindrome, d: E}
+- {n: 3Sum, slug: 3sum, d: M}
+- {n: Trapping Rain Water, slug: trapping-rain-water, d: H}

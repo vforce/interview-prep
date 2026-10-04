@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: bfsstate
+fam: hard
+label: BFS on State Space
+order: 38
+trigger: shortest steps where nodes aren't given — you generate them
+insight: states are nodes, legal moves are edges; plain BFS for unit cost, 0-1 BFS with a deque for 0/1 edges
+probs:
+- {n: Open the Lock, slug: open-the-lock, d: M}
+- {n: Word Ladder, slug: word-ladder, d: H}
+- {n: Bus Routes, slug: bus-routes, d: H}

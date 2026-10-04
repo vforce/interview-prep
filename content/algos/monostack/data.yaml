@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: monostack
+fam: stackheap
+label: Monotonic Stack
+order: 6
+trigger: next greater/smaller element, spans
+insight: stack of indices; while current breaks the monotonic order, pop and resolve the popped one
+probs:
+- {n: Next Greater Element I, slug: next-greater-element-i, d: E}
+- {n: Daily Temperatures, slug: daily-temperatures, d: M}
+- {n: Online Stock Span, slug: online-stock-span, d: M}

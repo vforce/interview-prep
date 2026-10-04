@@ -1,0 +1,34 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: t-causal
+type: concept
+area: Transformer Block
+order: 13
+front: Encoder-only vs decoder-only vs encoder-decoder?
+back: |-
+  Encoder-only (BERT): bidirectional attention — understanding, embeddings, classification.
+  Decoder-only (GPT, Llama): causal mask, autoregressive generation — most LLMs.
+  Encoder-decoder (T5): seq2seq like translation/summarisation.
+
+  A causal mask means a token may attend only to itself and earlier tokens.
+more: |-
+  The difference is entirely the **attention mask**.
+
+  ## Causal mask, 4 tokens (−∞ above diagonal)
+  ```
+        k1   k2   k3   k4
+  q1 [  0   -∞   -∞   -∞ ]
+  q2 [  0    0   -∞   -∞ ]
+  q3 [  0    0    0   -∞ ]
+  q4 [  0    0    0    0 ]
+  ```
+  After softmax the −∞ entries → 0, so q2 attends to {k1,k2} only — no peeking ahead. This lets one forward pass produce a next-token loss at **every** position in parallel.
+
+  ## The three families
+  | Type | Mask | Example | Use |
+  |---|---|---|---|
+  | Encoder | none (bi-dir) | BERT | embeddings, classify |
+  | Decoder | causal | GPT, Llama | generation (most LLMs) |
+  | Enc-Dec | bi + causal + cross-attn | T5 | seq2seq, translation |
+
+  **Gotcha:** BERT sees the whole sentence both ways (great for understanding) but **can't generate** autoregressively. Decoder-only won at scale: a single stack, clean parallel training, and emergent in-context learning. Cross-attention (decoder queries ⨯ encoder keys) is the only piece unique to enc-dec.

@@ -1,0 +1,18 @@
+{
+  "what-is-mcp": { "requires": [] },
+  "host-client-and-server": { "requires": ["what-is-mcp"] },
+  "data-and-transport-layers": { "requires": ["host-client-and-server"] },
+  "json-rpc-2-0-messaging": { "requires": ["data-and-transport-layers"] },
+  "lifecycle-and-capability-negotiation": { "requires": ["json-rpc-2-0-messaging"] },
+  "tools": { "requires": ["lifecycle-and-capability-negotiation"] },
+  "resources": { "requires": ["lifecycle-and-capability-negotiation"] },
+  "prompts": { "requires": ["lifecycle-and-capability-negotiation"] },
+  "sampling": { "requires": ["tools"] },
+  "elicitation": { "requires": ["sampling"] },
+  "roots-and-logging": { "requires": ["lifecycle-and-capability-negotiation"] },
+  "transports-stdio-vs-streamable-http": { "requires": ["data-and-transport-layers"] },
+  "notifications": { "requires": ["lifecycle-and-capability-negotiation"] },
+  "security-and-authorization": { "requires": ["transports-stdio-vs-streamable-http"] },
+  "mcp-vs-alternatives": { "requires": ["tools", "security-and-authorization"] },
+  "building-an-mcp-server": { "requires": ["tools", "resources", "prompts", "transports-stdio-vs-streamable-http"] }
+}

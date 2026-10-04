@@ -1,0 +1,101 @@
+{
+  "id": "l1-and-l2-regularization",
+  "title": "L1 and L2 Regularization",
+  "definition": "L1 (Lasso) and L2 (Ridge) regularization each add a penalty term to a model's loss function — the sum of absolute weights for L1, the sum of squared weights for L2 — that shrinks coefficients toward zero, trading a controlled increase in bias for a reduction in variance to curb overfitting.",
+  "summary": "Both techniques constrain coefficient magnitude to keep a linear model from fitting noise, but they shrink differently: L2 shrinks all coefficients smoothly toward zero, while L1's sharp penalty at zero drives many coefficients to exactly zero, performing implicit feature selection. In production this distinction drives the choice between them — L1/Elastic Net for high-dimensional, sparse, or interpretable models; L2 for stable predictions under correlated features.",
+  "objectives": [
+    "Explain what penalty term L1 and L2 add to a loss function, and why both trade bias for reduced variance.",
+    "Show why L1 produces exact sparsity while L2 only shrinks coefficients proportionally, using the geometric and soft-thresholding arguments.",
+    "State Ridge's closed-form solution and why Lasso has none in general.",
+    "Pick L1, L2, or Elastic Net for a given production constraint (feature selection, correlated features, model size/latency).",
+    "Avoid the standardization and intercept-penalization pitfalls when implementing regularized regression."
+  ],
+  "lesson": "Every regularized loss has the shape:\n```\nloss(w) = data_fit(w) + λ · penalty(w)\n```\nThe data-fit term (e.g. squared error) wants coefficients that match the training data as closely as possible; the penalty term pulls coefficients toward zero. λ is the bias-variance knob: λ=0 recovers unregularized OLS (low bias, high variance — prone to overfitting, especially with many/correlated features or n≈p); λ→∞ forces w→0 (high bias, an intercept-only model).\n\nThe two penalties differ in shape, and shape determines behavior:\n\n**L2 (Ridge)** — `penalty = Σ w_j²`. Smooth and differentiable everywhere; its gradient is proportional to w_j, so shrinkage is proportional — a coefficient lands on exactly zero only if it already was. Ridge has a closed form:\n```\nw_ridge = (XᵀX + λI)⁻¹ Xᵀy\n```\nthe OLS normal equation with λI added to the diagonal, which also fixes the numerical instability of inverting a near-singular XᵀX under multicollinearity (hence \"Tikhonov regularization\").\n\n**L1 (Lasso)** — `penalty = Σ |w_j|`. Not differentiable at zero: its subgradient has constant magnitude λ near zero regardless of how small w_j is, so it can push a coefficient exactly to zero and hold it there. No general closed form; solved by coordinate descent (as in glmnet/scikit-learn), computing a full regularization path with warm starts.\n\n**Geometric intuition:** minimizing squared error subject to a budget on the penalty, L2's budget region is a ball; L1's is a diamond (cross-polytope) with corners sitting on the coordinate axes. Elliptical error contours are far more likely to first touch the diamond at a corner — where one or more coordinates are exactly zero — than to touch the ball's smooth surface at an axis-aligned point. That's the entire mechanism behind Lasso's sparsity — geometry, not magic.\n\n**Key gotcha:** the penalty is a function of raw coefficient magnitude, so it's scale-sensitive — always standardize features before fitting, or a feature measured in millions gets crushed while one measured in decimals sails through untouched. And never penalize the bias/intercept term, only the weights.",
+  "examples": "### Example 1 — the shrinkage arithmetic (orthonormal features)\n\nWhen features are standardized and mutually uncorrelated (XᵀX = I), both solutions reduce to a simple closed form relative to the unregularized OLS estimate, which makes the contrast concrete. Take λ = 2 and three OLS coefficients: 3.0, 1.5, 0.5.\n\n```\nRidge (proportional shrinkage):  w_ridge = w_OLS / (1 + λ)\n  3.0 / 3 = 1.00\n  1.5 / 3 = 0.50\n  0.5 / 3 = 0.17\n\nLasso (soft-thresholding):  w_lasso = sign(w_OLS) · max(|w_OLS| − λ, 0)\n  max(3.0 − 2, 0) = 1.00\n  max(1.5 − 2, 0) = 0     <- zeroed out\n  max(0.5 − 2, 0) = 0     <- zeroed out\n```\nAll three Ridge coefficients survive, just smaller. Lasso eliminates two of three entirely — sparsity, not just \"small numbers.\"\n\n### Example 2 — sklearn on informative vs. noise features\n\n```python\nimport numpy as np\nfrom sklearn.linear_model import Ridge, Lasso\nfrom sklearn.preprocessing import StandardScaler\n\n# 3 informative features, 7 pure-noise features\nX = np.random.randn(200, 10)\ntrue_w = np.array([3, -2, 1] + [0] * 7)\ny = X @ true_w + np.random.randn(200) * 0.5\n\nX = StandardScaler().fit_transform(X)  # regularization is scale-sensitive\n\nridge = Ridge(alpha=1.0).fit(X, y)\nlasso = Lasso(alpha=0.1).fit(X, y)\n\n# Typical pattern:\n#   ridge.coef_ -> all 10 entries nonzero; noise features shrunk small but present\n#   lasso.coef_ -> noise feature entries driven to exactly 0.0\n```",
+  "tradeoffs": "Use **L2** when most features plausibly matter and you need stability under multicollinearity — it never fully discards a feature, making it a safer default when an unexpectedly-dropped feature would be costly. Use **L1** when you need automatic feature selection, a compact model for low-latency serving, or coefficient-level interpretability — common in high-dimensional sparse settings like click-through or text features. L1's weak spot: given a group of correlated features it tends to arbitrarily keep one and zero the rest, so the selected set can be unstable across retrains. **Elastic Net** hedges this by mixing both penalties:\n```\npenalty = λ · [ r · Σ|w_j| + (1 − r)/2 · Σw_j² ]\n```\n(exact scaling constants vary slightly by library) — it keeps Lasso's sparsity while grouping correlated features together like Ridge, at the cost of tuning a second hyperparameter r. All three add a real production cost: hyperparameter search over λ (and r) via cross-validation, which is cheap per fit but adds pipeline complexity and retraining time at scale.",
+  "diagnosticQuiz": [
+    {
+      "q": "What best describes the fundamental difference between how L1 and L2 penalties affect a linear model's learned coefficients?",
+      "choices": [
+        "L2 performs feature selection by removing irrelevant features from the design matrix before fitting",
+        "L1 and L2 both produce identical solutions once the regularization strength λ is tuned correctly",
+        "L1 shrinks all coefficients smoothly toward zero but rarely makes any exactly zero; L2 frequently sets coefficients to exactly zero",
+        "L2 shrinks coefficients proportionally toward zero; L1 can drive coefficients to exactly zero, producing sparse solutions"
+      ],
+      "answer": 3,
+      "explanation": "L2's penalty (Σw²) is smooth, and its gradient shrinks a coefficient in proportion to its current value, so it approaches zero asymptotically but rarely lands exactly on it. L1's penalty (Σ|w|) has a constant-magnitude subgradient near zero, which lets optimization push a coefficient all the way to exactly zero and hold it there — the mechanism behind Lasso's feature selection. Option A swaps these two behaviors, a common mix-up when the two penalties are memorized by name rather than by how their gradients actually behave near zero."
+    },
+    {
+      "q": "A ridge-regularized model has weights w = [4, -3, 0] and λ = 0.5. What is the value of the L2 penalty term λΣw_j² added to the loss?",
+      "choices": [
+        "12.5",
+        "7.0",
+        "3.5",
+        "25.0"
+      ],
+      "answer": 0,
+      "explanation": "Σw_j² = 4² + (−3)² + 0² = 25, and multiplying by λ = 0.5 gives 12.5. Option D (25.0) is the unweighted sum of squares — the common slip is computing Σw_j² correctly but then forgetting to multiply by λ before adding it to the loss."
+    },
+    {
+      "q": "Why does the L1 penalty's constraint region (a diamond/cross-polytope) tend to produce sparse solutions, while the L2 penalty's constraint region (a ball) does not?",
+      "choices": [
+        "L1 optimization always converges to a local minimum, while L2 optimization finds the global minimum",
+        "The diamond has a larger volume than the ball for the same λ, so it excludes more of the coefficient space",
+        "The diamond has corners lying exactly on the coordinate axes, and the loss function's elliptical contours are disproportionately likely to first touch the constraint region at one of those corners",
+        "The ball shape forces every coefficient to shrink by exactly the same amount, while the diamond allows unequal shrinkage"
+      ],
+      "answer": 2,
+      "explanation": "The L1 ball has flat faces meeting at corners that sit on the coordinate axes (where one or more weights equal exactly zero); smooth quadratic error contours are disproportionately likely to first touch the boundary right at one of those corners, which is what produces exact zeros. The L2 ball has no corners anywhere, so contact almost always happens at a point with every coordinate nonzero. Option D is the tempting misconception — L2 doesn't uniformly shrink every coefficient by the same amount in general (the amount depends on the feature correlation/scale structure); it's the ball's *smoothness*, not *uniformity*, that rules out exact zeros."
+    },
+    {
+      "q": "You're building a click-through-rate model with 50,000 sparse categorical features (one-hot encoded), most of which are uninformative, and the model must be small enough to serve with low latency. Which regularization approach best fits this production constraint?",
+      "choices": [
+        "No regularization, because with 50,000 features the model needs maximum flexibility to fit the data",
+        "L2 (Ridge), because it is the only method with a closed-form solution",
+        "L2 (Ridge), because it guarantees the lowest possible test error regardless of feature count",
+        "L1 (Lasso) or Elastic Net with a high L1 ratio, because driving most coefficients to exactly zero shrinks the model to only the informative features"
+      ],
+      "answer": 3,
+      "explanation": "Sparsity is exactly the property that shrinks serving-time model size and inference cost — a Lasso/Elastic-Net model with mostly-zero coefficients only needs to store and multiply its nonzero entries. Option A reflects a common production mix-up: Ridge's closed-form solution makes *training* fast, but that's irrelevant to *serving-time* footprint, since Ridge never actually removes a feature. (Option D compounds the same error by treating Ridge as universally optimal, which no regularizer is.)"
+    },
+    {
+      "q": "Which of the following is a common mistake when implementing L1/L2-regularized linear regression in practice?",
+      "choices": [
+        "Excluding the intercept/bias term from the penalty term",
+        "Selecting λ via cross-validation on a held-out set",
+        "Applying the penalty to raw, unscaled features that span very different numeric ranges",
+        "Standardizing all features to zero mean and unit variance before fitting"
+      ],
+      "answer": 2,
+      "explanation": "Because the penalty is a function of raw coefficient magnitude, features on wildly different scales get inconsistently regularized — a feature measured in the thousands needs only a tiny coefficient to matter, so its already-small coefficient is unfairly shrunk relative to a feature measured in single digits. The other three are standard best practice, not mistakes. The tempting one to second-guess is excluding the bias from the penalty — it can look inconsistent, but penalizing it would just bias every prediction toward zero regardless of feature values, which has nothing to do with controlling overfitting from the features."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Why does L1 regularization produce sparse models while L2 doesn't, and why does that matter in production?",
+      "a": "L1's penalty (Σ|w|) has a constant-magnitude subgradient at zero, so the optimizer can push a coefficient exactly to zero and it stays there; L2's penalty (Σw²) has a gradient proportional to the coefficient itself, so it shrinks toward zero but the gradient vanishes as w→0, settling near-but-not-at zero. Geometrically, L1's constraint region is a diamond with corners on the axes, and loss contours are likely to touch a corner first, zeroing one or more coordinates. In production this matters directly: a sparse (L1) model has fewer live features to store, monitor, validate, and serve at inference time — smaller memory footprint, faster feature lookups, less feature-pipeline maintenance — often more valuable than a marginal accuracy gain from a dense Ridge model."
+    },
+    {
+      "q": "Your Lasso-based feature-selection model selects a noticeably different subset of \"important\" features every time you retrain on a new weekly data batch, even though overall validation accuracy barely moves. What's going on, and how would you address it in production?",
+      "a": "Classic symptom of correlated features under L1 — when two or more features are highly correlated, Lasso's optimum among them isn't unique; it arbitrarily picks one and zeros the rest, and which one it picks is sensitive to noise in each new batch. Accuracy is stable because the correlated features carry redundant signal, but the coefficient-sparsity pattern isn't a stable \"importance\" signal here. Fixes: switch to Elastic Net (the reintroduced L2 term groups correlated features and shrinks them together instead of arbitrarily choosing one), or run stability selection (bootstrap the fit and only trust features selected consistently across resamples) if the selected-feature set itself is shipped downstream — e.g., to a feature store or an explainability report."
+    },
+    {
+      "q": "How would you choose between L1, L2, and Elastic Net for a new production linear model, and how would you pick λ?",
+      "a": "Start from the constraint that matters most: need automatic feature selection or a small sparse model for low-latency serving → lean L1; need stability with correlated/multicollinear features and can't risk dropping a feature that matters → lean L2; want both sparsity and grouping of correlated features → Elastic Net, tuning its extra mixing ratio. Pick λ (and the L1 ratio, if Elastic Net) via cross-validation over a log-spaced grid, tracking the validation-error curve — the \"1-standard-error rule\" (pick the largest λ within one SE of the minimum validation error) is a common heuristic to prefer the simpler/smaller model when performance is statistically indistinguishable. Libraries like glmnet/scikit-learn compute the whole regularization path efficiently via coordinate descent with warm starts, so this search stays cheap even at scale."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "bias-variance-tradeoff",
+    "linear-regression",
+    "neural-network-regularization"
+  ],
+  "followUps": [
+    "neural-network-regularization"
+  ],
+  "metadata": {
+    "inputHash": "c32faab24b9796da",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T10:13:26Z"
+  }
+}

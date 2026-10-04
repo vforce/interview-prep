@@ -1,0 +1,15 @@
+# Deck-level config for the 'LLM' module. Cards live in <concept-id>/data.yaml.
+
+key: llm-srs-v1
+tab: LLM
+title: LLM
+eyebrow: Large Language Models · spaced repetition
+order: 2
+areas:
+- Tokenization & Embeddings
+- Training & Alignment
+- Decoding & Reliability
+- Attention Mechanics
+- Transformer Block
+- Inference & KV Cache
+- Adaptation & Retrieval

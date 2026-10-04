@@ -1,0 +1,97 @@
+{
+  "id": "quantization-and-qlora",
+  "title": "Quantization and QLoRA",
+  "definition": "Quantization stores a model's weights (and sometimes activations) in fewer bits than the FP32/FP16 used during training — e.g. INT8, INT4, or QLoRA's 4-bit NormalFloat (NF4) — to cut memory and compute; QLoRA fine-tunes on top of a frozen 4-bit-quantized base model by training only small full-precision LoRA adapters, so no gradient ever needs to flow through the quantized weights.",
+  "summary": "Quantization trades a small, usually-tolerable loss of numerical precision for large memory/compute savings by representing weights with fewer bits. QLoRA applies this to fine-tuning: freeze a 4-bit-quantized base model and train lightweight LoRA adapters on top, so the frozen weights never need gradients or optimizer state at all. This is what let the original QLoRA paper fine-tune a 65B-parameter model on a single 48GB GPU while matching full 16-bit fine-tuning quality.",
+  "objectives": [
+    "Explain affine/symmetric quantization (scale, round-to-nearest) and derive its error bound.",
+    "Describe QLoRA's mechanism — 4-bit NF4 frozen base + bf16 LoRA adapters — and why no straight-through estimator is needed.",
+    "Estimate memory footprint of full fine-tune vs. LoRA vs. QLoRA for a given parameter count in a capacity-planning conversation.",
+    "Distinguish inference-time PTQ (GPTQ/AWQ) from QLoRA (a fine-tuning technique) and pick the right one for a given ask.",
+    "Recognize the outlier-feature failure mode in large-model quantization and how blockwise/double quantization mitigates it."
+  ],
+  "lesson": "Quantization exploits the fact that trained weights don't need 32 bits to be useful — most information is in relative magnitude, not the low mantissa bits. The standard scheme is affine/symmetric: pick `scale = max(|W|) / (2^(b-1)-1)` for a b-bit signed integer, then `q = round(W/scale)`, and reconstruct `W' ≈ q * scale`. Per-element error is bounded by `scale/2`, so the whole game is minimizing scale — via finer granularity (per-channel or per-block scales instead of one scale per tensor) or a better-matched data type.\n\nQLoRA (Dettmers et al., 2023) applies this to *fine-tuning*, not just inference. The base model is quantized once to 4-bit **NF4** (NormalFloat4 — quantile bins fit to a standard normal, since weights are roughly Gaussian, so it wastes less range than plain int4) and frozen. Small trainable **LoRA adapters** (rank r, in bf16) are added to the linear projections. Forward pass: dequantize the frozen weights to bf16 on the fly per layer, compute `Wx + BAx`, discard the dequantized copy. Backward pass: gradients only flow into `A`/`B` — never into the frozen base.\n\nThe key gotcha: this only works because *gradients never need to touch the quantized weights*. Standard quantization-aware training (QAT) has to backprop through the non-differentiable `round()`, which is why it needs a straight-through estimator. QLoRA sidesteps that entirely by freezing the quantized part — there's simply no gradient to compute there.\n\nA second gotcha: naive per-tensor int8 quantization on LLMs can blow up because of *outlier features* — specific activation channels that develop very large magnitudes once models cross roughly 6–7B parameters (the LLM.int8() finding). A single per-tensor scale gets dominated by those outliers, wrecking precision everywhere else. QLoRA avoids this by quantizing at fine granularity (blockwise, 64 values/block) and by \"double quantizing\" — quantizing the block scale factors themselves, saving roughly another 0.4 bits/parameter (~3GB on a 65B model) — rather than by decomposing outliers at inference time.",
+  "examples": "**1. Manual quantize/dequantize round-trip (ties the error bound to numbers):**\n\n```python\nimport numpy as np\n\nw = np.array([-1.27, 0.633, 0.021, 0.999], dtype=np.float32)\n\nscale = np.abs(w).max() / 127          # symmetric int8: 1.27 / 127 = 0.01\nq = np.round(w / scale).astype(np.int8)\nw_hat = q.astype(np.float32) * scale\n\nprint(scale)                    # 0.01\nprint(q)                        # [-127   63    2  100]\nprint(w_hat)                    # [-1.27  0.63  0.02  1.  ]\nprint(np.abs(w - w_hat).max())  # 0.003  (<= scale/2 = 0.005, as predicted)\n```\n\n**2. Production QLoRA setup (bitsandbytes + PEFT), matching the lesson's mechanics:**\n\n```python\nimport torch\nfrom transformers import AutoModelForCausalLM, BitsAndBytesConfig\nfrom peft import LoraConfig, get_peft_model\n\nbnb_config = BitsAndBytesConfig(\n    load_in_4bit=True,\n    bnb_4bit_quant_type=\"nf4\",             # NormalFloat4, not plain int4\n    bnb_4bit_use_double_quant=True,        # quantize the quantization constants too\n    bnb_4bit_compute_dtype=torch.bfloat16, # dequantize to bf16 for the actual matmuls\n)\n\nmodel = AutoModelForCausalLM.from_pretrained(\n    \"meta-llama/Llama-2-7b-hf\", quantization_config=bnb_config, device_map=\"auto\"\n)\n\nlora_config = LoraConfig(\n    r=16, lora_alpha=32, lora_dropout=0.05,\n    target_modules=[\"q_proj\", \"k_proj\", \"v_proj\", \"o_proj\"],\n    task_type=\"CAUSAL_LM\",\n)\nmodel = get_peft_model(model, lora_config)\nmodel.print_trainable_parameters()\n# trainable params are a small fraction of the 7B base (well under 1%) — everything\n# else stays frozen 4-bit and never gets a gradient or optimizer state.\n```\n\nRough capacity math this predicts: full fine-tune with mixed-precision Adam costs ~16 bytes/param (fp16 weight+grad, fp32 master weight + 2 Adam moments), so a 7B model needs ~112GB just for weights+optimizer. QLoRA's frozen 4-bit base is ~0.5 bytes/param (~3.5GB for 7B) plus optimizer state only on the tiny adapters — which is the same arithmetic behind the paper's headline result: a 65B model fine-tuned on a single 48GB GPU, and a 33B model on 24GB, both matching full 16-bit fine-tuning quality (the Guanaco models).",
+  "tradeoffs": "Use post-training quantization (GPTQ, AWQ, or plain bitsandbytes int8/int4) when you only need to *serve* a model faster/cheaper with no further training planned — it's simpler and tuned for inference kernels. Use QLoRA when you need to fine-tune a large model on limited hardware and can accept adapter-only capacity: it gets close to full fine-tuning quality in the paper's benchmarks at a fraction of the memory, but pays a dequantization tax on every forward/backward pass (slower per step than plain fp16 LoRA) and inherits LoRA's ceiling — tasks needing to rewrite most of the network's knowledge may still favor full fine-tuning. Avoid pushing below 4-bit without specialized methods — accuracy typically falls off a cliff; avoid naive per-tensor quantization on multi-billion-parameter models without outlier/blockwise handling; and don't reach for QLoRA when there's no training step at all — that's a plain PTQ problem.",
+  "diagnosticQuiz": [
+    {
+      "q": "What best defines NF4 (NormalFloat4), the data type QLoRA uses for its frozen base weights?",
+      "choices": [
+        "A 4-bit format that only quantizes activations, not weights",
+        "A 4-bit data type whose quantization bins are the quantiles of a standard normal distribution, matching the typical distribution of neural net weights",
+        "A floating-point format with 4 exponent bits and 0 mantissa bits",
+        "A 4-bit integer format with uniform spacing between quantization levels"
+      ],
+      "answer": 1,
+      "explanation": "NF4's bins are placed at quantiles of N(0,1), which is information-theoretically well-matched to the roughly Gaussian distribution of trained weights — unlike uniform int4, which wastes precision at the sparse tails and over-allocates near zero relative to where the data actually is. The uniform-int4 answer is the common misconception: people assume \"4-bit\" automatically means plain uniform integer quantization."
+    },
+    {
+      "q": "A weight tensor has max absolute value 1.27 and is quantized to signed int8 (range -127..127) using symmetric quantization. What are the scale factor and the maximum possible round-to-nearest error?",
+      "choices": [
+        "scale=0.01, max error=0.01",
+        "scale=127, max error=63.5",
+        "scale=0.1, max error=0.05",
+        "scale=0.01, max error=0.005"
+      ],
+      "answer": 3,
+      "explanation": "scale = max|w| / 127 = 1.27 / 127 = 0.01. Round-to-nearest quantization error is at most half a step, so max error = scale/2 = 0.005. The third option is the common off-by-2 mistake — using the full step size instead of the half-step bound for rounding error."
+    },
+    {
+      "q": "Why can QLoRA fine-tune through a 4-bit frozen base without needing a straight-through estimator (STE), unlike standard quantization-aware training (QAT)?",
+      "choices": [
+        "Because 4-bit values are secretly stored as fp16 during backprop",
+        "Because gradients never need to flow into the frozen quantized base weights — only into the small full-precision LoRA adapters — so the non-differentiable rounding step is never part of the backward graph",
+        "Because NF4 quantization is differentiable, unlike int4",
+        "Because QLoRA replaces backpropagation with gradient checkpointing"
+      ],
+      "answer": 1,
+      "explanation": "STE exists in QAT because you need a gradient signal *for* the quantized weights so they can update through the non-differentiable `round()`. QLoRA never updates the base weights at all — they're frozen — so there's no gradient needed there, sidestepping the problem entirely rather than solving it. The \"NF4 is differentiable\" option is the misconception: no rounding-based quantization is truly differentiable; QLoRA just never needs to differentiate through it."
+    },
+    {
+      "q": "You need to serve a 70B model for inference only, at the lowest cost, with no further training planned. What's the most appropriate approach?",
+      "choices": [
+        "Full-precision fp32 serving for maximum accuracy",
+        "Quantization-aware training from scratch",
+        "QLoRA fine-tuning to shrink the model",
+        "Post-training weight-only quantization (e.g., GPTQ/AWQ to 4-bit), with no LoRA adapters involved"
+      ],
+      "answer": 3,
+      "explanation": "QLoRA's adapters exist to make *training* cheap; for pure inference you want a dedicated PTQ method tuned for serving latency/throughput, not LoRA machinery you'll never use. Reaching for QLoRA here is the trap — it's a fine-tuning technique, not an inference format, and adds complexity for zero benefit when no training is planned."
+    },
+    {
+      "q": "A team quantizes an LLM's weights and activations to int8 per-tensor for a 30B+ model and sees a large accuracy cliff that didn't appear at 6B. What's the most likely cause?",
+      "choices": [
+        "int8 has too few bits to represent 30B+ parameters at all",
+        "PyTorch doesn't support int8 tensors above 6B parameters",
+        "The model's weights stopped being normally distributed",
+        "Systematic outlier feature dimensions in activations emerge at scale (~6-7B+ params) and dominate a per-tensor scale, as identified by the LLM.int8() analysis"
+      ],
+      "answer": 3,
+      "explanation": "LLM.int8()'s key finding is that specific activation channels develop very large magnitudes once models cross roughly 6-7B parameters, and a single per-tensor scale gets dominated by those outliers, wrecking precision for everything else. The \"weights stopped being normal\" option is the plausible-but-wrong distractor — it's activations, not weights, that develop the outlier structure; bit-capacity and framework support are non-issues."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Your team wants to fine-tune a 70B model on a single 80GB A100. Walk me through why full fine-tuning won't fit and how QLoRA changes the math.",
+      "a": "Full fine-tuning with mixed-precision Adam costs roughly 16 bytes/param — fp16 weights (2B) + fp16 gradients (2B) + fp32 master weights (4B) + two fp32 Adam moments (8B) — so 70B params ≈ 1.1TB, nowhere close to 80GB even before activations. QLoRA freezes the base in 4-bit NF4 (~0.5 byte/param ≈ 35GB) plus double quantization shaving off a bit more, and only maintains Adam state for the tiny LoRA adapters (often well under 1% of total params) — this is the arithmetic behind the paper's real result of fitting a 65B fine-tune on a single 48GB GPU. I'd flag the trade-off up front: forward/backward is slower per step than fp16 LoRA due to on-the-fly dequantization, and quality is capped by the adapters' rank/capacity, not full-parameter updates."
+    },
+    {
+      "q": "Your inference service needs to cut GPU memory in half for a served 13B model, with no retraining budget. Would you reach for QLoRA?",
+      "a": "No. QLoRA is a training-time technique — there's no adapter to add when there's no fine-tuning step. I'd quantize the already-trained checkpoint directly with a PTQ method built for inference (GPTQ or AWQ, or bitsandbytes int8/int4), which is simpler and tuned for serving throughput/latency rather than gradient flow. Conflating \"quantization\" in general with \"QLoRA specifically\" is a common mix-up worth calling out explicitly."
+    },
+    {
+      "q": "A junior engineer proposes quantizing a model to int2 to save even more memory. What do you tell them?",
+      "a": "I'd push back — below 4-bit, quantization error typically overwhelms the signal for general weight-only PTQ; NF4/int4 is close to the practical floor without specialized techniques (QAT, outlier-aware schemes), and even those show fragile, diminishing returns. I'd also ask what the actual constraint is first: often better batching, KV-cache quantization, or a smaller/distilled model solves the real problem more reliably than squeezing weight precision further, and any quantization change needs accuracy measured on the target eval before shipping — degradation is very task- and model-dependent."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "pretraining"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "48967bfacb274cb9",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T14:44:13Z"
+  }
+}

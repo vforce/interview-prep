@@ -1,0 +1,97 @@
+{
+  "id": "scaling-laws",
+  "title": "Scaling Laws",
+  "definition": "Scaling laws are empirical power-law relationships between a language model's pretraining loss and its parameter count (N), training tokens (D), and training compute (C), letting engineers predict the loss of a large run from small, cheap experiments.",
+  "summary": "Scaling laws answer the core resource-allocation question for pretraining: given a fixed compute budget, how should it be split between model size and data? Kaplan et al. (2020) originally found model size should grow much faster than data, but Chinchilla (Hoffmann et al., 2022) corrected this with better-controlled experiments, showing N and D should scale roughly equally — about 20 tokens per parameter at the optimum. In production, though, this training-compute-optimal point often isn't the right target once you account for the cost of serving the model at scale.",
+  "objectives": [
+    "Write the scaling-law loss formula `L(N, D) = E + A/N^α + B/D^β` and explain what each term captures.",
+    "Derive a compute-optimal (N, D) split from a FLOPs budget using `C ≈ 6ND` and the ~20-tokens-per-parameter Chinchilla ratio.",
+    "Explain why Chinchilla (2022) revised Kaplan et al.'s (2020) conclusion about how model size should scale relative to data.",
+    "Distinguish training-compute-optimal scaling from inference-optimal scaling, and know when to deliberately deviate from the Chinchilla ratio.",
+    "Judge how far a fitted scaling curve can be safely extrapolated before trusting it blindly."
+  ],
+  "lesson": "Scaling laws are the empirical finding that a transformer's pretraining loss falls off as a smooth power law in the three things you control: parameter count N, training tokens D, and compute C. In log-log space these curves are straight lines across many orders of magnitude — which is the entire point: you can run a grid of small, cheap models, fit the curve, and forecast the loss of a run 10,000x more expensive before committing the budget.\n\nThe standard form (Hoffmann et al., 2022, \"Chinchilla\"):\n\n```\nL(N, D) = E + A/N^α + B/D^β\n  E      = irreducible entropy of natural text (loss floor at infinite scale)\n  A/N^α  = error from finite model capacity\n  B/D^β  = error from finite data\n```\n\nFit `E, A, B, α, β` from a family of runs and you have a calculator for loss at any (N, D).\n\nThe practically important question this answers is allocation: given a fixed compute budget C, how do you split it between N and D to minimize loss? Training compute is well-approximated as `C ≈ 6ND` (2 FLOPs/param/token forward, ~3x more for the backward pass). Kaplan et al. (2020) originally concluded you should scale N much faster than D — train huge models on comparatively little data. Chinchilla revisited this with learning-rate schedules properly matched to each run's token budget (which Kaplan's sweep hadn't done) and found the opposite: N and D should scale at roughly the same rate, about 20 tokens per parameter at the optimum. That single correction is why GPT-3 (175B params / 300B tokens ≈ 1.7 tok/param) is now considered badly undertrained, while Chinchilla (70B / 1.4T tokens ≈ 20 tok/param) beat it using the same training compute with 4x fewer parameters.\n\nThe gotcha for production: Chinchilla-optimal minimizes loss for a fixed *training* compute budget — it says nothing about inference. You train a model once but may serve it billions of times; total lifetime cost is train cost + inference_cost × volume. If you'll serve at high volume, you often want to deliberately over-train a smaller model well past 20 tok/param, trading training-compute efficiency for a permanently cheaper, faster model to run — which is exactly what LLaMA did on purpose.",
+  "examples": "### Example 1 — compute-optimal split from a FLOPs budget\n\n```python\ndef compute_optimal(C, tokens_per_param=20):\n    \"\"\"C ≈ 6*N*D (FLOPs); Chinchilla ratio D ≈ tokens_per_param * N.\"\"\"\n    N = (C / (6 * tokens_per_param)) ** 0.5\n    D = tokens_per_param * N\n    return N, D\n\nN, D = compute_optimal(1.2e24)\nprint(f\"N ≈ {N:.2e} params, D ≈ {D:.2e} tokens\")\n# N ≈ 1.00e+11 params, D ≈ 2.00e+12 tokens  (~100B params, ~2T tokens)\n```\n\n### Example 2 — real models against the ~20 tok/param ratio\n\n| Model | Params | Tokens | Tokens/Param | Relative to Chinchilla-optimal (~20) |\n|---|---|---|---|---|\n| GPT-3 | 175B | 300B | ~1.7 | badly undertrained |\n| Gopher | 280B | 300B | ~1.1 | badly undertrained |\n| Chinchilla | 70B | 1.4T | ~20 | compute-optimal (by construction) |\n| LLaMA-7B | 7B | 1T | ~143 | deliberately over-trained for cheap inference |\n\nGopher and Chinchilla used roughly the same training compute — Chinchilla just repointed it from parameters to tokens and won. LLaMA goes further in the other direction on purpose: far more tokens per parameter than training-compute-optimal, because a 7B model is what you can afford to run at massive inference volume.",
+  "tradeoffs": "Use scaling laws to plan an expensive run before committing to it: fit a curve from small proxy models, extrapolate, and sanity-check with one intermediate-scale run. Trust the fit near the measured range; be skeptical extrapolating several orders of magnitude beyond it — data exhaustion, tokenizer changes, and architecture tweaks can all break a curve that looked clean at small scale. And remember Chinchilla-optimal answers \"how do I minimize loss for a fixed training budget,\" not \"how do I minimize total cost\" — for a model served at high volume, shifting toward more tokens per parameter than 20 is often the better production tradeoff, even though it's \"wasteful\" by training-compute-optimal accounting.",
+  "diagnosticQuiz": [
+    {
+      "q": "What do neural scaling laws for language models describe?",
+      "choices": [
+        "The optimal learning rate schedule for any transformer architecture",
+        "A guarantee that larger models are always better at every task",
+        "A power-law relationship between pretraining loss and model size, dataset size, and compute",
+        "The exact downstream benchmark accuracy a model will achieve after fine-tuning"
+      ],
+      "answer": 2,
+      "explanation": "Scaling laws are empirical power-law fits of cross-entropy pretraining loss against N, D, and C — loss falls off smoothly and predictably as any of these grow. They say nothing directly about downstream/fine-tuned accuracy (A) or guarantee uniform task-level improvement (D); loss can improve smoothly while specific capabilities emerge unevenly. Option C confuses scaling laws with hyperparameter-tuning rules."
+    },
+    {
+      "q": "A team has a training compute budget of 1.2 × 10^24 FLOPs. Using C ≈ 6ND and a Chinchilla-optimal ratio of D ≈ 20N tokens per parameter, what is the approximate compute-optimal model size?",
+      "choices": [
+        "~100B parameters",
+        "~25B parameters",
+        "~400B parameters",
+        "~175B parameters"
+      ],
+      "answer": 0,
+      "explanation": "Substituting D=20N into C=6ND gives C=120N², so N=√(C/120)=√(1.2×10^24/120)=√(1×10^22)=1×10^11 ≈ 100B parameters (with D≈2T tokens). The other options come from misapplying the ratio or reflexively picking a familiar model size (like GPT-3's 175B) instead of doing the algebra."
+    },
+    {
+      "q": "You fit a power-law curve to the pretraining loss of models ranging from 10M to 1B parameters. What can you legitimately conclude?",
+      "choices": [
+        "An estimate of pretraining loss and a guide for compute allocation, reliable near the fitted range but increasingly uncertain far outside it",
+        "That downstream capabilities will emerge smoothly at every scale, with no sudden jumps",
+        "The exact benchmark accuracy of a 500B-parameter model on any downstream task",
+        "That the loss curve will remain a perfect power law at any scale, forever"
+      ],
+      "answer": 0,
+      "explanation": "Power-law fits are strongest for interpolation and modest extrapolation near the measured range; extending them several orders of magnitude risks missing new effects (data limits, architecture changes) that break the fit. The tempting misconception is treating a fitted curve as a law of physics rather than an empirical regularity — pretraining loss tends to scale smoothly, but downstream task metrics built on top of it can show sharp, non-smooth \"emergent\" jumps the loss curve alone doesn't predict."
+    },
+    {
+      "q": "Your product will serve a trained model to hundreds of millions of requests per day for the next two years. How should this change your target N/D split relative to plain Chinchilla-optimal training?",
+      "choices": [
+        "Train a smaller model on more tokens than the Chinchilla ratio, accepting less training-compute efficiency for a cheaper, faster model to serve forever",
+        "Chinchilla scaling only applies to models under 10B parameters, so it's irrelevant here",
+        "Train the largest model your budget allows, regardless of token count",
+        "It shouldn't — Chinchilla-optimal always minimizes total cost"
+      ],
+      "answer": 0,
+      "explanation": "Chinchilla-optimal minimizes loss for a fixed *training* compute budget only; it ignores inference cost entirely. When lifetime inference volume is huge, total cost (train + inference×volume) is minimized by deliberately over-training a smaller model well past ~20 tokens/param, trading training efficiency for a permanently cheaper and faster model — exactly what LLaMA did. Option A is the core misconception: conflating \"compute-optimal\" with \"deployment-optimal.\""
+    },
+    {
+      "q": "Why did Chinchilla (Hoffmann et al., 2022) reach a different N/D conclusion than Kaplan et al. (2020)?",
+      "choices": [
+        "Chinchilla used a completely different, non-power-law functional form for loss",
+        "Kaplan et al.'s runs didn't match the learning-rate decay schedule to each run's token budget, biasing results toward favoring bigger models over more data; Chinchilla controlled for this",
+        "Kaplan et al.'s C ≈ 6ND compute formula was mathematically incorrect",
+        "Kaplan et al. only tested convolutional networks, not transformers"
+      ],
+      "answer": 1,
+      "explanation": "The widely-cited explanation is that Kaplan et al.'s experiments used LR schedules not properly tuned to each run's length, skewing the fitted curves toward recommending outsized models trained on comparatively little data; Chinchilla matched the LR schedule to each run's token budget and, with a broader sweep, found the ~equal N/D scaling instead. Both the compute formula (A) and the functional form (D) are essentially unchanged between the two papers — the fix was experimental control, not theory."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "You're about to commit a large fraction of your GPU budget to a single pretraining run. How would you use scaling laws to pick the model size / data split, and how much would you trust the answer?",
+      "a": "Train a family of smaller models spanning ~2 orders of magnitude in compute, fit `L(N,D) = E + A/N^α + B/D^β`, and use the Chinchilla ~20-tokens/param ratio as a strong prior via `C ≈ 6ND`. Before committing the full budget, run one intermediate-scale \"canary\" to check the prediction holds — the biggest risk isn't the math, it's confounds like an LR schedule not matched to the token budget, or a data mix that differs from what you'll actually train on at full scale."
+    },
+    {
+      "q": "A colleague says \"more parameters is always better.\" Push back using what you know about compute-optimal scaling.",
+      "a": "Not for a fixed compute budget — a bigger model trained on too little data is undertrained and loses to a smaller model trained on more tokens at the *same* compute cost. GPT-3 (175B params, 300B tokens, ~1.7 tok/param) is the textbook case: Chinchilla matched its training compute with a 70B model on 1.4T tokens (~20 tok/param) and won, using 4x fewer parameters. Compute-optimal means picking the right N *and* D for your budget, not maximizing N alone."
+    },
+    {
+      "q": "Why might you deliberately train a model \"past Chinchilla-optimal\"? Give a real example.",
+      "a": "Because Chinchilla-optimal minimizes *training* loss for a fixed training budget, not total cost of ownership. In production, total cost = train cost + inference_cost × query volume, and a model trained once is often served for years at huge scale — so a smaller, longer-trained model that's cheaper and faster to run wins even if it \"wasted\" some training compute. LLaMA-7B, trained on ~1T tokens (~143 tok/param, far beyond the ~20 tok/param optimum), is the canonical example: optimized for best performance per unit of *inference* budget, not per unit of training FLOP."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "pretraining"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "0922ddadcdea2055",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T13:48:23Z"
+  }
+}

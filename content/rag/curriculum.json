@@ -1,0 +1,120 @@
+{
+  "concepts": [
+    {
+      "id": "bm25",
+      "title": "BM25",
+      "order": 1,
+      "difficulty": "Beginner",
+      "keyPoints": [
+        "Probabilistic bag-of-words scoring: TF + IDF + length normalization",
+        "Saturation: repeated term matches yield diminishing score gains (k1 controls rate)",
+        "Length normalization (b) penalizes docs longer than corpus average",
+        "Lexical only — misses synonyms, needs matching tokenization at index/query time",
+        "Default in Lucene/Elasticsearch; sparse half of hybrid search with dense embeddings"
+      ]
+    },
+    {
+      "id": "chunking",
+      "title": "Chunking",
+      "order": 2,
+      "difficulty": "Beginner",
+      "keyPoints": [
+        "Splits documents into segments before embedding/indexing",
+        "Sets retrieval grain size: small chunk = precise, large chunk = blurry blend",
+        "Naive fixed-size splitting is context-blind — cuts sentences, tables, code mid-structure",
+        "Overlap (repeat tail as next head) only mitigates boundary-straddling facts, doesn't fix lost context",
+        "Fails silently: confident wrong answers, not errors — validate with retrieval metrics"
+      ]
+    },
+    {
+      "id": "embeddings",
+      "title": "Embeddings",
+      "order": 3,
+      "difficulty": "Beginner",
+      "keyPoints": [
+        "Dense vector: semantic similarity ≈ cosine proximity, not keyword overlap",
+        "Trained via contrastive learning (e.g., InfoNCE) on positive/negative pairs",
+        "RAG flow: chunk → embed offline → ANN index (HNSW/IVF-PQ) → embed query, same model → top-k",
+        "Query vs. passage need different prefixes (E5/BGE) or recall silently drops",
+        "Never compare vectors across model versions — cosine similarity becomes meaningless"
+      ]
+    },
+    {
+      "id": "rag-overview",
+      "title": "RAG Overview",
+      "order": 4,
+      "difficulty": "Beginner",
+      "keyPoints": [
+        "Retrieves external text at inference time to ground generation",
+        "Index offline: chunk docs, embed, store in vector DB",
+        "Query-time: embed query, similarity/hybrid search top-k, optionally rerank",
+        "Generation quality capped by retrieval — bad chunk in top-k → hallucination",
+        "Lost-in-the-middle: too many chunks hurts — rerank best first, cap k"
+      ]
+    },
+    {
+      "id": "tf-idf",
+      "title": "TF-IDF",
+      "order": 5,
+      "difficulty": "Beginner"
+    },
+    {
+      "id": "graphrag",
+      "title": "GraphRAG",
+      "order": 6,
+      "difficulty": "Intermediate",
+      "keyPoints": [
+        "Extract (entity, relation, entity) triples into a knowledge graph at index time",
+        "Cluster the graph into hierarchical communities (Leiden/Louvain), LLM summarizes each offline",
+        "Global search = map-reduce over community summaries, for corpus-wide/thematic questions",
+        "Local search = traverse graph from a matched entity, for entity-centric questions",
+        "Gotcha: no win on local fact lookup; unresolved entity aliases fragment communities"
+      ]
+    },
+    {
+      "id": "hnsw",
+      "title": "HNSW",
+      "order": 7,
+      "difficulty": "Intermediate",
+      "keyPoints": [
+        "Graph-based ANN: hierarchical layers — sparse long-range links atop, dense links at layer 0",
+        "Search: greedily descend layers to an entry point, then beam search (`ef`) at layer 0",
+        "Roughly O(log N) — each layer prunes the search space, like a skip list",
+        "Tuned by M, efConstruction, ef — trades off recall vs latency vs memory",
+        "Approximate and fails silently: low `ef` drops recall — validate against brute-force recall@k"
+      ]
+    },
+    {
+      "id": "hybrid-search",
+      "title": "Hybrid Search",
+      "order": 8,
+      "difficulty": "Intermediate",
+      "keyPoints": [
+        "Runs BM25 (lexical) + embeddings (semantic) in parallel, fuses results",
+        "BM25 wins exact tokens (IDs, codes, rare nouns); embeddings win paraphrase",
+        "Never sum raw scores — BM25 unbounded, cosine bounded, magnitudes not comparable",
+        "Default fusion: Reciprocal Rank Fusion (RRF), rank-based, no tuning needed",
+        "Alt: normalized weighted fusion (min-max + weight α) — needs calibration"
+      ]
+    },
+    {
+      "id": "reranking",
+      "title": "Reranking",
+      "order": 9,
+      "difficulty": "Intermediate",
+      "keyPoints": [
+        "Second-stage rescoring of top-k candidates from a fast first-stage retriever",
+        "Cross-encoder jointly attends over query+document pair, not independent vectors",
+        "Bi-encoder retrieves top_k (e.g. 100) cheaply, cross-encoder reorders those to top 5-10",
+        "Can't fix recall — only reorders what stage-1 already retrieved",
+        "Cost scales linearly with top_k, so unbounded top_k reintroduces latency"
+      ]
+    },
+    {
+      "id": "similarity-at-scale",
+      "title": "Similarity at Scale",
+      "order": 10,
+      "difficulty": "Intermediate"
+    }
+  ]
+}

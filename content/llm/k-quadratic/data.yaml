@@ -1,0 +1,28 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: k-quadratic
+type: concept
+area: Inference & KV Cache
+order: 22
+front: Why is attention O(n²), and how is long context made feasible?
+back: |-
+  Each of n tokens attends to n tokens → n² scores (the prefill bottleneck).
+
+  Helped by: FlashAttention (IO-aware exact attention — never materialises the n² matrix in HBM, so it's faster and uses less memory), sparse / sliding-window attention, and linear-attention approximations. The KV cache addresses decode-time recompute, not the prefill n².
+more: |-
+  ## The n×n matrix is the prefill wall
+
+  Every token scores against every token → *n²* entries, **per head, per layer**:
+
+  | *n* | *n²* entries | fp16 scores (per head·layer) |
+  |---|---|---|
+  | 8k | 6.7×10⁷ | 134 MB |
+  | 32k | 1.07×10⁹ | **2.1 GB** |
+
+  `32768²·2 B` = 2.1 GB — for **one head**. Materializing that for all heads/layers is why naive attention OOMs at long context.
+
+  **FlashAttention** keeps attention *exact* but never writes the *n×n* matrix to HBM: it tiles Q,K,V into SRAM blocks and runs **online softmax** (streaming max/sum), accumulating the output. Memory drops O(*n²*)→**O(*n*)** and HBM round-trips fall sharply, so it's both leaner and faster (FA-2 hits ~50–70% of A100 peak).
+
+  **Other routes:** **Longformer** — sliding window + a few global tokens, O(*n·w*); **Mamba/SSMs** — a recurrent fixed-size state, O(*n*) with no attention matrix at all.
+
+  **Don't conflate the two problems:** FlashAttention attacks *prefill* compute/memory. It does **nothing** for the KV cache, which still grows O(*n*) during decode. Quadratic-attention and KV-cache are separate axes — you usually need fixes for both.

@@ -1,0 +1,32 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: l-quantization
+type: concept
+area: Adaptation & Retrieval
+order: 25
+front: What is quantization, and what does QLoRA combine?
+back: |-
+  Store/compute weights in int8/int4 instead of fp16 — less memory and bandwidth, faster inference.
+  Activation/outlier values degrade most; PTQ is cheap post-hoc, QAT simulates rounding during training.
+  QLoRA = frozen 4-bit base + trainable LoRA adapters → fine-tune big models on one GPU.
+more: |-
+  Quantization maps a float range to integers: x_q = round(x / scale), with scale = max|x| / 127 for int8.
+
+  ## Concrete example
+  Memory for a 7B model by precision:
+  ```
+  fp16 : 7e9 × 2 bytes   = 14 GB
+  int8 : 7e9 × 1 byte    =  7 GB
+  int4 : 7e9 × 0.5 byte  =  3.5 GB
+  ```
+  That 4× cut (14 → 3.5 GB) is what lets a 7B fit on an 8GB GPU.
+
+  | | PTQ | QAT |
+  |---|---|---|
+  | Cost | minutes, no training | full training run |
+  | Data | small calibration set | full dataset |
+  | Accuracy | great @int8, slips @int4 | recovers @int4 |
+
+  QLoRA stacks both ideas: base weights in 4-bit NF4 (frozen), dequantized to bf16 for each matmul, with LoRA adapters trained in bf16 — enough to fine-tune a 65B model on a single 48GB GPU.
+
+  **Gotcha:** weights quantize easily; it's activation and KV-cache *outliers* that break low-bit inference — hence per-channel scaling, SmoothQuant, and AWQ.

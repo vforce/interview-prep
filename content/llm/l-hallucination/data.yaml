@@ -1,0 +1,25 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: l-hallucination
+type: concept
+area: Decoding & Reliability
+order: 8
+front: Why do LLMs hallucinate?
+back: |-
+  They predict plausible next tokens, not verified truth — no grounding or lookup by default. When the needed fact isn't in the parametric weights, the model still emits a fluent, confident continuation.
+
+  Mitigations: retrieval-augmentation (RAG), tool/function calling, citations, lower temperature, and training to say 'I don't know'.
+more: |-
+  ## A fabricated citation
+  Ask for a reference and a model may emit:
+  > Smith et al. (2019), *"Neural Mechanisms of X,"* Nature Neuroscience, doi:10.1038/s41593-019-0421-4
+
+  Author, venue, and DOI are all *syntactically* perfect — and the paper does not exist.
+
+  **Why the objective produces it:** training maximizes P(next token | context). The model learned the *shape* of a DOI (`10.1038/s41593-…`), not a table of real ones, so it interpolates a plausible string. Softmax always returns a distribution; sampling always emits *something*. There's no built-in "do I actually know this?" gate, and **probability ≠ truth** — high confidence on an unseen fact is routine.
+
+  **How grounding changes the math:**
+  - **RAG** swaps `P(answer | question)` for `P(answer | question, retrieved_docs)`. With the real fact in context, the highest-probability continuation becomes the correct one.
+  - **Abstention training** adds targets where the label is *"I don't know"* when context lacks support, shifting mass toward refusal.
+
+  **Gotcha:** RAG only helps if retrieval *succeeds* — feed irrelevant docs and you get a confident answer grounded in the wrong source.

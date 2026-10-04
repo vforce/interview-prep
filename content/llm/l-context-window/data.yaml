@@ -1,0 +1,34 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: l-context-window
+type: concept
+area: Decoding & Reliability
+order: 5
+front: What is the context window, and why is it limited?
+back: |-
+  The max number of tokens (prompt + generation) the model can attend to at once.
+
+  Limited by: training sequence length, positional-encoding extrapolation, and the O(n²) attention compute + linear KV-cache memory. Past the limit, earlier content is dropped; extending it (RoPE scaling, etc.) is an active research area.
+more: |-
+  ## Real windows
+  | model | context |
+  |----|----|
+  | GPT-3 | 2K |
+  | GPT-4 | 8K → 32K |
+  | GPT-4o | 128K |
+  | Claude 3.5 | 200K |
+  | Llama 3.1 | 128K |
+  | Gemini 1.5 Pro | 1M (→2M) |
+
+  **Why it costs:** attention compute is O(n²·d); the KV cache is O(n) memory.
+
+  **KV cache, concretely (Llama-3 70B):** 80 layers, 8 GQA KV-heads, head_dim 128, fp16:
+  ```
+  2(K,V) × 80 × 8 × 128 × 2 bytes ≈ 320 KB / token
+  × 128K tokens ≈ 43 GB   (per sequence!)
+  ```
+  That memory wall — not the matmuls — usually caps deployed context.
+
+  **Lost in the middle (Liu et al. 2023):** retrieval accuracy is U-shaped — facts at the *start* or *end* of a long prompt are recalled well; the *middle* is often missed. A 1M window ≠ 1M usable tokens.
+
+  **Extending it:** models train at length L; RoPE position interpolation / YaRN / NTK-aware scaling stretch the rotary frequencies so positions past L don't blow up. Naive extrapolation degrades sharply.

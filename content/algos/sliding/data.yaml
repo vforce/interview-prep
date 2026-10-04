@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: sliding
+fam: arrays
+label: Sliding Window
+order: 1
+trigger: longest/shortest/count CONTIGUOUS subarray or substring under a constraint
+insight: expand right; while window invalid, shrink left; record at each step. 'exactly K' = atMost(K) − atMost(K−1)
+probs:
+- {n: Maximum Average Subarray I, slug: maximum-average-subarray-i, d: E}
+- {n: Longest Substring Without Repeating, slug: longest-substring-without-repeating-characters, d: M}
+- {n: Minimum Window Substring, slug: minimum-window-substring, d: H}

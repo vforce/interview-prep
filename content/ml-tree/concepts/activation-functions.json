@@ -1,0 +1,102 @@
+{
+  "id": "activation-functions",
+  "title": "Activation Functions",
+  "definition": "An activation function is a nonlinear, elementwise transformation applied to a layer's pre-activation (`Wx + b`) that determines the unit's output and is the sole reason a stack of linear layers can represent more than a single linear map.",
+  "summary": "Without a nonlinearity, any depth of stacked linear layers algebraically collapses to one linear layer, so activations are what let MLPs approximate curved decision boundaries at all. The specific choice shapes gradient flow through depth (vanishing/dying units), compute cost, and output range, and it dictates which weight-initialization scheme is correct. Modern deep nets default to the ReLU family (ReLU/GELU/SiLU) over sigmoid/tanh almost entirely because of gradient behavior at depth, not accuracy on a single layer.",
+  "objectives": [
+    "Explain why nonlinearity is mathematically required between linear layers.",
+    "Compute forward and derivative values for sigmoid, tanh, and ReLU by hand.",
+    "Diagnose vanishing-gradient and dying-ReLU failure modes from training/production symptoms.",
+    "Choose an activation given constraints on depth, output range, and initialization scheme.",
+    "State why GELU/SiLU replaced ReLU as the default in transformer architectures."
+  ],
+  "lesson": "**Intuition.** A linear layer computes `Wx + b`. Composing L linear layers gives `W_L(...(W_1 x + b_1)...)`, which is itself affine in `x` — a 100-layer network with no nonlinearity is mathematically one linear layer. The activation is what breaks this collapse, letting simple affine pieces compose into complex, curved functions.\n\n**Worked example — why depth used to break training.** Sigmoid's derivative is `σ(x)(1−σ(x))`, maximized at `x=0` where it equals `0.25`, and it shrinks toward 0 as `|x|` grows (saturation). Backprop multiplies these derivatives layer by layer via the chain rule. Even in the *best* case — every pre-activation sitting at 0 — a 10-layer sigmoid network bounds the gradient reaching layer 1 by `0.25^10 ≈ 1e-6` times whatever arrives from the loss. Gradients vanish geometrically with depth. This single fact — saturating activations bound per-layer gradient magnitude, and depth compounds that bound multiplicatively — is why sigmoid/tanh networks stall past a handful of layers, and why ReLU (derivative exactly 1 for any positive input, however large) unlocked much deeper training.\n\n**The gotcha.** ReLU trades vanishing gradients for a different failure: if a unit's pre-activation is negative for every input in the training distribution (bad init, a too-large learning-rate step, or an unlucky bias update), its gradient is 0 forever and it never recovers — a \"dead\" unit. In production this shows up as a growing fraction of always-zero activations and a loss plateau. Critically, activation choice and initialization are coupled: He/Kaiming init assumes ReLU's variance-halving behavior; using Xavier/Glorot init (tuned for tanh/sigmoid) with ReLU under-scales the variance and makes dying units *more* likely. A model that looks like it has \"a bad activation\" often actually has a mismatched initializer.",
+  "examples": "**1. Gradient magnitude, sigmoid vs. ReLU:**\n```python\nimport numpy as np\n\ndef sigmoid(x): return 1 / (1 + np.exp(-x))\ndef sigmoid_grad(x): s = sigmoid(x); return s * (1 - s)\ndef relu_grad(x): return (x > 0).astype(float)\n\nx = np.array([-3, -0.5, 0, 0.5, 3])\nprint(sigmoid_grad(x))  # [0.045 0.235 0.25  0.235 0.045]  -> bounded by 0.25, decays at |x|\nprint(relu_grad(x))     # [0.    0.    0.    1.    1.   ]  -> exactly 1 for any positive x\n```\n\n**2. Detecting dying ReLUs in a production layer** (run over a validation batch's pre-activations `z`, shape `[batch, units]`):\n```python\ndef dead_unit_fraction(z):\n    ever_active = (z > 0).any(axis=0)   # was this unit positive for at least one example?\n    return 1 - ever_active.mean()\n\n# >5-10% dead units in a layer during training review is a red flag:\n# check init (He vs Xavier), lower LR, or switch to LeakyReLU/GELU.\n```",
+  "tradeoffs": "Sigmoid/tanh: reserve for where a bounded output is the point (binary-classifier logit, LSTM/GRU gates) — not hidden layers in deep nets, where saturation throttles gradient flow. ReLU: cheap (one comparison), strong default for CNNs and moderate depth; mitigate dying units with He init, a sane LR, or LeakyReLU/PReLU (small negative slope keeps gradient nonzero). GELU/SiLU: current default in transformers (BERT, GPT, ViT) — smooth, nonzero gradient for small negative inputs, empirically better optimization at scale; the extra `exp`/`erf` cost is irrelevant next to attention/matmul FLOPs. Don't chase exotic activations (Mish, custom Swish variants) without an ablation on your task — most of the available gain is already captured by ReLU→GELU. Softmax is a different category entirely: a whole-vector normalization for output-layer classification, not an elementwise hidden-layer activation.",
+  "diagnosticQuiz": [
+    {
+      "q": "What is the primary mathematical role of an activation function in a neural network?",
+      "choices": [
+        "To introduce nonlinearity so stacked layers can represent non-affine functions",
+        "To compute the loss gradient during backpropagation",
+        "To reduce the number of trainable parameters",
+        "To normalize input features before training"
+      ],
+      "answer": 0,
+      "explanation": "Stacked linear layers are algebraically equivalent to one linear layer, so nonlinearity is what gives depth any additional expressive power. The best wrong answer (parameter reduction) confuses activations with architectural choices like pooling or weight sharing, which do reduce parameters — activations don't."
+    },
+    {
+      "q": "What is the derivative of the sigmoid function at x = 0?",
+      "choices": [
+        "0.5",
+        "1",
+        "0",
+        "0.25"
+      ],
+      "answer": 3,
+      "explanation": "`σ(0) = 0.5`, and `σ'(x) = σ(x)(1−σ(x))`, so `σ'(0) = 0.5 × 0.5 = 0.25` — also sigmoid's global maximum derivative. The tempting wrong answer, 0.5, mistakes the *value* of sigmoid at 0 for its *derivative* at 0."
+    },
+    {
+      "q": "Why do deep sigmoid networks suffer vanishing gradients while deep ReLU networks (for active units) largely don't?",
+      "choices": [
+        "Sigmoid's exponential is slow to compute, which is unrelated to gradient magnitude",
+        "Sigmoid's derivative is bounded by 0.25 and shrinks under saturation, so the chain rule multiplies many small numbers across depth; ReLU's derivative is exactly 1 for any positive input regardless of depth",
+        "Sigmoid only vanishes in shallow networks, not deep ones",
+        "ReLU has strictly more parameters, so it learns faster per step"
+      ],
+      "answer": 1,
+      "explanation": "The chain rule multiplies per-layer derivatives, so a derivative capped at 0.25 shrinks the gradient geometrically with depth; ReLU's constant derivative of 1 (for x>0) removes that shrinkage. The compute-speed option is a real but separate downside of sigmoid — it doesn't explain the gradient behavior the question asks about."
+    },
+    {
+      "q": "You're picking the hidden-layer activation for a 96-layer transformer. What's the standard modern default, and why?",
+      "choices": [
+        "GELU or SiLU, because they're smooth with nonzero gradient for small negative inputs and empirically optimize better at scale",
+        "Sigmoid, because bounded outputs stabilize very deep stacks",
+        "Identity (linear), since depth alone provides enough expressivity",
+        "tanh, because it's zero-centered"
+      ],
+      "answer": 0,
+      "explanation": "GELU/SiLU are the empirical default in BERT/GPT/ViT-scale transformers precisely because their smoothness avoids dead units while still behaving like ReLU for large inputs. Zero-centering (the tanh option) is a real historical argument but doesn't address the saturation problem that rules tanh out at this depth."
+    },
+    {
+      "q": "A production model trained with ReLU and Xavier/Glorot initialization shows a growing fraction of always-zero units in deeper layers, and validation loss plateaus early. Most likely root cause?",
+      "choices": [
+        "The batch size is too large",
+        "Xavier init assumes a different activation variance profile than ReLU; pairing it with ReLU can push many units into the always-negative regime, killing them",
+        "The learning rate is too low",
+        "ReLU is fundamentally incompatible with deep networks"
+      ],
+      "answer": 1,
+      "explanation": "Xavier init is calibrated for symmetric, non-zeroing activations (tanh/sigmoid); it doesn't account for ReLU zeroing roughly half its inputs, so variance is systematically off and units are more likely to drift permanently negative. \"ReLU is incompatible with deep nets\" is the misconception this question targets — ReLU is the standard choice at depth precisely *when paired with matching (He/Kaiming) init*."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Why did the field move from sigmoid/tanh to ReLU, and now to GELU/SiLU, for deep networks? Walk me through the production reasoning.",
+      "a": "Sigmoid/tanh saturate, capping their derivative (≤0.25 for sigmoid) and causing gradients to vanish geometrically through depth via the chain rule — this made networks beyond a handful of layers effectively untrainable. ReLU fixed this for active units (derivative exactly 1, no saturation for positive inputs) at negligible cost (one `max`), enabling real depth, but introduced dying units: a unit stuck at a negative pre-activation gets zero gradient forever. GELU/SiLU smooth ReLU's kink and give a small nonzero gradient for slightly negative inputs, which empirically improves optimization in very deep transformer stacks; the extra `exp`/`erf` cost per element is negligible next to the matmul/attention FLOPs at model scale, so it's a \"free\" upgrade at that point."
+    },
+    {
+      "q": "You inherit a model whose training loss stalls after a few epochs and you suspect dying ReLUs. How do you confirm it and what do you change, in order of cost and risk?",
+      "a": "Confirm first — instrument a forward pass over a validation batch and compute the fraction of units per layer that are zero for *every* example (`(z > 0).any(axis=0)`); a growing fraction in deeper layers over training checkpoints is the signature. Also check pre-activation histograms for a pileup at/below zero. Interventions, cheapest first: (1) verify initialization matches the activation (He for ReLU, not Xavier) and check the learning rate isn't spiking early training — often the whole fix; (2) swap in LeakyReLU/PReLU or GELU, a cheap re-train with no architecture change; (3) if depth itself is the issue, add normalization (BatchNorm/LayerNorm) or residual connections — more invasive, reserve for when (1)-(2) don't resolve it."
+    },
+    {
+      "q": "Why isn't softmax just \"another activation function\" in the same class as ReLU or GELU when you're reasoning about hidden layers?",
+      "a": "ReLU/GELU/sigmoid are elementwise — each unit's output depends only on its own pre-activation. Softmax is a whole-vector operation: every output depends on every other logit in the layer (it normalizes them into a probability distribution summing to 1). That coupling is exactly what you want at a classification output layer but is wrong for hidden units, which need independent, unnormalized signals to carry information forward — applying softmax there destroys per-unit scale and independence the rest of the network relies on."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "neural-networks-mlp",
+    "self-attention",
+    "vanishing-and-exploding-gradients"
+  ],
+  "followUps": [
+    "self-attention",
+    "vanishing-and-exploding-gradients"
+  ],
+  "metadata": {
+    "inputHash": "159654e97e859b1a",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T10:49:21Z"
+  }
+}

@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: dptree
+fam: dp
+label: DP on Trees
+order: 26
+trigger: tree + include/exclude (rob, cameras)
+insight: each node returns (use_this, skip_this); parent picks max of children's skip when using itself
+probs:
+- {n: Diameter of Binary Tree, slug: diameter-of-binary-tree, d: E}
+- {n: House Robber III, slug: house-robber-iii, d: M}
+- {n: Binary Tree Cameras, slug: binary-tree-cameras, d: H}

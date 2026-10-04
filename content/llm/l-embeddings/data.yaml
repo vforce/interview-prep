@@ -1,0 +1,12 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: l-embeddings
+type: concept
+area: Tokenization & Embeddings
+order: 3
+front: What are token embeddings?
+back: |-
+  A lookup table mapping each token id → a learned dense vector (d_model). The input embedding + positional info is what enters the first Transformer block.
+
+  Similar tokens land near each other; the matrix is often tied with the output (un-embedding) layer to save parameters.
+more: "d_model (e.g. 4096) is the model's 'width'; the table is V×d_model where V is the vocab. Weight tying with the output softmax saves V×d_model params and usually helps. Crucially these are STATIC per-token vectors — context-dependent meaning only emerges after attention layers mix tokens together. Position is added separately (learned/sinusoidal) or injected inside attention (RoPE).\n\n## Concrete example: token embeddings\n\nSay vocab size V = 4 and d_model = 3 (tiny for illustration).\n\n```\nToken    ID   Embedding (learned vector)\n───────────────────────────────────────\n\"cat\"     0   [ 0.9,  0.1,  0.2]\n\"dog\"     1   [ 0.8,  0.2,  0.1]   ← near \"cat\" (both animals)\n\"run\"     2   [-0.1,  0.9,  0.5]\n\"jump\"    3   [-0.2,  0.8,  0.6]   ← near \"run\" (both motion verbs)\n```\n\nThe embedding matrix E is shape (4 × 3). Looking up token id 2 (\"run\"):\n\n```python\nE = [\n  [ 0.9,  0.1,  0.2],  # row 0\n  [ 0.8,  0.2,  0.1],  # row 1\n  [-0.1,  0.9,  0.5],  # row 2  ← selected\n  [-0.2,  0.8,  0.6],  # row 3\n]\n\ntoken_id = 2\nvec = E[token_id]   # [-0.1, 0.9, 0.5]\n```\n\nThat's it — just a **row index into a matrix**. No computation, just a lookup.\n\n---\n\n**What \"similar tokens land near each other\" means in practice:**\n\n```\ncosine_sim(\"cat\", \"dog\")  ≈ 0.98   (high — same cluster)\ncosine_sim(\"cat\", \"run\")  ≈ 0.15   (low — different cluster)\n```\n\n---\n\n**The static vs. dynamic distinction:**  \nThe vector for \"bank\" is the *same* whether the sentence is \"river bank\" or \"savings bank\". Attention layers downstream are what resolve that ambiguity — the embedding itself is context-free."

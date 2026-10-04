@@ -1,0 +1,96 @@
+{
+  "id": "kv-cache-eviction",
+  "title": "KV Cache Eviction",
+  "definition": "KV cache eviction is the set of runtime policies that reclaim GPU memory during LLM inference by discarding cached key/value tensors for selected tokens or whole sequences — chosen by recency, attention-based importance, or scheduling priority — so a fixed memory budget can serve longer contexts or more concurrent requests, at the cost of losing whatever gets evicted.",
+  "summary": "In production serving, KV cache memory grows with context length and batch size until it — not compute — becomes the binding constraint, so systems either cap per-sequence memory by evicting individual tokens' KV pairs (StreamingLLM's sink+window, H2O's heavy-hitter scoring) or cap system-wide memory by preempting entire lower-priority sequences (vLLM-style swap-to-CPU or recompute-on-resume). Every eviction policy is a bet about which cached information won't be needed again; when the bet is wrong, the model silently loses context it should have had, with no error raised. It's a different lever from quantization (fewer bytes per token) or prefix caching (reusing shared prefixes) — eviction reduces how many tokens are cached at all.",
+  "objectives": [
+    "Explain why KV cache memory becomes the binding constraint in production serving and what \"eviction\" trades away to relieve it.",
+    "Compare token-level eviction policies (sliding window, StreamingLLM sinks, H2O heavy-hitters) against request-level preemption (vLLM-style swap vs. recompute).",
+    "Compute a KV cache's memory footprint from layers/heads/head_dim/dtype and see how an eviction budget caps it regardless of context length.",
+    "Identify when eviction will silently corrupt correctness (e.g., long-range recall tasks) and why attention-score-based policies clash with fused kernels like FlashAttention."
+  ],
+  "lesson": "Building on KV Cache Memory: cache size grows linearly with sequence length and batch size, and in production serving that memory — not compute — is usually the first thing to run out. Eviction is the runtime answer: instead of keeping every token's key/value pair forever, you enforce a budget and drop the ones you've decided you can live without.\n\nThis happens at two different levels. **Token-level eviction** bounds a single sequence's cache no matter how long it runs: a plain sliding window keeps only the last W tokens (cheap, but total amnesia about anything older); **StreamingLLM** keeps that window plus a handful of \"attention sink\" tokens from the very start — softmax attention has to put its probability mass somewhere every step, and models learn to dump the leftover onto early tokens whether or not they're meaningful, so keeping just those few tokens stabilizes generation indefinitely; **H2O** instead tracks cumulative attention received per token and keeps the recent window plus the highest-scoring \"heavy hitters,\" betting that a token important so far stays important. **Request-level eviction** lives in the serving scheduler instead (e.g., vLLM's PagedAttention): when the shared GPU cache pool fills up across concurrent requests, a lower-priority sequence is preempted wholesale — its blocks are either swapped to CPU RAM (fast resume, costs host bandwidth) or dropped and recomputed via re-prefill later (zero extra memory, costs a compute redo).\n\nWorked intuition: an open-ended chat session's cache would normally grow without bound and eventually OOM. Cap it at, say, 4 sink tokens + a 4,092-token window, and the cache holds steady at ~4,096 tokens forever — flat memory and throughput, no matter how long the conversation runs.\n\nThe gotcha: eviction fails silently. Nothing throws when a needed token has been dropped — the model just answers as if that content never existed, which is exactly wrong for \"recall something from way back\" tasks (long-document QA, needle-in-haystack retrieval). Attention-score policies like H2O also fight your kernels: FlashAttention never materializes the full attention matrix those scores come from, so scoring-based eviction isn't free — it needs its own bookkeeping pass alongside the fused kernel.",
+  "examples": "**1. Memory bound, with numbers.** Model: 32 layers, 32 heads, head_dim = 128, fp16 (2 bytes/elem).\n\n```\nper-token KV (K+V, all layers/heads)\n  = 2 (K,V) × 32 layers × 32 heads × 128 head_dim × 2 bytes\n  = 524,288 bytes = 512 KiB / token\n\nunbounded, single sequence @ 100,000 tokens:\n  512 KiB × 100,000 ≈ 48.8 GiB   (grows forever)\n\nbounded, eviction budget = 4,096 tokens (4 sink + 4,092 window):\n  512 KiB × 4,096 = 2 GiB        (flat, regardless of stream length)\n```\n\n**2. A minimal StreamingLLM-style cache.** Keep the first `n_sink` tokens plus the last `window` tokens; evict everything else on each append:\n\n```python\nclass StreamingKVCache:\n    \"\"\"Bounded per-sequence KV cache: first n_sink tokens (attention\n    sinks) + most recent `window` tokens. Size never exceeds the budget,\n    however long the sequence runs.\n    \"\"\"\n    def __init__(self, n_sink=4, window=4092):\n        self.n_sink, self.window = n_sink, window\n        self.k, self.v = [], []  # one entry per cached token (per layer)\n\n    def append(self, k_t, v_t):\n        self.k.append(k_t)\n        self.v.append(v_t)\n        budget = self.n_sink + self.window\n        if len(self.k) > budget:\n            cut = len(self.k) - self.window\n            self.k = self.k[:self.n_sink] + self.k[cut:]\n            self.v = self.v[:self.n_sink] + self.v[cut:]\n```\n\nAfter any number of `append` calls, `len(self.k) == self.n_sink + self.window` once the budget is hit — the whole point being that memory stops growing, but tokens between position `n_sink` and `cut` are gone for good.",
+  "tradeoffs": "Sliding-window and StreamingLLM are nearly free (O(1) bookkeeping, no scoring) but give up all exact recall outside the window — fine for open-ended chat/streaming where only recent turns matter, wrong wherever exact long-range recall is required. H2O recovers some long-range signal by keeping high-attention \"heavy hitters,\" at the cost of per-step score bookkeeping and a weaker guarantee, since a token can look unimportant now and matter later. Request-level preemption (vLLM swap vs. recompute) is a different axis: it trades per-sequence latency for system throughput under concurrency pressure, independent of what any single sequence's context needs — swap when host memory/bandwidth is available and resumes are soon, recompute otherwise. Avoid token-level eviction entirely for hard-recall tasks (contract/code QA, needle-in-haystack retrieval); there, pay for the memory, use quantization or offloading instead, or keep the source externally retrievable rather than trusting it survived in the live cache.",
+  "diagnosticQuiz": [
+    {
+      "q": "What does KV cache eviction refer to in LLM inference?",
+      "choices": [
+        "Reducing the numeric precision of cached key/value tensors (e.g., fp16 → int8) to save memory",
+        "Discarding cached key/value tensors for selected tokens or sequences to keep memory within a fixed budget",
+        "Sharing a single KV cache across multiple requests that share a prompt prefix",
+        "Recomputing attention from scratch on every decoding step instead of using a cache"
+      ],
+      "answer": 1,
+      "explanation": "Eviction specifically means removing entries (tokens or whole sequences) to reclaim memory. The best distractor is quantization (A) — both shrink the KV cache, but quantization keeps every token at lower precision while eviction removes tokens outright; the other two options describe \"no caching\" and prefix-sharing, which are unrelated techniques."
+    },
+    {
+      "q": "A model has 24 layers, 16 heads, head_dim = 64, and stores its KV cache in fp16 (2 bytes/element). What is the memory footprint of ONE token's cached K and V combined, across all layers?",
+      "choices": [
+        "96 KiB",
+        "48 KiB",
+        "384 KiB",
+        "192 KiB"
+      ],
+      "answer": 0,
+      "explanation": "2 (K and V) × 24 layers × 16 heads × 64 head_dim × 2 bytes = 98,304 bytes = 96 KiB. The best wrong answer, 48 KiB, is exactly half — the classic mistake of computing only K (or only V) and forgetting to double it for the pair."
+    },
+    {
+      "q": "Why do StreamingLLM's \"attention sink\" tokens matter, even though they often carry little semantic content (e.g., just the first few generic tokens)?",
+      "choices": [
+        "They store the model's positional embeddings, so removing them breaks RoPE",
+        "They contain the system prompt, which is required for instruction-following",
+        "They are cheap to store because they're always the same token, so caching them costs zero memory",
+        "Softmax attention must distribute probability mass somewhere every step, and models learn to dump the \"extra\" mass onto the first few tokens regardless of their meaning; removing them destabilizes attention and spikes perplexity"
+      ],
+      "answer": 3,
+      "explanation": "This is the empirical finding behind StreamingLLM: softmax forces attention weights to sum to 1 even when no token is truly relevant, so the model learns to offload the unneeded mass onto early tokens as a release valve — evict them and generation destabilizes. The tempting wrong answer is D (assuming sinks are meaningful content like a system prompt), but the sink effect appears even for generic, content-free first tokens, showing it's an attention-mechanism artifact, not a content-importance effect."
+    },
+    {
+      "q": "You're serving a coding assistant that must recall a function defined at the very start of a 50K-token file when asked about it near the end. Which approach is safest?",
+      "choices": [
+        "Sliding window only (keep last W tokens)",
+        "Avoid token-level eviction; rely on prefix caching / more memory, or a retrieval strategy so the function's tokens are never dropped from the active context",
+        "H2O with a small heavy-hitter budget (e.g., keep only the 8 highest-scoring tokens)",
+        "StreamingLLM (sink tokens + sliding window)"
+      ],
+      "answer": 1,
+      "explanation": "Both sliding-window and StreamingLLM guarantee the early function definition falls out of the cache once the window fills. H2O is the tempting middle ground since it keeps \"important\" tokens, but its score comes from attention received *so far* — a one-off definition with low cumulative attention can still be evicted before it's ever needed. Hard recall requirements call for not dropping the tokens at all, not a smarter eviction heuristic."
+    },
+    {
+      "q": "Your team implements H2O-style eviction (keep tokens with the highest cumulative attention score) on a FlashAttention-based inference stack, and it doesn't work out of the box. What's the friction?",
+      "choices": [
+        "FlashAttention fuses the softmax and never materializes the full attention weight matrix, so there's no direct way to read out per-token attention scores for scoring/eviction",
+        "H2O requires beam search, which FlashAttention does not support",
+        "FlashAttention doesn't support fp16, so scores can't be computed",
+        "FlashAttention only works for training, not inference"
+      ],
+      "answer": 0,
+      "explanation": "FlashAttention's speed/memory advantage comes precisely from never writing the full n×n attention matrix to memory — exactly the tensor H2O's scoring needs to read. The tempting wrong answer, A, sounds like a plausible compatibility issue, but FlashAttention is fp16/bf16-native; the real issue is architectural (no materialized weights), requiring a separate scoring pass, not a dtype fix."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Your production LLM cluster is hitting GPU OOM under high concurrency with long contexts. How do you decide what kind of eviction to reach for?",
+      "a": "First localize the failure mode: one sequence's context growing too long, or too many concurrent sequences competing for a shared pool? For the former, bound each sequence with token-level eviction — StreamingLLM's sink+window for cheap streaming, H2O if you need to retain more \"important\" history and can absorb the scoring overhead. For the latter, it's a scheduling problem: use request-level preemption (swap to CPU or recompute-on-resume, à la vLLM) or admission control/queuing, not per-token trimming. Also check whether KV quantization (int8/int4) or prefix caching for shared prompts would raise the ceiling enough that you don't need to evict anything at all."
+    },
+    {
+      "q": "How do you choose between \"swap to CPU\" and \"recompute\" when a serving engine preempts a running sequence?",
+      "a": "Swap keeps exact state and resumes cheaply, but costs host RAM and PCIe bandwidth to shuttle blocks back and forth — good when preemptions are short-lived and host memory is available. Recompute discards the cache and re-prefills from the stored prompt when resumed — zero extra memory pressure, but pays a full compute-and-latency redo, so it's better when preemptions are rare/long-lived, host memory is also scarce, or the sequence is cheap to re-prefill. In practice this is chosen per-workload from measured preemption frequency and host headroom, not a fixed rule."
+    },
+    {
+      "q": "A user says your long-context assistant \"forgot\" something they said 40K tokens ago, despite an advertised 128K context window. What's your first hypothesis, and how do you confirm it?",
+      "a": "First hypothesis: a KV cache eviction policy (sliding window/sink-based, or a preemption path that recomputes with truncation) is silently capping the *effective* context below the advertised architectural limit to hit a memory or throughput budget — a common gap between \"max context the model supports\" and \"what the serving stack actually retains under load.\" Confirm by checking the serving config's cache/eviction settings, reproducing at low vs. high concurrency (memory-pressure-triggered eviction should vanish at low load), and running a synthetic needle-in-haystack probe at that token depth. Fix by raising the effective budget, swapping eviction for a lossless lever (quantization/offload), or being explicit with users about effective vs. advertised context length."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "kv-cache-memory"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "ad56c98023a691d1",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T14:37:49Z"
+  }
+}

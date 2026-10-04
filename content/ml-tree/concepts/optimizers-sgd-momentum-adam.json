@@ -1,0 +1,98 @@
+{
+  "id": "optimizers-sgd-momentum-adam",
+  "title": "Optimizers (SGD, Momentum, Adam)",
+  "definition": "An optimizer is the rule that converts a computed loss gradient into a parameter update at each training step — SGD, Momentum, and Adam differ in how much history of past gradients each one folds in to set that update's direction and per-parameter size.",
+  "summary": "Plain SGD steps directly opposite the current mini-batch gradient, scaled by a fixed learning rate. Momentum accumulates an exponential moving average of past gradients into a velocity term, smoothing out oscillating directions and accelerating consistent ones. Adam keeps both a first-moment and second-moment running average of gradients, bias-corrects them, and uses their ratio to give every parameter its own adaptive step size — the default for Transformers, RL, and fast iteration, though tuned SGD+momentum still wins on final generalization for some vision workloads.",
+  "objectives": [
+    "Explain how the update rule changes across plain SGD, SGD+Momentum, and Adam",
+    "Derive Adam's bias-corrected first/second moment estimates and say why they're needed",
+    "Predict when momentum overshoots vs. helps, and retune lr/β accordingly",
+    "Choose SGD+momentum vs. AdamW for a given production training run, weighing memory vs. generalization",
+    "Diagnose optimizer-caused training instability (loss spikes, divergence) from symptoms"
+  ],
+  "lesson": "**Intuition.** Vanilla SGD moves directly opposite the current gradient, scaled by a learning rate. On a well-conditioned bowl that's fine, but real loss surfaces are often *ravines* — steep in some directions, shallow in others — so SGD oscillates across the steep direction while crawling along the shallow one. Momentum fixes this with a velocity term: an exponentially-weighted sum of past gradients. Components that flip sign every step (the oscillation) cancel; components that stay consistent (progress along the ravine) build up, like a heavy ball rolling downhill. The classic (PyTorch-default) update:\n\n```\nv_t = β · v_{t-1} + g_t\nθ_t = θ_{t-1} - lr · v_t\n```\n\nAdam goes further: alongside a momentum-style first moment `m_t`, it tracks a second moment `v_t` — a running average of *squared* gradients (RMSProp-style) — then divides the step by `sqrt(v_t)`. This gives each parameter its own adaptive learning rate: small, noisy gradients get relatively larger steps; large, frequent gradients get damped.\n\n```\nm_t = β1·m_{t-1} + (1-β1)·g_t\nv_t = β2·v_{t-1} + (1-β2)·g_t²\nm̂_t = m_t / (1 - β1^t)        # bias correction\nv̂_t = v_t / (1 - β2^t)\nθ_t = θ_{t-1} - lr · m̂_t / (sqrt(v̂_t) + ε)\n```\n\nBoth moments start at zero, so raw early estimates are biased toward zero — the correction terms rescale them; skip this and the first several updates are artificially tiny.\n\n**Key gotcha.** Momentum's velocity term means the *effective* step size is roughly `lr / (1-β)`, not `lr` — a learning rate perfectly stable for plain SGD can make momentum overshoot the minimum and oscillate (see Example 1). That's why momentum runs pair high β (0.9–0.99) with a *lower* base LR or a schedule, not the vanilla-SGD LR. The same pattern shows up at scale: Adam's large, bias-corrected early steps are a known source of Transformer training instability, which is why every large-model recipe (GPT, BERT, ViT) pairs Adam/AdamW with LR warmup and gradient clipping rather than using it \"bare.\"",
+  "examples": "### Example 1 — momentum can overshoot on an easy problem\n\nMinimize `L(θ) = θ²` (gradient `g = 2θ`) from `θ₀ = 10`, `lr = 0.1`. Compare plain SGD to momentum (`β = 0.9`):\n\n| step | SGD θ  | Momentum θ |\n|------|--------|------------|\n| 0    | 10.000 | 10.000     |\n| 1    | 8.000  | 8.000      |\n| 2    | 6.400  | 4.600      |\n| 3    | 5.120  | 0.620      |\n| 4    | 4.096  | -3.086     |\n| 5    | 3.277  | -5.804     |\n\nSGD decays smoothly (`θ_{t+1} = 0.8·θ_t`). Momentum's accumulated velocity overshoots the minimum around step 3 and keeps oscillating — on this simple, well-conditioned 1-D bowl, the same `lr` that's safe for SGD is too aggressive for momentum. Momentum's real payoff is on *ill-conditioned* or noisy losses, not toy problems like this one.\n\n### Example 2 — production optimizer setup\n\n```python\nimport torch\n\n# CV recipe: SGD + momentum, hand-tuned LR schedule (step/cosine decay)\nopt = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9, weight_decay=1e-4)\n\n# Transformer/LLM recipe: AdamW + warmup + grad clipping\nopt = torch.optim.AdamW(model.parameters(), lr=3e-4, betas=(0.9, 0.999), weight_decay=0.01)\ntorch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)\n```\n\nAdam/AdamW cost more memory than SGD: two extra fp32 buffers per parameter (`m`, `v`) vs. one for momentum. In mixed-precision LLM training this is the well-known ~16 bytes/parameter breakdown (2 fp16 params + 2 fp16 grads + 4 fp32 master weights + 4 fp32 `m` + 4 fp32 `v`) — a real constraint when sizing GPUs.",
+  "tradeoffs": "SGD+momentum is cheap (one extra buffer/parameter), well understood, and — given enough epochs and a tuned LR schedule — often produces the best-*generalizing* final model for vision workloads (flatter minima; Wilson et al., 2017). Its cost is tuning effort and slower early convergence. Adam/AdamW converges fast with far less LR sensitivity, handles sparse gradients (NLP embeddings) and non-stationary objectives (RL) well, and its per-layer adaptivity is close to mandatory for stable Transformer training — but it doubles optimizer-state memory and, without decoupled weight decay and warmup, can settle into sharper, worse-generalizing minima. At extreme scale, memory-efficient variants (8-bit Adam, Adafactor) or state sharding (ZeRO/FSDP) trade a little robustness to fit Adam's states in memory at all. Default to AdamW for Transformers/LLMs/RL and fast iteration; reach for tuned SGD+momentum when final generalization matters most and there's compute budget to tune it.",
+  "diagnosticQuiz": [
+    {
+      "q": "What distinguishes Adam from plain SGD momentum?",
+      "choices": [
+        "Adam adds a per-parameter adaptive learning rate from a running average of squared gradients, on top of momentum's first-moment averaging",
+        "Adam only applies to convolutional layers",
+        "Adam removes the learning rate and uses only the sign of the gradient",
+        "Adam is identical to momentum, just renamed"
+      ],
+      "answer": 0,
+      "explanation": "Momentum tracks a first-moment (mean) running average of gradients to smooth the update direction. Adam adds a second-moment (mean-squared) running average and divides by its square root, giving each parameter its own adaptive step size — exactly what momentum lacks. The \"identical, just renamed\" option reflects a common beginner confusion between the two."
+    },
+    {
+      "q": "In Adam, `m̂_t = m_t / (1 - β1^t)`. Why is this bias-correction step needed?",
+      "choices": [
+        "Because it implements the learning-rate warmup schedule",
+        "Because the loss function is non-convex",
+        "Because `m_0` and `v_0` are initialized to zero, so the raw early moving averages are biased toward zero and need rescaling",
+        "Because gradients must be converted from fp32 to fp16 before use"
+      ],
+      "answer": 2,
+      "explanation": "With `m_0 = v_0 = 0`, the exponential moving average is pulled toward zero for the first several steps (more so at high β), so dividing by `(1 - β^t)` rescales it back to an unbiased estimate. Warmup (option D) is a related but separate technique applied to the learning rate itself, and doesn't replace bias correction — conflating the two is a common mix-up."
+    },
+    {
+      "q": "Intuitively, why does momentum help on narrow, ravine-shaped loss surfaces?",
+      "choices": [
+        "It clips large gradients to a fixed norm before applying them",
+        "It multiplies the learning rate by the batch size every step",
+        "It replaces the gradient with exponentially distributed random noise",
+        "It accumulates velocity along directions where the gradient sign stays consistent, reinforcing progress along the ravine while canceling oscillation across it"
+      ],
+      "answer": 3,
+      "explanation": "The exponential moving average reinforces gradient components that keep pointing the same way (along the ravine) and cancels components that flip sign every step (across the ravine — the cause of SGD's oscillation). Gradient clipping (option A) is a real, related stabilization technique, but it bounds step size rather than smoothing direction — a common conflation."
+    },
+    {
+      "q": "What's the standard production optimizer setup for pretraining a large Transformer language model from scratch?",
+      "choices": [
+        "Momentum SGD with a learning rate of 1.0",
+        "AdamW with linear or cosine LR warmup followed by decay, plus gradient-norm clipping",
+        "Plain SGD, fixed learning rate, no momentum",
+        "Adam with the L2 weight-decay term folded into the gradient before the adaptive update (not decoupled)"
+      ],
+      "answer": 1,
+      "explanation": "Transformer pretraining recipes (GPT, BERT, ViT, etc.) standardize on AdamW with a warmup phase — to avoid instability from large early adaptive steps — followed by decay, plus gradient clipping as a safety net against spikes. Option D describes plain \"Adam + L2,\" which Loshchilov & Hutter (2019) showed generalizes worse than AdamW's decoupled decay — a frequently missed distinction."
+    },
+    {
+      "q": "A vision model trained with Adam reaches the same training loss as an SGD+momentum baseline but has noticeably higher test error. What's the most likely explanation?",
+      "choices": [
+        "Adam's per-parameter adaptive scaling can converge to a sharper minimum — a generalization gap documented on several vision benchmarks versus tuned SGD+momentum",
+        "Adam is mathematically incapable of reaching a local minimum",
+        "Adam always needs 10x more training epochs than SGD to finish converging",
+        "This effect can only occur if the batch size is exactly 32"
+      ],
+      "answer": 0,
+      "explanation": "Wilson et al. (2017) showed adaptive optimizers can match or beat SGD on training loss while generalizing worse on certain tasks, which is why many vision pipelines still finish training with tuned SGD+momentum. The other options are absolute, unqualified claims with no theoretical or empirical basis."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Training loss with Adam starts oscillating and occasionally spikes right after you scale up to more GPUs and a bigger batch size for throughput. How do you diagnose and fix it?",
+      "a": "Most likely cause: the learning rate wasn't scaled for the new global batch size, and/or warmup is too short — with a larger, lower-variance batch gradient, Adam's early bias-corrected steps become effectively larger and can push into an unstable region. Diagnosis: plot gradient norm and loss around each spike; check whether spikes correlate with specific batches (a data/pipeline bug — corrupted or duplicated samples) or are systematic (an optimizer/LR problem); try the old per-GPU LR times a linear (or sqrt) scaling factor and see if it disappears. Fixes: scale LR with batch size, extend the warmup window, add/tighten global-norm gradient clipping, and confirm the data loader isn't feeding degenerate batches after the change."
+    },
+    {
+      "q": "Why do modern LLM training recipes use AdamW instead of Adam with L2 regularization, and what's the actual difference in the update?",
+      "a": "In plain Adam + L2, the decay term `λθ` is added into the gradient before computing `m` and `v`, so it gets divided by `sqrt(v̂)` along with everything else — parameters with large historical gradients end up decayed *less*, which isn't the point of weight decay (uniform shrinkage toward zero). AdamW decouples the two: `θ ← θ - lr·(m̂/(sqrt(v̂)+ε) + λθ)`, subtracting decay outside the adaptive-scaling path, so every weight shrinks at the same rate regardless of gradient history. Loshchilov & Hutter (2019) showed this closes much of Adam's generalization gap versus SGD, which is why essentially every modern Transformer/LLM recipe uses AdamW, not Adam."
+    },
+    {
+      "q": "You're fine-tuning a 70B-parameter model and Adam's optimizer states don't fit in GPU memory. What are your options?",
+      "a": "Adam roughly doubles trainable-parameter memory (`m` and `v`, each fp32, same shape as the params); the standard mixed-precision breakdown is ~16 bytes/parameter (2 fp16 params + 2 fp16 grads + 4 fp32 master weights + 4 fp32 `m` + 4 fp32 `v`) versus ~4 bytes/parameter for weights alone. Options, roughly in the order I'd reach for them: (1) LoRA/QLoRA — freeze the base model, train small low-rank adapters, so optimizer state scales with the adapter (millions of params), not the full model; (2) 8-bit Adam (bitsandbytes) — quantizes the `m`/`v` buffers; (3) Adafactor — factorizes the second moment to avoid a full per-parameter `v` buffer, at some cost to convergence stability; (4) ZeRO/FSDP stage-1/2 — shard optimizer states across data-parallel ranks instead of replicating them. For a 70B fine-tune specifically, LoRA/QLoRA is almost always the first move before touching the optimizer itself."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "backpropagation",
+    "gradient-descent"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "41dfa6c35c405033",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T11:22:13Z"
+  }
+}

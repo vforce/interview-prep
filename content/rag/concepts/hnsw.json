@@ -1,0 +1,101 @@
+{
+  "id": "hnsw",
+  "title": "HNSW",
+  "definition": "HNSW (Hierarchical Navigable Small World) is a graph-based approximate nearest-neighbor search algorithm that indexes vectors in stacked layers of proximity graphs — sparse, long-range links at the top, dense, short-range links at the bottom — so a query can greedily descend from a coarse entry point to its true nearest neighbors in roughly logarithmic time.",
+  "summary": "HNSW is the default ANN index behind most production vector search in RAG systems (FAISS, Qdrant, Weaviate, Milvus, pgvector) because it gets near-exhaustive recall at a fraction of brute-force latency, needs no clustering/training step, and supports incremental inserts. Its main cost is memory: the graph plus full-precision vectors typically live in RAM, so it scales worse than compressed indexes (IVF+PQ) at billion-vector scale. The interview story is: multi-layer greedy graph search, three tuning knobs (M, efConstruction, ef), and the recall/latency/memory triangle you trade against.",
+  "objectives": [
+    "Explain why layered graphs give HNSW roughly logarithmic search time instead of brute force's O(N).",
+    "Tune M, efConstruction, and ef to hit a target recall/latency/memory budget in production.",
+    "Build and query an HNSW index in Python and reason about its knobs.",
+    "Compare HNSW against IVF, PQ, and flat indexes and justify a choice for a given scale.",
+    "Identify HNSW's production gotchas: silent recall loss, memory footprint, and weak delete support."
+  ],
+  "lesson": "Brute-force nearest-neighbor search compares a query embedding against every stored vector — O(N) per query. Fine for 10K vectors, unusable for RAG over tens of millions of chunks at sub-100ms latency. HNSW trades exactness for speed: it builds a graph where each vector is a node linked to its approximate neighbors, organized into layers like a road network. The top layer has few nodes and long edges (highways); layer 0 contains every node with short, dense edges (local streets).\n\nSearch: start at a fixed entry point in the top layer. Greedily walk to the neighbor closest to the query; when no neighbor improves the distance, drop down one layer and repeat, using the current best node as the new entry point. At layer 0, instead of a single greedy walk, keep a candidate list of size `ef` and expand it (beam search) before returning the top-k. Upper layers cheaply get you into the right neighborhood; layer 0 does the careful local search. This is why HNSW is roughly O(log N): each layer prunes the search space geometrically, similar to a skip list.\n\nWorked trace: query Q enters at node A (top layer). A's only long-range neighbor E is closer to Q, so hop to E. At E, no neighbor at this layer beats E, so drop to the next layer down, still at E. There E connects to G, which is closer — hop to G. Drop to layer 0 at G, run a beam search over G's local neighborhood, and it surfaces the true nearest node H, which was never visible at the upper layers at all.\n\nKey gotcha for production: HNSW is *approximate* — recall isn't 100% by default, and it degrades silently. Set `ef` too low (e.g., equal to k) and you get fast but mediocre results with no error signal — in a RAG pipeline this shows up as the LLM missing context or hallucinating because the \"obviously relevant\" chunk simply wasn't in the candidate set. Always measure recall@k against brute-force ground truth on a validation query set before shipping an `ef` value, and re-check it whenever the corpus distribution shifts.",
+  "examples": "**1. Building and querying an HNSW index (hnswlib):**\n\n```python\nimport hnswlib\nimport numpy as np\n\ndim, n = 768, 200_000                     # e.g. 768-d sentence embeddings\nembeddings = np.random.rand(n, dim).astype('float32')\nids = np.arange(n)\n\nindex = hnswlib.Index(space='cosine', dim=dim)   # 'l2', 'ip', or 'cosine'\nindex.init_index(max_elements=n, M=16, ef_construction=200)\nindex.add_items(embeddings, ids)                 # inserts build the graph\nindex.save_index('chunks.hnsw')\n\n# --- query time ---\nindex.set_ef(64)                          # ef >= k; the recall/latency knob\nquery = np.random.rand(1, dim).astype('float32')\nlabels, distances = index.knn_query(query, k=5)\n```\n`M=16` / `ef_construction=200` are reasonable defaults for text-embedding RAG corpora; raise both if a held-out recall@10 eval falls short.\n\n**2. Tracing a search through the layers:**\n\n```\nLayer 2 (highways):      A ───────────────── E\n                          │\nLayer 1:                 A ──── C ──── E ──── G\n                          │      │      │\nLayer 0 (all nodes):  A─B─C─D─E─F─G─H─I     (dense, every node present)\n\nquery Q, entry = A\n  L2: A -> E   (E closer to Q, hop)\n  L1: E -> G   (G closer, hop; drop when stuck)\n  L0: beam search (candidate list size `ef`) around G -> returns H (true NN)\n```",
+  "tradeoffs": "Use HNSW when you need high recall and low query latency over up to roughly tens of millions of vectors per shard, with mostly append-only writes and enough RAM for the full graph plus float vectors — it needs no training step, unlike IVF (k-means) or PQ (codebook learning), so it's simple to stand up and grow incrementally. Avoid it, or pair it with compression, when memory-constrained at billion-scale: HNSW stores full-precision vectors plus per-node links, so IVF+PQ or disk-resident designs (DiskANN, SPANN) pack far more vectors per GB at some recall cost. Avoid it for delete/update-heavy workloads too — HNSW has no native delete; removed items are tombstoned and still traversed until a full rebuild. For small corpora (under ~100K vectors) a flat/brute-force index is often simpler, exact, and fast enough — don't reach for HNSW's tuning surface until brute force actually measures too slow.",
+  "diagnosticQuiz": [
+    {
+      "q": "In HNSW's layered graph structure, what characterizes the top layer versus layer 0?",
+      "choices": [
+        "The top layer stores full-precision vectors while layer 0 stores quantized codes",
+        "The top layer has sparse, long-range links; layer 0 has dense, short-range links containing every node",
+        "The top layer has dense, short-range links; layer 0 has sparse, long-range links",
+        "The top layer contains only the entry point and stays empty until the first query arrives"
+      ],
+      "answer": 1,
+      "explanation": "The lesson explicitly describes the top layer as having \"few nodes and long edges (highways)\" while \"layer 0 contains every node with short, dense edges (local streets).\" The best distractor (A) simply inverts the relationship — a natural mistake if you assume \"top\" means \"most detailed\" rather than \"coarsest.\" Quantization (D) is a different technique (PQ) not part of HNSW's design."
+    },
+    {
+      "q": "Per the lesson, why is HNSW search roughly O(log N) instead of O(N)?",
+      "choices": [
+        "The parameter M caps comparisons at a constant, making search technically O(1)",
+        "The beam search at layer 0 only ever examines exactly log N candidates",
+        "Vectors are stored in sorted order, enabling binary search at each layer",
+        "Each layer geometrically prunes the search space, analogous to a skip list"
+      ],
+      "answer": 3,
+      "explanation": "The lesson states this directly: \"each layer prunes the search space geometrically, similar to a skip list.\" The tempting wrong answer (B) misattributes the log-N behavior to the beam width `ef`, but `ef` is a fixed candidate-list size at layer 0, not a log-N-scaling quantity — the logarithmic behavior comes from descending through layers, not from the beam search itself."
+    },
+    {
+      "q": "In the worked trace, the true nearest neighbor H never appears at the top or middle layers and is only surfaced by the beam search at layer 0. What does this illustrate about the algorithm's design?",
+      "choices": [
+        "H must be the most highly connected node in the entire graph",
+        "Upper layers exist only for redundancy and could be removed without hurting search quality",
+        "The greedy walk took a wrong path, and the beam search exists specifically to correct routing bugs",
+        "Upper layers cheaply narrow down to the right neighborhood, while layer 0's beam search does the precise local work of actually finding the nearest neighbor"
+      ],
+      "answer": 3,
+      "explanation": "The lesson states this exact division of labor: \"Upper layers cheaply get you into the right neighborhood; layer 0 does the careful local search.\" The greedy walk isn't buggy (C) — dropping down when no neighbor improves the distance is expected behavior, not a failure. Nothing in the trace implies H has high connectivity (D); it's simply close to Q."
+    },
+    {
+      "q": "A team has 50,000 product-description vectors and low query volume on an internal tool. Per the lesson's tradeoffs, what should they do?",
+      "choices": [
+        "Use HNSW with the standard M=16, ef_construction=200 defaults, since these apply safely to any corpus size",
+        "Use IVF+PQ, since 50,000 vectors is large enough to be memory-constrained",
+        "Use a flat/brute-force index — at this scale it's simpler, exact, and likely fast enough",
+        "Use HNSW with a very high `ef` to guarantee 100% exact recall"
+      ],
+      "answer": 2,
+      "explanation": "The lesson says plainly: \"For small corpora (under ~100K vectors) a flat/brute-force index is often simpler, exact, and fast enough — don't reach for HNSW's tuning surface until brute force actually measures too slow.\" IVF+PQ (C) is recommended for billion-scale memory constraints, nowhere near 50K. Raising `ef` (D) reflects a common misconception — HNSW is approximate by construction, so no `ef` setting guarantees exact results."
+    },
+    {
+      "q": "A team sets query-time `ef` equal to `k` to maximize speed. What's the production risk the lesson warns about?",
+      "choices": [
+        "The graph becomes disconnected and queries return zero results",
+        "Build time increases significantly, since query-time `ef` is coupled to `ef_construction`",
+        "Recall degrades silently — relevant chunks may be missing from the candidate set with no error signal, causing the LLM to miss context or hallucinate",
+        "The index throws an error, since `ef` must exceed `k` by a fixed margin"
+      ],
+      "answer": 2,
+      "explanation": "The lesson's key gotcha states this directly: low `ef` gives \"fast but mediocre results with no error signal,\" which in RAG \"shows up as the LLM missing context or hallucinating.\" The tempting distractor (B) confuses two similarly-named but distinct parameters — `ef` (query-time beam width) and `ef_construction` (build-time graph quality) — which are easy to conflate but operate at different stages. Nothing in the lesson suggests a hard error (A) or graph disconnection (D); the danger is precisely that it fails *silently*."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Walk me through what happens inside an HNSW index when you run a similarity search, and why is it faster than brute force?",
+      "a": "HNSW stores vectors as nodes in a multi-layer graph: the top layer has very few nodes with long-range edges, each layer down adds more nodes with shorter edges, and layer 0 holds every vector.\nSearch: (1) start at a fixed entry point in the top layer; (2) greedily move to whichever neighbor is closest to the query, stopping when nothing improves; (3) drop one layer, keep the current best as the new entry point, repeat; (4) at layer 0, expand a candidate list of size `ef` (beam search) and return the top-k.\nThis is roughly O(log N) because each upper layer eliminates most of the search space before ever touching the dense bottom layer — like a skip list versus a linked list. Brute force is O(N) per query because it has no structure to prune with."
+    },
+    {
+      "q": "How would you tune and validate an HNSW index for a RAG system that needs ~50ms p99 retrieval latency at ≥95% recall@10 over 20M chunks?",
+      "a": "Treat it as an offline optimization before it's a production config:\n- Build ground truth: brute-force top-k on a sample of real queries.\n- Sweep `M` (~16–48) and `efConstruction` (~100–400) at build time — pick the smallest that clears the recall bar with margin.\n- At query time, sweep `ef`, plot recall@10 vs. p99 latency, and pick the lowest-latency `ef` that clears 95% recall.\n- Size RAM up front (≈ dim × 4 bytes × N, plus per-node link overhead) — usually the real constraint, not CPU.\n- Re-run the recall eval whenever the corpus grows or shifts domain — a fixed `ef` doesn't guarantee fixed recall as data changes.\n- Monitor recall indirectly in production (e.g., downstream answer-groundedness metrics), since true recall needs ground truth you don't have online."
+    },
+    {
+      "q": "Product wants users to delete documents, and the index needs to reflect deletions quickly. Is HNSW a good fit as-is?",
+      "a": "Not cleanly — HNSW has no efficient native delete. The standard approach is tombstoning: mark the vector deleted and filter it from results, but it stays in the graph and still gets traversed, silently degrading latency and recall over time. Mitigations:\n- Use a vector DB that manages this (Qdrant/Weaviate/Milvus implement soft-delete + periodic compaction/rebuild).\n- Partition the index (by tenant/time/shard) so rebuilds are cheap and bounded, not one giant reindex.\n- Track tombstone ratio and trigger a rebuild past a threshold (e.g., >10–20% deleted).\n- If deletes are frequent and latency-critical, consider whether an IVF-based index or a keyword+vector hybrid fits better than pure HNSW."
+    }
+  ],
+  "version": 2,
+  "relatedConcepts": [
+    "embeddings",
+    "similarity-at-scale"
+  ],
+  "followUps": [
+    "similarity-at-scale"
+  ],
+  "metadata": {
+    "inputHash": "b7f54f0c094a5b55",
+    "model": "sonnet",
+    "generatedAt": "2026-07-03T10:43:04Z",
+    "quizUpdatedAt": "2026-07-04T05:45:15Z"
+  }
+}

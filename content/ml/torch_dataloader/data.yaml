@@ -1,0 +1,69 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: torch_dataloader
+type: kata
+area: PyTorch
+order: 46
+title: Write a DataLoader from scratch (PyTorch)
+prompt: >-
+  Rung 1 of the classic "write a data loader" round. Given a `dataset` exposing `__len__` and
+  `__getitem__(i) -> Tensor`, implement the loader itself — don't call `torch.utils.data.DataLoader`.
+  Yield stacked batches of shape (batch_size, d). Shuffle from a seeded `torch.Generator` so a run
+  replays exactly; drop a short final batch only when `drop_last` is set. Collating is just
+  `torch.stack` here — rung 2 is where that stops being true.
+sig: 'def batches(dataset, batch_size, shuffle=False, drop_last=False, seed=0):'
+stub: "import torch\n\ndef batches(dataset, batch_size, shuffle=False, drop_last=False, seed=0):\n    # build an index order, slice it into batches, stack each slice\n    \n"
+reference: |
+  import torch
+
+  def batches(dataset, batch_size, shuffle=False, drop_last=False, seed=0):
+      n = len(dataset)                                   # calls dataset.__len__
+
+      # The whole mental model: a loader NEVER touches your data. It decides which INDICES,
+      # in what order, and hands them to __getitem__. Sampling and loading are separate jobs.
+      if shuffle:
+          # A LOCAL Generator, not torch.manual_seed() — global seeding would also disturb
+          # weight init and dropout. randperm(n) = a random permutation of 0 .. n-1.
+          g = torch.Generator().manual_seed(seed)
+          order = torch.randperm(n, generator=g).tolist()
+      else:
+          order = list(range(n))                         # sequential: just 0, 1, 2, ...
+
+      # Walk the index order in strides of batch_size. Note we shuffle the INDEX LIST, not the
+      # data — that's how shuffling stays free no matter how big the samples are.
+      for i in range(0, n, batch_size):
+          idx = order[i:i + batch_size]                  # the final slice can be short
+          if drop_last and len(idx) < batch_size:
+              break                                      # a ragged last batch upsets fixed shapes
+                                                         # (BatchNorm, static graphs, DDP lockstep)
+          # This IS the default collate_fn: fetch one sample per index, then stack them into a
+          # brand-new axis 0. stack (not cat) because the batch axis doesn't exist on a sample yet.
+          yield torch.stack([dataset[j] for j in idx])   # k tensors of (d,) -> one (k, d)
+test: |
+  import torch
+
+  class Toy:                                             # row i is the vector [i, i, i]
+      def __len__(self): return 10
+      def __getitem__(self, i): return torch.full((3,), float(i))
+
+  ds = Toy()
+
+  b = list(batches(ds, 4))
+  assert len(b) == 3, len(b)
+  assert [tuple(x.shape) for x in b] == [(4, 3), (4, 3), (2, 3)], [tuple(x.shape) for x in b]
+  assert b[0][0].tolist() == [0.0, 0.0, 0.0], b[0][0].tolist()
+
+  assert len(list(batches(ds, 4, drop_last=True))) == 2, "drop_last must drop the short tail"
+
+  # an epoch must visit every sample exactly once, shuffled or not
+  seen = torch.cat([x[:, 0] for x in batches(ds, 4, shuffle=True, seed=1)])
+  assert sorted(seen.tolist()) == [float(i) for i in range(10)], seen.tolist()
+
+  a1 = torch.cat([x[:, 0] for x in batches(ds, 4, shuffle=True, seed=1)])
+  a2 = torch.cat([x[:, 0] for x in batches(ds, 4, shuffle=True, seed=1)])
+  a3 = torch.cat([x[:, 0] for x in batches(ds, 4, shuffle=True, seed=2)])
+  assert torch.equal(a1, a2), "same seed must replay the same order"
+  assert not torch.equal(a1, a3), "a different seed must reorder"
+  assert not torch.equal(a1, torch.arange(10.0)), "shuffle=True must not be the identity"
+
+  print("PASS - 8 checks")

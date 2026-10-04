@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: unionfind
+fam: graphs
+label: Union-Find
+order: 17
+trigger: connectivity, grouping, 'are these connected', merge accounts
+insight: find with path compression + union by rank; count distinct roots
+probs:
+- {n: Number of Provinces, slug: number-of-provinces, d: M}
+- {n: Redundant Connection, slug: redundant-connection, d: M}
+- {n: Largest Component Size by Common Factor, slug: largest-component-size-by-common-factor, d: H}

@@ -1,0 +1,104 @@
+{
+  "id": "linear-regression",
+  "title": "Linear Regression",
+  "definition": "Linear regression models a continuous target as a weighted linear combination of input features plus a bias term, with weights chosen to minimize the sum of squared errors between predictions and observed values.",
+  "summary": "It's the baseline every production regression system should beat before reaching for something heavier, and it underpins ridge/lasso, GLMs, and even output layers of larger models. In interviews it's rarely tested as \"can you call `.fit()`\" — it's a proxy for whether you understand bias-variance, closed-form vs. iterative optimization, and how to diagnose a model beyond a single accuracy number.",
+  "objectives": [
+    "Write and use the normal equation, and know when to switch to gradient descent instead.",
+    "State the core assumptions (linearity, independence, homoscedasticity, low multicollinearity) and what breaks when each is violated.",
+    "Diagnose model health from residual plots, not just R²/RMSE.",
+    "Explain how Ridge/Lasso fix specific linear-regression failure modes.",
+    "Justify choosing linear regression over a more accurate black-box model in a production setting."
+  ],
+  "lesson": "Linear regression fits `y ≈ Xw + b` by minimizing SSE = Σ(yᵢ − ŷᵢ)². Intuition: among every hyperplane through the data, pick the one whose total squared vertical distance to the points is smallest — squaring penalizes large errors more and yields a solution derivable in closed form.\n\nTwo ways to fit it, and the choice matters in production:\n\n**Normal equation** — `w = (XᵀX)⁻¹Xᵀy`. Exact, no hyperparameters or convergence to babysit. But it's O(p³) to invert (p = #features), infeasible past a few thousand features, and undefined if `XᵀX` is singular (exact collinearity, or p > n).\n\n**Gradient descent** — `w ← w − η·Xᵀ(Xw − y)/m`. Scales to huge n and p, is the only option once an L1 penalty is added (Lasso has no closed form), and is what production frameworks (`SGDRegressor`, deep learning stacks) actually run.\n\nWorked intuition: predicting house price from square footage, `price ≈ w·sqft + b`. `w` is directly interpretable — \"$150 per extra square foot\" — which is exactly why linear regression survives in regulated, explainability-first settings even when a GBM would score higher.\n\n**The key gotcha:** a good R² does not mean the model is safe to ship. Always plot residuals against predicted values. Random scatter around zero is healthy; a curved or funnel shape is a red flag. A curve means linearity is violated (add a transform or polynomial feature, or switch models). A funnel — variance growing with the prediction — means heteroscedasticity: your confidence intervals and p-values are wrong even though point predictions look fine. Neither shows up in RMSE alone, which is why \"R² was 0.9\" is a weak answer to \"how did you validate this.\"",
+  "examples": "**1. Closed form vs. sklearn**\n\n```python\nimport numpy as np\nfrom sklearn.linear_model import LinearRegression\n\nrng = np.random.default_rng(0)\nX = rng.uniform(0, 10, size=(200, 1))\ny = 3 * X[:, 0] + 5 + rng.normal(0, 1, size=200)   # true w=3, b=5\n\n# Normal equation (bias as an extra column of ones)\nX_b = np.hstack([X, np.ones((200, 1))])\nw = np.linalg.inv(X_b.T @ X_b) @ X_b.T @ y\nprint(w)                                            # ≈ [3.0, 5.0]\n\n# sklearn: same math, more numerically stable (SVD-based, no explicit inverse)\nmodel = LinearRegression().fit(X, y)\nprint(model.coef_, model.intercept_)                # ≈ [3.0] 5.0\n```\n\n**2. Multicollinearity destabilizing coefficients — Ridge as the fix**\n\n```python\nfrom sklearn.linear_model import LinearRegression, Ridge\n\nx1 = rng.normal(size=500)\nx2 = x1 + rng.normal(scale=0.01, size=500)          # near-duplicate of x1\ny2 = 2 * x1 + 3 * x2 + rng.normal(scale=0.1, size=500)\nXc = np.column_stack([x1, x2])\n\nlr = LinearRegression().fit(Xc, y2)\nridge = Ridge(alpha=1.0).fit(Xc, y2)\n\nprint(\"OLS:  \", lr.coef_)      # unstable: large magnitude, can even flip sign\nprint(\"Ridge:\", ridge.coef_)   # stable: shrinks toward a sane split near [2, 3]\n```\nOLS can't tell `x1` and `x2` apart, so it arbitrarily splits credit between them (and is highly sensitive to noise); Ridge's `+λI` term makes `XᵀX` invertible and pulls both coefficients toward a stable, plausible answer — at the cost of some bias.",
+  "tradeoffs": "Use it as your first baseline, when interpretability is required (regulated domains, stakeholder-facing coefficients), when training/serving cost or latency must be minimal, or when data is scarce and a flexible model would overfit. Avoid it when the relationship is strongly nonlinear without feature engineering, when features are highly collinear and you need stable coefficients (reach for Ridge/PCA instead of plain OLS), or when you need interaction/non-monotonic effects that tree ensembles capture natively. In practice it's often traded a few points of accuracy for auditability, monitoring simplicity, and near-zero inference cost.",
+  "diagnosticQuiz": [
+    {
+      "q": "What does ordinary least squares (OLS) linear regression minimize?",
+      "choices": [
+        "Mean absolute error between predictions and targets",
+        "Sum of squared residuals between predictions and targets",
+        "Cross-entropy loss between predicted and true probabilities",
+        "Sum of the absolute values of the weights"
+      ],
+      "answer": 1,
+      "explanation": "OLS is defined by minimizing squared error, which is what produces the closed-form normal equation. MAE (A) is the objective of a related but distinct robust/median-regression variant — a common mix-up. Cross-entropy (C) belongs to classification, and sum-of-weights (D) describes the L1 penalty in Lasso, not the base loss."
+    },
+    {
+      "q": "The normal equation w = (XᵀX)⁻¹Xᵀy has no unique solution under which condition?",
+      "choices": [
+        "X has more rows than columns",
+        "XᵀX is singular, e.g. from exact multicollinearity or more features than samples",
+        "Features were standardized to zero mean and unit variance",
+        "y contains negative values"
+      ],
+      "answer": 1,
+      "explanation": "Solving the normal equation requires inverting XᵀX; if a feature is an exact linear combination of others (or p > n), that matrix is singular and non-invertible. Standardizing features (B) doesn't cause this — it's good practice, especially before gradient descent or regularization. Negative targets (D) have no bearing on invertibility."
+    },
+    {
+      "q": "A residual-vs-predicted plot shows a clear U-shape instead of random scatter. What does this most directly indicate?",
+      "choices": [
+        "The model is overfitting the training data",
+        "Multicollinearity is inflating coefficient variance",
+        "The target variable needs rescaling",
+        "The linear form is misspecified — the true relationship is nonlinear"
+      ],
+      "answer": 3,
+      "explanation": "A patterned (non-random) residual shape is the classic diagnostic for a misspecified functional form — the linearity assumption doesn't hold, and you need a transform or a nonlinear model. Overfitting (A) shows up as a train/validation gap, not residual curvature. Multicollinearity (B) affects coefficient stability, not the shape of residuals."
+    },
+    {
+      "q": "You're deploying a credit-approval model that regulators must be able to audit feature-by-feature. What's the strongest reason to pick linear/logistic regression over a gradient-boosted tree here?",
+      "choices": [
+        "Linear models train faster on GPUs than tree ensembles",
+        "Linear models always achieve higher accuracy than tree ensembles",
+        "Each coefficient gives a direct, auditable per-feature effect size required for regulatory explainability",
+        "Linear models require no feature preprocessing"
+      ],
+      "answer": 2,
+      "explanation": "In regulated domains, stating \"a $1k debt increase raises predicted default risk by X\" is often a hard legal requirement, and the coefficient *is* that explanation, unlike a tree ensemble which needs extra tooling (e.g. SHAP) to approximate one. Accuracy (A) usually favors GBMs on tabular data. GPU training speed (B) isn't the deciding factor here, and preprocessing (D) is backwards — linear models typically need more preprocessing (scaling, encoding) than trees."
+    },
+    {
+      "q": "A colleague standardizes all features before fitting a plain, unregularized linear regression via the normal equation, and is surprised the predictions don't change. Why?",
+      "choices": [
+        "This invariance only holds when features are uncorrelated",
+        "The normal equation ignores feature scale entirely",
+        "OLS predictions are invariant to affine feature rescaling — only the coefficients' scale changes",
+        "Standardization always changes predictions for linear regression"
+      ],
+      "answer": 2,
+      "explanation": "Unregularized OLS is invariant to affine rescaling of features: rescaling a feature just rescales its coefficient inversely, so predictions on the original scale are unchanged. This is a classic trap because it does *not* hold for Ridge/Lasso, where the penalty is scale-sensitive and rescaling changes the fitted model. Option C conflates \"invariant to\" with \"ignores,\" and the invariance holds regardless of feature correlation (D)."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "When would you choose linear regression over a gradient-boosted tree in production, even knowing the tree will likely score lower error?",
+      "a": "When explainability is a hard requirement (regulated lending, healthcare — coefficients double as the audit trail), when latency/serving cost must be near-zero (a dot product vs. traversing hundreds of trees), when training data is small and a flexible model would overfit, or when you need well-behaved extrapolation outside the training range. The accuracy gap is a known, bounded cost traded for auditability and operational simplicity."
+    },
+    {
+      "q": "Your production model's coefficients flip sign between weekly retrains, but RMSE barely moves. What's going on and how do you fix it?",
+      "a": "This is the multicollinearity signature: when two or more features are highly correlated, many different weight combinations fit the data almost equally well, so small changes in the training sample push the solution to a different, equally-valid combination — predictions stay stable, coefficients don't. Diagnose with a correlation matrix or VIF (variance inflation factor); fix by dropping/combining redundant features, or by switching to Ridge, whose `L2` penalty makes `XᵀX` invertible and picks a unique, stable solution."
+    },
+    {
+      "q": "Beyond RMSE/R² on a holdout set, how do you validate a linear regression model is production-ready?",
+      "a": "Plot residuals vs. predicted values (curve → nonlinearity, funnel → heteroscedasticity), check VIF/correlations for multicollinearity, and check error independence (autocorrelation/Durbin-Watson if the data is sequential/time-based). Re-check coefficient stability across CV folds or time slices — if signs or magnitudes swing wildly, don't trust the coefficients for decisions even if predictions look fine. Post-deploy, monitor for feature and coefficient drift, since a linear model silently degrades as the world moves away from its training distribution."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "gradient-descent",
+    "l1-and-l2-regularization",
+    "logistic-regression",
+    "supervised-learning-basics"
+  ],
+  "followUps": [
+    "gradient-descent",
+    "l1-and-l2-regularization",
+    "logistic-regression"
+  ],
+  "metadata": {
+    "inputHash": "31661d961ad7cdc4",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T10:01:20Z"
+  }
+}

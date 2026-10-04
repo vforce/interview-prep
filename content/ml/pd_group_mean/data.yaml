@@ -1,0 +1,32 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: pd_group_mean
+type: kata
+area: Pandas
+order: 44
+title: Group mean, ignoring NaN (Pandas)
+prompt: Given a DataFrame with columns 'group' and 'value' (value may contain NaN), return a Series of the mean value per group, ignoring missing values, indexed by group and sorted by group.
+sig: 'def group_mean(df):'
+stub: "import pandas as pd\n\ndef group_mean(df):\n    \n    return s\n"
+reference: |
+  import pandas as pd
+
+  def group_mean(df):
+      # Read a pandas chain one link at a time, tracking the TYPE at each step:
+      #   df                   DataFrame
+      #   .groupby("group")    -> DataFrameGroupBy   splits rows by key. Lazy — computes nothing yet.
+      #   ["value"]            -> SeriesGroupBy      pick the one column to aggregate
+      #   .mean()              -> Series             aggregate. The KEY BECOMES THE INDEX.
+      #   .sort_index()        -> Series             order by group key (sort_values = by value)
+      #
+      # split -> apply -> combine. Every groupby is that shape.
+      # And .mean() SKIPS NaN by default — that's pandas. np.mean would return NaN instead.
+      return df.groupby("group")["value"].mean().sort_index()
+test: |
+  import pandas as pd, numpy as np
+  df = pd.DataFrame({"group": ["a", "a", "b", "b"],
+                     "value": [1.0, 3.0, np.nan, 5.0]})
+  s = group_mean(df)
+  assert list(s.index) == ["a", "b"], list(s.index)
+  assert np.isclose(s["a"], 2.0) and np.isclose(s["b"], 5.0), s.to_dict()   # b ignores the NaN
+  print("PASS - 2 checks")

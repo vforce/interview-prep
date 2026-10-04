@@ -1,0 +1,100 @@
+{
+  "id": "sampling",
+  "title": "Sampling",
+  "definition": "MCP sampling is a server-to-client request (`sampling/createMessage`) that asks the client to run an LLM completion — using the client's own model access and, per spec, human review — and return the result to the server.",
+  "summary": "Every other MCP primitive — tools, resources, prompts — is called by the client; sampling reverses that, letting a server ask the client to generate a completion using the client's own model, credentials, and (per spec) human oversight. This lets a server-side tool use LLM judgment on data it wants to keep private, without the server ever holding an API key or picking a model. It's an optional capability negotiated at `initialize`, so a server can't assume any given client offers it.",
+  "objectives": [
+    "Explain how sampling reverses MCP's usual client→server call direction.",
+    "Describe the `createMessage` request/response shape: messages, `modelPreferences`, `includeContext`, `stopReason`.",
+    "Explain why the spec requires human-in-the-loop review of both the request and the completion.",
+    "Recognize sampling as a negotiated, optional capability a server must check for and degrade gracefully without.",
+    "Decide when sampling fits a production tool design versus a direct LLM call or host-side reasoning."
+  ],
+  "lesson": "Every other MCP primitive is client-initiated: the host calls a server's tools, reads its resources, fills its prompts. Sampling is the exception — a server, mid-tool-execution, sends a `sampling/createMessage` request *back* to the client, asking it to run a completion. The server describes what it wants (messages, an optional system prompt, `maxTokens`, and `modelPreferences` hints like `intelligencePriority`/`speedPriority`/`costPriority`), but it never sees an API key and never picks the exact model — the client does, and per spec must let the human review the request before it's sent and the completion before it's returned to the server.\n\nWhy build it this way? Picture a \"log-triage\" MCP server: its `find_root_cause` tool has 200 raw log lines and needs judgment to pick the one that matters. Two bad options: embed an LLM call in the server (now it needs its own API key, billing, and model-choice logic, duplicating whatever the host already has), or dump all 200 lines into the host and let the *main* agent loop reason about them (leaks server-internal data into the conversation, burns the main context window). Sampling is the third option — the server keeps the raw data private, asks the client \"which of these indicates the root cause?\", and only the LLM's verdict, not the raw logs, crosses back into the server's response to the host.\n\nThe gotcha is twofold. First, direction: sampling is server→client, the opposite of every tool call the learner already knows — code that treats it like a tool (the server \"returning\" a result to whoever called it) has the RPC backwards. Second, availability: sampling is a capability the client advertises or doesn't at `initialize`; plenty of hosts don't implement it. A server must check for the capability and have a real fallback — skip the LLM step, return raw data, fail clearly — rather than assume `create_message` will succeed. Even when supported, the human-approval step means it's not a fast, silent, always-on RPC the way a tool call is.",
+  "examples": "**1. The wire messages**\n\nServer → client request:\n```json\n{\n  \"jsonrpc\": \"2.0\",\n  \"id\": 42,\n  \"method\": \"sampling/createMessage\",\n  \"params\": {\n    \"messages\": [\n      {\"role\": \"user\", \"content\": {\"type\": \"text\",\n        \"text\": \"3 log lines follow. Which indicates the root cause?\\n1) ...\\n2) ...\\n3) ...\"}}\n    ],\n    \"systemPrompt\": \"You are a terse SRE assistant.\",\n    \"modelPreferences\": {\"intelligencePriority\": 0.8, \"speedPriority\": 0.3, \"costPriority\": 0.2},\n    \"includeContext\": \"thisServer\",\n    \"maxTokens\": 150\n  }\n}\n```\n\nClient → server response (after human approval + the real LLM call):\n```json\n{\n  \"jsonrpc\": \"2.0\",\n  \"id\": 42,\n  \"result\": {\n    \"role\": \"assistant\",\n    \"content\": {\"type\": \"text\", \"text\": \"Line 2 — connection pool exhausted before the timeout.\"},\n    \"model\": \"claude-3-5-sonnet-20241022\",\n    \"stopReason\": \"endTurn\"\n  }\n}\n```\n\n**2. A Python MCP server (FastMCP) requesting sampling from inside a tool**\n```python\nfrom mcp.server.fastmcp import FastMCP, Context\n\nmcp = FastMCP(\"log-triage\")\n\n@mcp.tool()\nasync def find_root_cause(log_lines: list[str], ctx: Context) -> str:\n    \"\"\"Ask the client's LLM to pick the root-cause line; log_lines never leave this response.\"\"\"\n    result = await ctx.session.create_message(\n        messages=[{\n            \"role\": \"user\",\n            \"content\": {\"type\": \"text\",\n                        \"text\": \"Which line indicates the root cause?\\n\" + \"\\n\".join(log_lines)},\n        }],\n        max_tokens=150,\n        model_preferences={\"intelligencePriority\": 0.8, \"speedPriority\": 0.3},\n    )\n    return result.content.text  # only the verdict crosses back to the host\n```",
+  "tradeoffs": "Reach for sampling when a tool needs LLM judgment on data that should stay server-side, with a human available to approve the round trip — it spares the server from owning API keys, billing, or model choice. Skip it for headless/batch/cron paths (no one to approve), latency-sensitive hot paths (two approval gates plus a real completion is slow), and anything needing a guaranteed specific model (the server only sends hints; the client decides). Never assume it exists, either — it's a negotiated capability, so a server needs a real fallback for clients that don't offer it, not a hang.",
+  "diagnosticQuiz": [
+    {
+      "q": "What does MCP \"sampling\" let a server do?",
+      "choices": [
+        "Send a request back to the client asking it to run an LLM completion, subject to human approval",
+        "Call another server's tools directly",
+        "Read a resource exposed by the client",
+        "Cache the model's previous responses for reuse"
+      ],
+      "answer": 0,
+      "explanation": "Sampling is the `sampling/createMessage` request a server sends *to* the client so the client's own LLM and credentials produce a completion — the one MCP flow that runs server→client instead of client→server. \"Read a resource\" describes the Resources primitive in the normal direction, and \"call another server's tools\" describes nothing that exists in MCP — servers don't call each other. Caching isn't part of the spec."
+    },
+    {
+      "q": "A server sends `modelPreferences: {\"intelligencePriority\": 0.9, \"costPriority\": 0.4, \"speedPriority\": 0.4}`. What must the client do?",
+      "choices": [
+        "Treat them as independent 0-1 hints when choosing among its own available models — final model choice is still the client's",
+        "Average the three numbers and use that as the sampling temperature",
+        "Reject the request because the priorities don't sum to 1.0",
+        "Call the exact model named \"intelligencePriority\" since it scored highest"
+      ],
+      "answer": 0,
+      "explanation": "`costPriority`/`speedPriority`/`intelligencePriority` are independent hint weights, not a probability distribution — nothing requires them to sum to 1, and the client isn't obligated to satisfy them exactly. The \"must sum to 1\" option is the trap for anyone pattern-matching this to a softmax. The other two distractors confuse a preference weight with a model name and with an unrelated sampling parameter."
+    },
+    {
+      "q": "Why would a tool server prefer requesting sampling over embedding its own call to an LLM API?",
+      "choices": [
+        "Sampling always returns faster than a direct API call",
+        "Sampling is mandatory for any server that defines tools",
+        "It lets the server bypass the client's permission system entirely",
+        "It avoids the server needing its own API key/billing, and keeps the user's chosen model and human review in the loop"
+      ],
+      "answer": 3,
+      "explanation": "The point of sampling is borrowing the client's already-configured model access instead of managing separate credentials, cost, and model choice, while the client keeps a human able to review both the prompt and the completion. It's not faster — the double approval step usually makes it slower than a direct call — and it's optional, not mandatory, and adds a permission gate rather than removing one."
+    },
+    {
+      "q": "Which scenario is the best fit for MCP sampling?",
+      "choices": [
+        "A sub-millisecond autocomplete endpoint under a strict latency budget",
+        "An interactive tool that needs an LLM judgment call on server-private data, with a user available to approve",
+        "A nightly headless batch job summarizing yesterday's logs with no user present",
+        "A server that must guarantee a specific fine-tuned model handles every request"
+      ],
+      "answer": 1,
+      "explanation": "Sampling assumes a human is present to approve the request and its result, so it fits interactive sessions where a server-side tool needs LLM reasoning on data it wants to keep out of the host's main context. A headless batch job has no one to approve, a latency-critical endpoint can't absorb an approval step plus a real completion, and a server needing a *guaranteed* model should call it directly — sampling only offers hints."
+    },
+    {
+      "q": "A server wants to call sampling but the connected client never declared the `sampling` capability at `initialize`. What should the server do?",
+      "choices": [
+        "Queue the request; the client will support it once it upgrades",
+        "Silently fall back to calling an LLM API with a hardcoded key baked into the server",
+        "Call `sampling/createMessage` anyway — most clients support it by default",
+        "Check the declared capabilities up front and skip/fall back gracefully if sampling isn't offered"
+      ],
+      "answer": 3,
+      "explanation": "Capability support is negotiated once at `initialize`, and support is inconsistent across clients — a well-built server checks for it and has a real fallback instead of assuming it exists. There's no queuing mechanism for unsupported capabilities, and quietly falling back to a server-owned API key defeats sampling's actual purpose (user-visible model/cost/credential control) even though it technically \"works\" — a classic silent-behavior-change trap."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "In a production MCP deployment, why might you choose not to rely on sampling for a server-side tool even though the client supports it?",
+      "a": "Sampling assumes a human is present to approve both the outgoing prompt and the returned completion, so it has no place in unattended paths — cron jobs, background pipelines, service-to-service calls — where there's nothing to approve against and the request will stall or be rejected. It also adds latency and cost variance you don't control: two approval gates plus a real LLM call, using whatever model the client's policy picks, since `modelPreferences` are hints, not guarantees. If the tool needs a specific model, a firm SLA, or must run with no human anywhere in the loop, give the server its own scoped API key and call the LLM directly — reserve sampling for interactive, human-supervised flows where borrowing the client's model and keeping a human reviewing is the actual point."
+    },
+    {
+      "q": "What could go wrong if an MCP client implemented sampling without the spec's human-in-the-loop review step, and how does that step mitigate it?",
+      "a": "Without review, any connected server could silently spend the user's model budget and use the user's model access for arbitrary generation — including a compromised or buggy server laundering a prompt-injection payload through the user's own LLM, or exfiltrating server-side data by encoding it into a \"completion\" it then reads back. Requiring the user to see the outgoing prompt catches unexpected or sensitive requests before they reach the model; requiring approval of the completion before it returns to the server catches the model being tricked into leaking something in its answer. It's the same trust boundary as tool-call approval, applied to the server's ability to *generate* rather than just *act* — an unreviewed sampling implementation is a real security gap, not a convenience shortcut."
+    },
+    {
+      "q": "You're building a server tool that ranks 50 candidate documents by relevance before returning the top 3 to the host's agent loop. Would you implement this with sampling, or return all 50 to the host and let the main agent rank them? Justify the choice for production.",
+      "a": "Default to returning the trimmed candidates to the host and letting the main agent loop do the ranking — it needs no sampling support from the client at all, keeps cost and latency in the main observable conversation, and is simpler to test. Reach for sampling only when the 50 candidates must never leave the server's private context raw — e.g., they contain data the host or user shouldn't see unfiltered, and only a digested verdict like \"top 3 IDs\" should cross back; that's the case sampling is actually for, not a general \"let the server think\" shortcut. Either way, don't make the ranking step a silent hang if sampling is unsupported — check the capability and fail loudly or fall back to a non-LLM heuristic so the tool degrades instead of breaking."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "elicitation",
+    "tools"
+  ],
+  "followUps": [
+    "elicitation"
+  ],
+  "metadata": {
+    "inputHash": "cb1a999ebaba091d",
+    "model": "sonnet",
+    "generatedAt": "2026-07-06T07:03:11Z"
+  }
+}

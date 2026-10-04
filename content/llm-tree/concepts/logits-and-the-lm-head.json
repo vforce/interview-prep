@@ -1,0 +1,100 @@
+{
+  "id": "logits-and-the-lm-head",
+  "title": "Logits and the LM Head",
+  "definition": "A logit is the raw, unnormalized score the LM head — a single linear layer projecting the final hidden state from `d_model` to `vocab_size` dimensions — assigns to each vocabulary token at a given position, before softmax converts those scores into a probability distribution.",
+  "summary": "The LM head sits at the top of a decoder-only transformer: it takes the final (post-norm) hidden state at each position and projects it from `d_model` to `vocab_size`, producing one logit vector per token. Its weight matrix is usually tied to the input embedding table — the same `(vocab_size, d_model)` tensor, reused — which saves hundreds of millions of parameters. In production, the size of this projection and the softmax/cross-entropy that follows it is a real memory and latency bottleneck for large-vocabulary models, so knowing when to compute it (every position vs. just the last token) matters.",
+  "objectives": [
+    "Define a logit and trace the exact shape transformation the LM head performs (`d_model` → `vocab_size`).",
+    "Explain weight tying between the embedding table and LM head, and estimate the parameters it saves.",
+    "Estimate the memory footprint of a logits tensor for realistic `(batch, seq_len, vocab_size)` values.",
+    "Identify the production gotcha of running the LM head over a full cached sequence instead of just the last token.",
+    "Relate logits to softmax, log-softmax/cross-entropy, and temperature-based sampling."
+  ],
+  "lesson": "Every transformer block leaves you with a hidden state `h_t ∈ R^d_model` at each position — a point in a continuous space. To generate text you need a decision over a *discrete* vocabulary (30K–250K tokens), so the LM head bolts one more linear layer on top: `logits = h @ W^T` where `W` has shape `(vocab_size, d_model)`. That's it — it's a classifier head, just with an unusually large number of classes. Softmax then turns those raw scores into a distribution the sampler draws from.\n\nThe structural trick worth knowing cold: `W` almost always has the exact same shape as the input embedding table `E` (`(vocab_size, d_model)`), and many models literally reuse it — \"weight tying.\" Reading a token (`E[token_id]`) and scoring a token (`h @ E.T`) become two views of the same matrix. For a 128K-vocab, 4096-dim model, that's ~524M parameters; tying saves you an entire second copy of that matrix versus a separate LM head.\n\nWorked example — why this matters in production, not just theory: training a Llama-3-8B-shaped model (vocab≈128K, `d_model`=4096) with batch=8, seq_len=4096, the logits tensor alone is 8×4096×128,256 ≈ 4.2 billion elements. At fp32 that's ~16.8 GB — often the single largest tensor in the whole forward pass, bigger than any attention activation. That's why cross-entropy over large vocabularies is usually computed with fused/chunked kernels (e.g., Liger Kernel, `torch.compile`-fused CE) that never materialize the full logits tensor at once.\n\nThe key gotcha, and a real interview trap: during autoregressive decoding with a KV cache, only the *newest* position's logits are ever needed. Writing `lm_head(hidden_states)` and then indexing `[:, -1, :]` silently computes logits for the entire cached sequence every single decode step — wasted compute that grows with context length. The fix is to slice before the head: `lm_head(hidden_states[:, -1:, :])`. This distinction — \"logits for every position\" (needed for training loss) vs. \"logits for the last position\" (all you need for generation) — is the single most common place people leave performance on the table when writing their own decoding loop.",
+  "examples": "**1. LM head with weight tying:**\n\n```python\nimport torch, torch.nn as nn\n\nclass LMHead(nn.Module):\n    def __init__(self, d_model, vocab_size, tie_to=None):\n        super().__init__()\n        self.proj = nn.Linear(d_model, vocab_size, bias=False)\n        if tie_to is not None:\n            self.proj.weight = tie_to.weight       # reuse embedding matrix\n\n    def forward(self, h):\n        return self.proj(h)                        # (B, T, vocab_size)\n\nembed = nn.Embedding(32_000, 2048)\nhead  = LMHead(2048, 32_000, tie_to=embed)\nassert head.proj.weight is embed.weight             # same tensor, not a copy\n```\n\n**2. Decode-time slicing (and the memory math behind why it matters):**\n\n```python\n# hidden_states: (B, T, d_model) from a KV-cached forward pass, T grows each step\n\n# Wasteful: projects every cached position through the vocab-sized matrix\nnext_logits = lm_head(hidden_states)[:, -1, :]\n\n# Correct: only the last position needs to go through the head — O(1) in T\nnext_logits = lm_head(hidden_states[:, -1:, :]).squeeze(1)   # (B, vocab_size)\n\nprobs = torch.softmax(next_logits / temperature, dim=-1)\nnext_token = torch.multinomial(probs, num_samples=1)\n```\n\n| batch | seq_len | vocab_size | logits elements | fp16 size |\n|---|---|---|---|---|\n| 8 | 4096 | 128,256 | ≈4.2 B | ≈8.4 GB |\n| 4 | 1024 | 32,000 | ≈131 M | ≈262 MB |",
+  "tradeoffs": "Weight tying is close to a free lunch for small/medium models: fewer parameters, a mild regularizing effect, and it's a very common default (e.g., GPT-2). It's a config choice, not a law of nature — check `tie_word_embeddings` in a Hugging Face config rather than assuming a model ties or doesn't; some scale up the model instead and keep input/output matrices separate for extra capacity. Separately: full-sequence logits are required for training (every position needs a loss term) but wasteful for single-token decoding — the last-token-only slice is a production/inference-only optimization, not something you'd apply during teacher-forced training.",
+  "diagnosticQuiz": [
+    {
+      "q": "What is a \"logit\" in the context of an LLM's output layer?",
+      "choices": [
+        "The embedding vector looked up for a given input token id",
+        "The raw, unnormalized score assigned to each vocabulary token before softmax",
+        "The probability assigned to the most likely next token",
+        "The final hidden state vector before the LM head"
+      ],
+      "answer": 1,
+      "explanation": "A logit is the pre-softmax raw score; softmax then normalizes logits into a probability distribution. The most tempting wrong answer, C, reflects the common mix-up of treating \"logit\" and \"probability\" as interchangeable — but probabilities are bounded in [0,1] and sum to 1, while logits are unbounded real numbers that don't. (A confuses the hidden state feeding the LM head with its output; D describes the embedding lookup on the input side, not the output-side scoring.)"
+    },
+    {
+      "q": "A model has `d_model=2048`, `vocab_size=32,000`, batch=4, seq_len=1024. Roughly how many elements are in the training-time logits tensor, and its size at fp16 (2 bytes/element)?",
+      "choices": [
+        "≈4 billion elements, ≈8 GB",
+        "≈131 million elements, ≈262 MB",
+        "≈2 million elements, ≈4 MB",
+        "≈131 thousand elements, ≈262 KB"
+      ],
+      "answer": 1,
+      "explanation": "`B×T×V = 4 × 1,024 × 32,000 ≈ 131 million elements`; at 2 bytes/element (fp16) that's ≈262 MB. The most tempting wrong answer, B, reflects a classic order-of-magnitude slip — reading \"131M\" as \"131K\" and forgetting that multiplying three dimensions each in the hundreds/thousands lands you in the hundreds-of-millions — exactly the kind of back-of-envelope mistake that causes real under-provisioning for large-vocab logits memory."
+    },
+    {
+      "q": "Why can most decoder-only LLMs reuse (\"tie\") the input embedding matrix as the LM head's weight matrix?",
+      "choices": [
+        "Because it lets you skip the softmax step at inference",
+        "Because softmax requires the input and output weights to be the same matrix in order to sum to 1",
+        "Because the attention mechanism only works if input and output vocabularies match",
+        "Because both matrices have shape `(vocab_size, d_model)`, so the same matrix can serve as a row-lookup for embeddings and as a matmul for output scores"
+      ],
+      "answer": 3,
+      "explanation": "The embedding table and LM head weight are both `(vocab_size, d_model)` matrices — one does a row lookup (`E[token_id]`), the other a matmul (`h @ E.T`) — so the same tensor can serve both roles, which is exactly what tying exploits. The most tempting wrong answer, D, smuggles in a true-but-unrelated fact (greedy/argmax decoding doesn't strictly need an explicit softmax) and misattributes it to weight tying, which is purely about parameter sharing and shape — you still need softmax (or at least argmax) regardless of whether the weights are tied."
+    },
+    {
+      "q": "You're serving an LLM with a KV cache over long contexts (8K+ tokens). At each decode step, what should happen at the LM head to avoid wasted compute?",
+      "choices": [
+        "Apply the LM head once at the start of generation and reuse those logits for every new token",
+        "Skip the LM head and sample directly from hidden states",
+        "Apply the LM head only to the last position's hidden state",
+        "Apply the LM head to the entire cached hidden-state sequence every step, then take the last row"
+      ],
+      "answer": 2,
+      "explanation": "Only the newest position's hidden state determines the next token, so slicing to `hidden_states[:, -1:, :]` before the LM head avoids O(seq_len) wasted matmul work every decode step. The most tempting wrong answer, A, is exactly the natural-looking but wasteful implementation — it produces the *same result* since you discard all but the last row, so it's easy to ship and never notice the extra cost until context lengths get long and latency degrades. C and D are simply wrong: logits must be recomputed every step since the newest hidden state changes each time, and you cannot sample a vocabulary token without first projecting into vocab space."
+    },
+    {
+      "q": "What's the recommended way to compute cross-entropy loss from logits in PyTorch, and why?",
+      "choices": [
+        "Use `loss = -logits[target]` directly, since logits already behave like log-probabilities",
+        "Normalize logits to `[0, 1]` with min-max scaling, then treat them as probabilities",
+        "Compute `probs = softmax(logits)` then `loss = -log(probs[target])` manually",
+        "Use `F.cross_entropy(logits, targets)`, which fuses log-softmax with negative log-likelihood internally"
+      ],
+      "answer": 3,
+      "explanation": "`F.cross_entropy` takes raw logits directly and internally fuses a numerically-stable log-softmax (subtracting the max logit before exponentiating) with the negative log-likelihood, avoiding overflow when logits are large. The most tempting wrong answer, A, is mathematically equivalent in exact arithmetic — but computed naively it's numerically fragile, since exponentiating large logits can overflow and very small probabilities can underflow before the log is taken — which is exactly why frameworks fuse the two steps rather than composing them naively. C and D aren't valid techniques: logits aren't already log-probabilities, and min-max scaling isn't a probability normalization."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Your model's vocab size grows from 32K to 128K tokens (e.g., a new multilingual tokenizer). What's the production impact on the LM head, and how would you mitigate it?",
+      "a": "Parameter count and compute for the LM head scale linearly with `vocab_size`. More importantly, the *logits tensor* during training (`batch × seq_len × vocab_size`) grows 4x too, and can become the single largest activation tensor in the forward pass — enough to cause OOM even if attention/MLP memory is unchanged. Mitigations: keep weight tying on (`tie_word_embeddings=True`) so you're not paying for two vocab-sized matrices; use fused/chunked cross-entropy kernels (e.g., Liger Kernel, fused `torch.compile` CE) so the full logits tensor is never materialized in fp32 at once; and at inference, always slice hidden states to the last token before the LM head so decode cost doesn't scale with the new vocab size times the full context length."
+    },
+    {
+      "q": "A teammate profiles the model server and is surprised the LM head + softmax is one of the most expensive per-step operations during decoding, rivaling attention. Why is that plausible, and does it change with context length?",
+      "a": "The two costs scale differently. Per decode step, attention over the KV cache costs roughly `O(seq_len × d_model)` *per layer*, summed across all layers — it grows with context length. The LM head is a single dense matmul of shape `d_model × vocab_size`, run once at the top — its cost is *constant* with respect to context length, depending only on `d_model × vocab_size`. For large-vocabulary models (100K+ tokens) at short-to-medium context lengths, that fixed cost can rival the summed attention cost; as context grows, attention and KV-cache traffic increasingly dominate instead. Takeaway: optimizing attention (FlashAttention, paged KV cache) doesn't shrink the LM head's cost — for large-vocab models it often deserves its own optimization pass (lower-precision head, fusing softmax with top-k/top-p sampling)."
+    },
+    {
+      "q": "Beyond picking the next token, how would you use the LM head to debug a fine-tuned checkpoint that seems to have regressed, or to interpret what the model is doing mid-network?",
+      "a": "Two production-relevant techniques:\n- **Logit lens**: apply the frozen final LM head (+ final norm) to hidden states from *intermediate* layers, not just the last one, to see what token distribution the network would emit if it stopped there — useful for localizing where in depth a capability appears or breaks.\n- **Regression debugging**: run the same held-out prompts through the base and fine-tuned checkpoints and compare teacher-forced logits/log-probs (not just generated text) at matched positions. Logging per-token log-prob on a fixed eval set is cheap to run every checkpoint and catches silent regressions (catastrophic forgetting, LR issues) long before a full downstream eval would; large unexplained shifts in top-1/top-5 tokens on prompts unrelated to the fine-tuning task are a red flag. If embeddings are tied, remember that moving the LM head also moves the input embeddings, and vice versa."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "sampling-and-decoding",
+    "transformer-overview"
+  ],
+  "followUps": [
+    "sampling-and-decoding"
+  ],
+  "metadata": {
+    "inputHash": "57bb3c0417b32f5f",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T13:05:23Z"
+  }
+}

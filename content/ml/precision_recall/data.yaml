@@ -1,0 +1,24 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: precision_recall
+type: kata
+area: Classification Metrics
+order: 32
+title: Precision & recall (pure Python)
+prompt: Implement precision and recall for binary 0/1 labels — no libraries. Return a tuple (precision, recall). Return 0.0 for either when it is undefined (no predicted positives → precision 0; no actual positives → recall 0).
+sig: 'def precision_recall(y_true, y_pred):'
+stub: "def precision_recall(y_true, y_pred):\n    # y_true, y_pred are lists of 0/1\n    \n    return precision, recall\n"
+reference: |-
+  def precision_recall(y_true, y_pred):
+      tp = sum(t == 1 and p == 1 for t, p in zip(y_true, y_pred))
+      fp = sum(t == 0 and p == 1 for t, p in zip(y_true, y_pred))
+      fn = sum(t == 1 and p == 0 for t, p in zip(y_true, y_pred))
+      precision = tp / (tp + fp) if (tp + fp) else 0.0
+      recall    = tp / (tp + fn) if (tp + fn) else 0.0
+      return precision, recall
+test: |
+  def _c(a, b): return abs(a - b) < 1e-6
+  r = precision_recall([1,1,0,0], [1,0,0,0]); assert _c(r[0], 1.0) and _c(r[1], 0.5), ("case1", r)
+  r = precision_recall([1,0,1,0,1], [1,1,1,0,0]); assert _c(r[0], 2/3) and _c(r[1], 2/3), ("case2", r)
+  r = precision_recall([0,1,1], [0,0,0]); assert _c(r[0], 0.0) and _c(r[1], 0.0), ("undefined -> 0", r)
+  print("PASS - 3 cases")

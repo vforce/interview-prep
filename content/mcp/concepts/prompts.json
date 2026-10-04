@@ -1,0 +1,100 @@
+{
+  "id": "prompts",
+  "title": "Prompts",
+  "definition": "An MCP Prompt is a named, server-defined message template — declared with optional string arguments and discoverable via `prompts/list` — that a server renders into ready-to-send chat messages via `prompts/get` only when a user, not the model, explicitly selects it.",
+  "summary": "Prompts are one of MCP's three server-exposed primitives, alongside Tools (model-controlled) and Resources (application-controlled) — Prompts are the *user*-controlled one, typically surfaced as slash commands or menu items in the host UI. They let a team centralize and version curated, parameterized interactions, including ones that embed Resource content, on the server instead of hardcoding prompt strings into every client. In production they matter as much for the trust boundary they enforce — a human explicitly triggers the render — as for the reuse they buy.",
+  "objectives": [
+    "Explain how Prompts' \"user-controlled\" invocation differs from Tools (model-controlled) and Resources (application-controlled).",
+    "Implement a parameterized prompt with FastMCP and with the low-level `list_prompts` / `get_prompt` handlers.",
+    "Trace the wire flow: capability negotiation → `prompts/list` → `prompts/get` → spliced `messages[]`.",
+    "Handle `notifications/prompts/list_changed` and `prompts/list` pagination correctly.",
+    "Recognize production risks: string-only arguments, embedded-resource injection, and stale caches."
+  ],
+  "lesson": "MCP splits its server capabilities by *who decides to invoke them*. Tools are model-controlled — the LLM picks one mid-inference. Resources are application-controlled — the host attaches them as context. Prompts are user-controlled — a human explicitly picks one, typically from a slash-command or menu the host builds from `prompts/list`. A Prompt is a server-side, parameterized \"canned message\": name it, describe it, declare its arguments, and the server expands it into one or more chat messages on demand.\n\nOnce `initialize`/`initialized` finishes and the server has advertised `capabilities.prompts` (plus `listChanged` if its catalog can change at runtime — the same negotiation shape you already know from Tools/Resources), the client calls `prompts/list` and gets back `[{name, description, arguments:[{name, required}]}]`. The host might render that as `/code_review`. The user picks it and fills in `code`; the client calls `prompts/get` with `{name: \"code_review\", arguments: {\"code\": \"...\"}}`; the server returns `{description, messages:[...]}` — finished `role`/`content` chat turns, spliced straight into what gets sent to the model.\n\nWorked example: a `debug_error` prompt can return three messages instead of one — a user turn with the error, a canned assistant clarifying question, and another user turn — seeding a multi-turn scaffold from a single `prompts/get` call.\n\nThe gotcha: because Prompts and Tools are both discovered at negotiation, people assume Prompts carry a typed `inputSchema` and can be model-invoked like a Tool. Neither holds. `PromptArgument` has no type field — every argument arrives as a plain string, so numeric/boolean parsing is the server's job. And nothing in the protocol lets the model call `prompts/get` itself; auto-invoking prompts for \"helpfulness\" quietly deletes the human checkpoint Prompts exist for — the same checkpoint that matters most when a prompt embeds Resource content (logs, files) verbatim into a user-role message.",
+  "examples": "**FastMCP — high-level, single- and multi-turn prompts:**\n```python\nfrom mcp.server.fastmcp import FastMCP\nfrom mcp.server.fastmcp.prompts import base\n\nmcp = FastMCP(\"review-server\")\n\n@mcp.prompt()\ndef code_review(code: str, language: str = \"python\") -> str:\n    \"\"\"Ask the model to review a snippet for bugs and style.\"\"\"\n    return f\"Review this {language} code:\\n\\n```{language}\\n{code}\\n```\"\n\n@mcp.prompt()\ndef debug_error(error: str) -> list[base.Message]:\n    \"\"\"Seed a multi-turn debugging conversation.\"\"\"\n    return [\n        base.UserMessage(f\"I'm seeing this error:\\n{error}\"),\n        base.AssistantMessage(\"Got it — what did you last change before this started?\"),\n    ]\n```\nFastMCP infers `name` from the function, `description` from the docstring, and `arguments` from the signature — `language` becomes optional because it has a default.\n\n**Low-level server + the wire trace it produces:**\n```python\nfrom mcp.server import Server\nfrom mcp.types import GetPromptResult, Prompt, PromptArgument, PromptMessage, TextContent\n\nserver = Server(\"review-server\")\n\n@server.list_prompts()\nasync def list_prompts() -> list[Prompt]:\n    return [Prompt(\n        name=\"code_review\",\n        description=\"Review code for bugs and style\",\n        arguments=[PromptArgument(name=\"code\", required=True)],\n    )]\n\n@server.get_prompt()\nasync def get_prompt(name: str, arguments: dict[str, str] | None) -> GetPromptResult:\n    if name != \"code_review\":\n        raise ValueError(f\"unknown prompt: {name}\")\n    text = f\"Review this code:\\n\\n{arguments['code']}\"\n    return GetPromptResult(\n        messages=[PromptMessage(role=\"user\", content=TextContent(type=\"text\", text=text))]\n    )\n```\n```\n--> {\"method\":\"prompts/get\",\"params\":{\"name\":\"code_review\",\"arguments\":{\"code\":\"def f(): pass\"}}}\n<-- {\"messages\":[{\"role\":\"user\",\"content\":{\"type\":\"text\",\"text\":\"Review this code:\\n\\ndef f(): pass\"}}]}\n```",
+  "tradeoffs": "Reach for a Prompt when you want a curated, versioned interaction that many hosts/clients can reuse without a client-side release, and where a human explicitly choosing to run it is a feature, not friction — `/postmortem`, `/code_review`. Don't force a Prompt where the model should just have context (that's a Resource) or should decide autonomously mid-task (that's a Tool); either misuse adds a UI-selection step that's either dead weight or a silent no-op. The main practical cost is ecosystem maturity — many current hosts have thin or no UI for surfacing `prompts/list` as commands, so a well-designed Prompt can go undiscovered where an equivalent Tool would at least get invoked.",
+  "diagnosticQuiz": [
+    {
+      "q": "Which statement best defines an MCP Prompt?",
+      "choices": [
+        "A user-controlled, server-defined message template discovered via `prompts/list` and rendered via `prompts/get`",
+        "A model-controlled function the LLM can invoke mid-inference to fetch or act on data",
+        "A JSON Schema used to validate a tool's arguments before dispatch",
+        "Context the host application attaches automatically without user or model action"
+      ],
+      "answer": 0,
+      "explanation": "Prompts are the *user-controlled* primitive — discovered at `prompts/list`, rendered on demand at `prompts/get`, invoked only when a human picks them. The best distractor (A) describes a Tool: same \"named, discovered at negotiation\" shape, but Tools are model-controlled, which is exactly the axis this concept turns on."
+    },
+    {
+      "q": "A host cached a server's `prompts/list` result at session start, and the server never sent `notifications/prompts/list_changed`. The user now selects a known prompt and fills in its arguments. How many additional JSON-RPC requests does the client need before it has the rendered `messages[]`?",
+      "choices": [
+        "1 — just `prompts/get`",
+        "3 — re-`initialize`, `prompts/list`, then `prompts/get`",
+        "0 — the cached list already contains the messages",
+        "2 — `prompts/list` again, then `prompts/get`"
+      ],
+      "answer": 0,
+      "explanation": "`prompts/list` only returns catalog metadata (name/description/arguments), never rendered messages — those come only from `prompts/get`. Since no `list_changed` fired, the cached catalog is still valid, so re-listing (C) is wasted work, and re-`initialize`-ing (D) confuses session lifecycle with catalog refresh."
+    },
+    {
+      "q": "Why does MCP model Prompt invocation as user-controlled instead of model-controlled like Tools?",
+      "choices": [
+        "The protocol technically prevents the model from ever seeing rendered prompt messages",
+        "Prompts often splice resource content (logs, files) verbatim into the conversation, so a human should decide when that happens rather than the model triggering it itself",
+        "Prompts require an API key that Tools don't need",
+        "Prompts are always computationally more expensive to run than tool calls"
+      ],
+      "answer": 1,
+      "explanation": "This is the actual design rationale — Prompts are a convenient place to smuggle untrusted content straight into a user-role message, so MCP keeps a human checkpoint in front of that. C is the tempting-but-wrong idea: the model absolutely sees the rendered messages once spliced into context — what's restricted is *who triggers the rendering*, not what the model can later see."
+    },
+    {
+      "q": "A team wants the model to decide, mid-task and without any explicit user action, when to pull the latest on-call runbook. Which MCP primitive fits?",
+      "choices": [
+        "A Tool, since invocation being model-controlled is exactly its contract",
+        "A `list_changed` notification, since the server can push updates",
+        "A Resource, since a runbook is just data",
+        "A Prompt, since it can embed Resource content in its messages"
+      ],
+      "answer": 0,
+      "explanation": "\"Decides on its own, mid-task, no explicit user step\" is the definition of model-controlled invocation — a Tool. A Prompt would sit unused until a person explicitly selects it from a menu, silently failing the actual requirement; that it *can* embed resources (A) doesn't change who triggers it."
+    },
+    {
+      "q": "In a `prompts/get` request, the values in the `arguments` object are:",
+      "choices": [
+        "Whatever JSON type the server's declared schema specifies for each argument",
+        "Always strings — the server must parse/validate numbers, booleans, etc. itself",
+        "Automatically encrypted by the transport layer",
+        "Ignored server-side; they only drive client-side autocomplete"
+      ],
+      "answer": 1,
+      "explanation": "`PromptArgument` carries only `name` / `description` / `required` — no type — and the wire payload is `dict[str, str]`. The tempting wrong answer (A) pattern-matches to Tools' `inputSchema`, which does carry JSON Schema types; Prompts deliberately don't, which is exactly the detail that breaks a naive `int(arguments[\"count\"])` if you forget to guard it."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "You're deploying an MCP server whose Prompts embed live log/file Resource content into rendered messages. What controls keep that from becoming a prompt-injection vector?",
+      "a": "- Never let the model call `prompts/get` itself; keep it strictly behind an explicit user action in the host UI so a human always decides before untrusted content enters the conversation.\n- Have the client show the fully-expanded messages (or a preview) before sending, not fire-and-forget.\n- Allowlist which URIs/mime types a given prompt may embed, rather than letting an argument drive an arbitrary resource fetch.\n- Treat every `arguments` string as untrusted input — length-limit it and avoid naive interpolation that could break out of the intended message boundary.\n- Log what was actually rendered/sent, same as you would for any tool call with side effects."
+    },
+    {
+      "q": "A server team asks whether they need to declare `listChanged: true` for their `prompts` capability. How do you decide, and what does the client do differently either way?",
+      "a": "Declare it only if the catalog can actually change during a running session — hot-reloaded templates, feature-flagged or per-user prompts. Declaring it is a commitment: you must send `notifications/prompts/list_changed` on every change, and clients are then entitled to cache `prompts/list` indefinitely between notifications — under-declaring leaves clients silently stale. If you don't declare it, clients should treat the catalog as fixed for the session, fetch it once, and never re-poll; building \"refresh\" UI against a static catalog is wasted work."
+    },
+    {
+      "q": "Why might you expose a workflow as an MCP Prompt instead of just hardcoding the prompt string inside your chat client?",
+      "a": "It centralizes and versions the prompt engineering server-side — one place to iterate or A/B test wording — and it's immediately reusable by every MCP-speaking host without a client release. It keeps curated, known-good interactions discoverable via `prompts/list` instead of scattered across client codebases. The trade-off: an extra `prompts/get` round trip, and dependence on the host having built decent UI to surface prompts at all."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "building-an-mcp-server",
+    "lifecycle-and-capability-negotiation"
+  ],
+  "followUps": [
+    "building-an-mcp-server"
+  ],
+  "metadata": {
+    "inputHash": "9d2ecf3e190157b9",
+    "model": "sonnet",
+    "generatedAt": "2026-07-06T06:55:43Z"
+  }
+}

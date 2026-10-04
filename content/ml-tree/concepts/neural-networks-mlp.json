@@ -1,0 +1,102 @@
+{
+  "id": "neural-networks-mlp",
+  "title": "Neural Networks (MLP)",
+  "definition": "A multilayer perceptron (MLP) is a feedforward neural network that stacks multiple affine transformations, each followed by a nonlinear activation function, to learn non-linear decision boundaries or function mappings, trained end-to-end via backpropagation and gradient descent.",
+  "summary": "An MLP generalizes logistic regression by composing several linear-map-plus-nonlinearity layers instead of just one, which lets it represent non-linear decision boundaries that a single linear model cannot. It's trained the same way logistic regression is — gradient descent on a loss function — but backpropagation extends the gradient computation through every layer via the chain rule. The added expressiveness comes at the cost of a non-convex loss, more parameters, and less interpretability.",
+  "objectives": [
+    "Explain how an MLP generalizes logistic regression via stacked linear + nonlinear transforms.",
+    "State why a nonlinearity between layers is required (otherwise depth collapses to one linear model).",
+    "Reason about the capacity/data/regularization tradeoffs of an MLP vs. logistic regression in production.",
+    "Recognize and debug common training failure modes (vanishing gradients, bad init, missing nonlinearity).",
+    "Decide when an MLP is — or isn't — the right production model vs. a linear baseline or GBM."
+  ],
+  "lesson": "Logistic regression computes one affine map, `z = Wx + b`, and squashes it with a sigmoid — a linear decision boundary in feature space. An MLP is what you get from composing several such maps with a nonlinearity between them:\n\n```\nh1 = f(W1 x  + b1)\nh2 = f(W2 h1 + b2)\ny  = σ(Wk h_{k-1} + bk)\n```\n\nEach layer looks like a logistic-regression unit, but because a nonlinearity `f` (ReLU, tanh, GELU, …) sits between the linear maps, the composition can bend and fold feature space — letting the network carve out non-linear boundaries. The universal approximation theorem says one hidden layer with enough units can approximate any continuous function on a compact domain; in practice, depth is a more parameter-efficient way to buy that than width.\n\n**Worked example — XOR.** Points `(0,0)→0, (1,1)→0, (0,1)→1, (1,0)→1` aren't linearly separable, so logistic regression is stuck at ~50% accuracy no matter how you fit `w`. Add one hidden layer of 2 units: one unit learns roughly \"fires when `x1+x2 ≥ 1`\" (an OR-like gate), the other learns \"fires when `x1+x2 ≥ 2`\" (an AND-like gate). The output layer linearly recombines those two learned features (`OR − AND`) into a boundary that separates the classes — something no single line could do in the original `x1, x2` space.\n\n**The key gotcha:** nonlinearity is what buys you this. If `f` were the identity, `h2 = W2(W1 x + b1) + b2 = (W2 W1) x + (W2 b1 + b2)` — algebraically just another linear model, no matter how many layers you stack. Depth without nonlinearity is wasted parameters and can never solve XOR. A second, very common gotcha: stacking sigmoid/tanh across many layers causes gradients to shrink multiplicatively on the backward pass (each local derivative is ≤0.25 for sigmoid), so early layers barely update — \"vanishing gradients.\" ReLU-family activations, careful init (He/Xavier), and normalization layers exist specifically to keep gradient magnitude stable through depth.",
+  "examples": "**Example 1 — XOR forward pass by hand (NumPy), no training, just to see the mechanism:**\n\n```python\nimport numpy as np\n\ndef sigmoid(z): return 1 / (1 + np.exp(-z))\n\nX = np.array([[0,0],[0,1],[1,0],[1,1]], dtype=float)  # 4x2\ny = np.array([0,1,1,0], dtype=float)                    # XOR\n\n# Hand-set weights (not learned) that realize an OR-like and AND-like\n# hidden unit, then combine them as OR - AND = XOR.\nW1 = np.array([[20., 20.], [20., 20.]])   # (2 in, 2 hidden)\nb1 = np.array([-10., -30.])               # unit0 ~ OR gate, unit1 ~ AND gate\nW2 = np.array([20., -20.])                # (2 hidden, 1 out)\nb2 = -10.\n\nH = sigmoid(X @ W1 + b1)      # (4,2) hidden activations\nout = sigmoid(H @ W2 + b2)    # (4,)\nprint(np.round(out, 2))       # [0. 1. 1. 0.]  -> matches XOR\n```\nZero out the hidden layer (or make `f` the identity) and this collapses to a single linear map — it can no longer separate XOR.\n\n**Example 2 — production-style MLP in PyTorch (init + regularization called out):**\n\n```python\nimport torch\nimport torch.nn as nn\n\nclass MLPClassifier(nn.Module):\n    def __init__(self, in_dim=10, hidden=32, out_dim=1, p_drop=0.2):\n        super().__init__()\n        self.net = nn.Sequential(\n            nn.Linear(in_dim, hidden),\n            nn.ReLU(),\n            nn.Dropout(p_drop),\n            nn.Linear(hidden, out_dim),\n        )\n        for m in self.net:                     # He init pairs with ReLU\n            if isinstance(m, nn.Linear):\n                nn.init.kaiming_normal_(m.weight, nonlinearity=\"relu\")\n                nn.init.zeros_(m.bias)\n\n    def forward(self, x):\n        return self.net(x)                      # logits; pair with BCEWithLogitsLoss\n\nmodel = MLPClassifier()\nprint(sum(p.numel() for p in model.parameters()))  # 385 total trainable params\n```",
+  "tradeoffs": "MLPs trade interpretability and data-efficiency for expressiveness: logistic regression gives a coefficient per feature and fits reliably on a few thousand rows; an MLP's weights aren't individually meaningful and typically need more data plus deliberate regularization (weight decay, dropout, early stopping) to avoid overfitting. Training is non-convex — you can land in a poor region and need to tune learning rate, depth, width, and initialization — whereas logistic regression's loss is convex with one global optimum. In production, MLPs cost more to serve and are harder to monitor or debug (no \"this feature's coefficient flipped sign\" story). Use an MLP when the true relationship is genuinely non-linear and you have enough labeled data to support the extra capacity; stick with logistic regression when you need interpretability, low latency, or a fast, auditable baseline. Note also that on plain tabular data, gradient-boosted trees often beat plain MLPs with less tuning — MLPs earn their keep mainly as a building block inside larger architectures (transformers' feed-forward blocks) or on dense, high-dimensional inputs like embeddings.",
+  "diagnosticQuiz": [
+    {
+      "q": "Which statement best captures the key structural difference between an MLP and logistic regression?",
+      "choices": [
+        "An MLP requires unsupervised pretraining while logistic regression does not",
+        "An MLP always uses a softmax output while logistic regression uses sigmoid",
+        "An MLP is trained with gradient boosting while logistic regression uses gradient descent",
+        "An MLP stacks multiple linear-then-nonlinear layers, allowing it to learn non-linear decision boundaries, while logistic regression is a single linear layer with a sigmoid"
+      ],
+      "answer": 3,
+      "explanation": "An MLP is literally logistic regression's linear-map-plus-sigmoid pattern, repeated and interleaved with a nonlinearity, which is what lets it represent non-linear boundaries — logistic regression is the single-layer special case. The output-activation distractor isn't the defining difference (both can use sigmoid or softmax depending on the task). The training-algorithm distractors are simply false — both are typically trained with gradient-based methods."
+    },
+    {
+      "q": "An MLP has an input layer of size 10, one hidden layer of 32 units, and an output layer of 1 unit, fully connected with biases. How many trainable parameters does it have?",
+      "choices": [
+        "352",
+        "320",
+        "385",
+        "416"
+      ],
+      "answer": 2,
+      "explanation": "Parameters = (10×32 + 32) for the input→hidden layer, plus (32×1 + 1) for the hidden→output layer = 352 + 33 = 385. The common mistake is forgetting a bias vector (giving 320 or 352) or mis-handling the second layer's contribution."
+    },
+    {
+      "q": "Why must a nonlinearity be applied between an MLP's linear layers?",
+      "choices": [
+        "To reduce the number of trainable parameters",
+        "Without it, stacking linear layers collapses algebraically into a single linear transform, so extra depth adds no representational power",
+        "To guarantee the loss surface is convex",
+        "To make backpropagation run faster"
+      ],
+      "answer": 1,
+      "explanation": "`W2(W1 x + b1) + b2` reduces to `(W2 W1) x + (W2 b1 + b2)` — one affine map — no matter how many linear layers you stack. The nonlinearity is what prevents that collapse and gives each layer genuine additional representational power; depth alone, with linear layers, buys nothing beyond what logistic regression already computes."
+    },
+    {
+      "q": "You're building a fraud-detection model on 50 hand-engineered tabular features, need explainable coefficients for a compliance team, and have only 20k labeled examples. What should you start with?",
+      "choices": [
+        "Logistic regression, since it's interpretable, needs less data, and 50 engineered features rarely require nonlinear modeling",
+        "A random ensemble of deep MLPs to reduce variance",
+        "An MLP with dropout 0.9, since the dropout will prevent overfitting on 20k rows",
+        "A deep MLP with 5 hidden layers, since it has more capacity"
+      ],
+      "answer": 0,
+      "explanation": "The combination of hand-engineered features, an explainability requirement, and a modest dataset all favor logistic regression — it's convex, gives an auditable coefficient per feature, and is less prone to overfitting here. A 5-layer MLP adds capacity and hyperparameters you don't need and directly works against the interpretability requirement; heavy dropout only fights overfitting, it doesn't restore interpretability."
+    },
+    {
+      "q": "You train a 6-hidden-layer MLP with sigmoid activations at every layer. The first two layers' weights barely move and the loss plateaus early. What's the most likely cause?",
+      "choices": [
+        "The learning rate is too high, causing divergence",
+        "The L2 regularization coefficient is too high, freezing all weights",
+        "Vanishing gradients: sigmoid derivatives are ≤0.25, so gradients shrink multiplicatively as they backpropagate through many layers, leaving early layers with tiny updates",
+        "The model has too few parameters to fit the data"
+      ],
+      "answer": 2,
+      "explanation": "Each sigmoid's derivative is at most 0.25, and backprop multiplies these local derivatives layer by layer, so across 6 layers the gradient reaching the first layer can shrink by orders of magnitude. The symptom — early-layer weights frozen, loss plateauing early — is the classic vanishing-gradient tell; the fix is ReLU-family activations, better init, or normalization, not a learning-rate or regularization change."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "When would you reach for an MLP instead of logistic regression in a production system, and what does that choice cost you operationally?",
+      "a": "Reach for an MLP when the signal genuinely needs non-linear feature interactions and you have enough labeled data (typically tens of thousands+ rows) to support the extra parameters — e.g. raw-ish inputs like embeddings, pixels, or text rather than a handful of well-engineered tabular columns. The cost: non-convex training (more tuning, less run-to-run reproducibility), a larger/slower model to serve, loss of per-feature interpretability, and a bigger surface for silent failure modes (bad init, vanishing gradients, dead ReLUs) a linear model simply can't have. In practice, start with logistic regression (or a GBM) as a baseline and only ship an MLP if it clears that baseline by a margin that justifies the added complexity."
+    },
+    {
+      "q": "How do you keep a production MLP from overfitting, and how do you catch it before it ships?",
+      "a": "Combine capacity control with data-side controls — L2 weight decay, dropout, early stopping on a held-out validation set — and keep the network no larger than the data supports, preferring more data/augmentation over more layers. Before shipping, watch for train/validation loss divergence (rising val loss while train loss keeps falling is the tell) and gate deployment on held-out metrics, not training metrics. Post-deploy, monitor live prediction distributions and downstream metric drift, since overfitting that passed offline eval can still surface as poor generalization to a shifting input distribution."
+    },
+    {
+      "q": "Walk through debugging an MLP whose training loss stalls near random-guess level after a couple of epochs.",
+      "a": "First rule out the boring bugs: label/feature misalignment, unnormalized inputs, or a loss mismatched to the output (e.g. missing `BCEWithLogitsLoss` pairing). Try to overfit a tiny batch (~10 examples) to near-zero loss as a sanity check — if that fails, it's a bug, not a modeling issue. If the tiny-batch check passes but full training still stalls, log per-layer gradient norms to check for vanishing/exploding gradients, verify init matches the activation (He for ReLU, Xavier for tanh/sigmoid), confirm there's an actual nonlinearity between every linear layer, and check for a learning rate that's off by orders of magnitude. Only after ruling those out would I reach for architecture changes like batchnorm or residual connections."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "activation-functions",
+    "backpropagation",
+    "logistic-regression"
+  ],
+  "followUps": [
+    "activation-functions",
+    "backpropagation"
+  ],
+  "metadata": {
+    "inputHash": "61f4dd38f5772a9b",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T10:43:44Z"
+  }
+}

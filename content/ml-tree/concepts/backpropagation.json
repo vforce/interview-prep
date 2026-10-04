@@ -1,0 +1,109 @@
+{
+  "id": "backpropagation",
+  "title": "Backpropagation",
+  "definition": "Backpropagation is the algorithm that computes the gradient of the loss with respect to every parameter in a neural network by applying the chain rule backward through the network's computational graph, reusing cached forward-pass values so the full gradient costs about one extra forward pass, regardless of parameter count.",
+  "summary": "Backprop is reverse-mode automatic differentiation specialized to neural nets: it walks the computational graph from the loss back to the inputs, at each step multiplying the incoming gradient by a local Jacobian to get both the parameter gradients and the signal to pass further back. It's what makes gradient descent tractable at scale — millions or billions of parameter gradients cost about the same as one forward pass, not one forward pass per parameter. Every modern framework (PyTorch autograd, JAX, TensorFlow GradientTape) is, under the hood, a general-purpose backprop engine.",
+  "objectives": [
+    "Derive the per-layer backprop equations (dL/dz, dL/dW, dL/db, dL/da) from the chain rule.",
+    "Explain why backprop's cost is ~1 extra forward pass regardless of parameter count, unlike finite differences.",
+    "Diagnose vanishing/exploding gradients from activation choice and network depth.",
+    "Explain the memory-vs-compute tradeoff behind gradient/activation checkpointing.",
+    "Implement forward + backward for a small MLP by hand in NumPy, without autograd."
+  ],
+  "lesson": "Backpropagation is reverse-mode automatic differentiation applied to a neural network's computational graph. In one backward sweep it produces `dL/dθ` for every parameter `θ`, reusing intermediate results from the chain rule instead of recomputing per parameter — that reuse is the entire efficiency story.\n\n**Intuition.** Treat the network as a chain of functions, `L = loss(f_n(f_{n-1}(...f_1(x))))`. The forward pass evaluates this chain and caches every intermediate value (pre-activations `z`, activations `a`). The backward pass walks the chain in reverse: each layer takes the gradient arriving from downstream (closer to the loss), combines it with its own local derivative, and produces two things — the gradient for its own parameters, and the signal to pass further upstream. For a layer `z = Wa + b`, `a' = g(z)`, given incoming `δ = dL/da'`:\n\n```\ndL/dz = δ ⊙ g'(z)\ndL/dW = (dL/dz) aᵀ\ndL/db = dL/dz\ndL/da = Wᵀ(dL/dz)      ← becomes δ for the previous layer\n```\n\nEach layer only needs its own cached activation and its incoming `δ` — never anything about layers further away. That locality is why backprop's cost scales linearly with depth, not quadratically, and why it's cheap: finite-difference estimation needs one extra forward pass *per parameter*; backprop gets gradients for all of them in about one extra forward-pass-worth of compute, total.\n\n**The gotcha, in one number.** If each layer's local Jacobian scales the gradient by ~0.3 and you stack 20 layers, the gradient reaching layer 1 is scaled by `0.3^20 ≈ 3e-11` — effectively zero. That's vanishing gradients, routinely misdiagnosed as \"bad init\" or \"wrong learning rate\" when the real cause is depth compounding with small-derivative activations (sigmoid/tanh). The mirror failure, exploding gradients, happens when per-layer factors are consistently >1.\n\n**The other gotcha:** backprop must keep every cached forward activation alive until its matching backward step consumes it, so memory — not compute — is usually the binding constraint for deep nets or long sequences (transformer training, in particular). Gradient/activation checkpointing (`torch.utils.checkpoint`, `jax.checkpoint`) trades roughly 33% extra recompute for a large memory cut by discarding most activations and recomputing them on demand. In production you almost never hand-write backprop, but you constantly reason about what it forces the framework to hold in memory.",
+  "examples": "### Example 1 — hand-traced scalar network\n\nNetwork: `x → z1=w1·x+b1 → a1=sigmoid(z1) → z2=w2·a1+b2 → ŷ=z2`, loss `L = 0.5(ŷ−y)²`.\nValues: `x=1.0, w1=0.5, b1=0, w2=2.0, b2=0, y=1.0`.\n\n```\nForward:\n  z1 = 0.5*1.0 + 0        = 0.5\n  a1 = sigmoid(0.5)       ≈ 0.6225\n  z2 = 2.0*0.6225 + 0     ≈ 1.2449   = ŷ\n  L  = 0.5*(1.2449-1.0)^2 ≈ 0.0300\n\nBackward:\n  dL/dŷ = ŷ - y            ≈ 0.2449\n  dL/dz2 = dL/dŷ            ≈ 0.2449   (output layer is identity)\n  dL/dw2 = dL/dz2 * a1     ≈ 0.1525\n  dL/db2 = dL/dz2          ≈ 0.2449\n  dL/da1 = dL/dz2 * w2     ≈ 0.4898\n  dL/dz1 = dL/da1 * a1*(1-a1) ≈ 0.4898*0.2350 ≈ 0.1151\n  dL/dw1 = dL/dz1 * x      ≈ 0.1151\n  dL/db1 = dL/dz1          ≈ 0.1151\n```\n\nNote the pattern: every gradient is \"upstream signal × local derivative,\" and `dL/da1` is exactly what gets multiplied by `sigmoid'(z1)` to keep propagating backward.\n\n### Example 2 — vectorized NumPy (batch of N, same equations)\n\n```python\nimport numpy as np\n\ndef forward(X, W1, b1, W2, b2):\n    Z1 = X @ W1 + b1            # (N, h)\n    A1 = 1 / (1 + np.exp(-Z1))  # sigmoid, (N, h)\n    Z2 = A1 @ W2 + b2           # (N, d_out), linear output\n    return Z1, A1, Z2\n\ndef backward(X, Y, Z1, A1, Z2, W2):\n    N = X.shape[0]\n    dZ2 = (Z2 - Y) / N          # dL/dZ2 for MSE, (N, d_out)\n    dW2 = A1.T @ dZ2            # (h, d_out)\n    db2 = dZ2.sum(axis=0)       # (d_out,)\n    dA1 = dZ2 @ W2.T            # (N, h)\n    dZ1 = dA1 * A1 * (1 - A1)   # chain through sigmoid, (N, h)\n    dW1 = X.T @ dZ1             # (d_in, h)\n    db1 = dZ1.sum(axis=0)       # (h,)\n    return dW1, db1, dW2, db2\n```\n\nWith `X`, `W1`, `b1`, `W2`, `b2` shaped `(1,1)` and the values above, this reproduces Example 1 exactly.",
+  "tradeoffs": "Backprop requires a fully differentiable computational graph and every forward activation kept alive until its backward step consumes it — memory scales with depth × batch size × activation width, which is usually the real bottleneck for deep nets, large batches, or long sequences (transformers), not compute. Checkpointing, mixed precision, and reversible layers all trade extra compute or precision for less memory; skip them for small models where compute dominates and the added complexity buys nothing. When part of the pipeline is non-differentiable (discrete sampling, hard argmax, a black-box simulator/reward), plain backprop doesn't apply — reach for the reparameterization trick, a straight-through estimator, or a policy-gradient/REINFORCE-style estimator instead. Gradient-free alternatives (evolutionary strategies, zeroth-order optimization) sidestep backprop entirely but scale far worse with parameter count, so reserve them for genuinely non-differentiable objectives, not as a default.",
+  "diagnosticQuiz": [
+    {
+      "q": "What does backpropagation actually compute?",
+      "choices": [
+        "The optimal learning rate for gradient descent",
+        "The raw forward-pass activations of the network",
+        "The gradient of the loss with respect to every parameter, via reverse-mode chain rule over the computational graph",
+        "A Hessian (second-order curvature) approximation for Newton's method"
+      ],
+      "answer": 2,
+      "explanation": "Backprop's defined output is first-order gradients `dL/dθ` for every parameter, obtained by reusing the chain rule through the cached computational graph. Learning rate is a hyperparameter set by the optimizer/schedule, not something backprop produces; forward activations are cached as a byproduct, not the goal; Hessian information needs extra machinery (e.g. a second backward pass), which plain backprop doesn't provide on its own."
+    },
+    {
+      "q": "For a layer `z = Wa + b`, `a' = sigmoid(z)`, with upstream gradient `δ = dL/da'`, what is `dL/dW`?",
+      "choices": [
+        "`Wᵀδ`",
+        "`δ · aᵀ`",
+        "`(δ ⊙ a'(1−a')) · aᵀ`",
+        "`δ ⊙ (1 − a')`"
+      ],
+      "answer": 2,
+      "explanation": "You must first backprop through the sigmoid — multiply `δ` elementwise by `sigmoid'(z) = a'(1−a')` to get `dL/dz` — then take the outer product with `aᵀ` for `dL/dW`. The first option is the classic mistake of treating the layer as purely linear and skipping the activation's local derivative; the second is the formula for `dL/da` (passed to the *previous* layer), not the weight gradient; the fourth is just the bare sigmoid-derivative factor with nothing multiplied in."
+    },
+    {
+      "q": "Why is backpropagation dramatically cheaper than estimating each parameter's gradient independently (e.g. via finite differences)?",
+      "choices": [
+        "It only updates a random subset of parameters on each step",
+        "It approximates gradients rather than computing them exactly",
+        "It reuses shared intermediate gradient computations via the chain rule, so total cost is roughly one extra forward pass regardless of parameter count",
+        "It skips computing gradients for the earliest layers"
+      ],
+      "answer": 2,
+      "explanation": "Reverse-mode chain rule shares upstream gradient computations across every parameter in a single backward pass, so cost is independent of parameter count — finite differences instead need one extra forward pass *per parameter*, infeasible at millions/billions of weights. Backprop's gradients are exact up to floating-point error, not approximations, and they do reach every layer including the earliest ones — that full reach is the point of \"back\"-propagation."
+    },
+    {
+      "q": "In which of these situations does plain backpropagation *not* directly apply?",
+      "choices": [
+        "Optimizing a mean-squared-error loss",
+        "A step in the computation involves a non-differentiable operation, e.g. discrete sampling or an argmax",
+        "Using minibatch gradient descent",
+        "Training an MLP with ReLU activations"
+      ],
+      "answer": 1,
+      "explanation": "Non-differentiable operations break the chain rule outright, so they need a workaround — the reparameterization trick, a straight-through estimator, or a policy-gradient/REINFORCE-style estimator. ReLU (subgradient at 0), minibatching, and MSE are all standard cases that ordinary backprop/autograd handles with no special treatment, which is the misconception the other options trade on."
+    },
+    {
+      "q": "A deep feedforward network with sigmoid activations trains fine near the output but its earliest layers barely move. What's the most likely cause?",
+      "choices": [
+        "The learning rate is too high",
+        "The loss surface is non-convex",
+        "Repeated multiplication by small sigmoid derivatives (≤0.25) shrinks the gradient exponentially with depth",
+        "Backpropagation only computes gradients for the last layer by design"
+      ],
+      "answer": 2,
+      "explanation": "Sigmoid's derivative maxes out at 0.25 and is often smaller; chained multiplicatively across many layers, the product shrinks toward zero, starving the earliest layers — the classic vanishing-gradient problem, which motivates ReLU-family activations, residual connections, and normalization. A too-high learning rate typically causes divergence/oscillation everywhere, not selective early-layer stagnation; non-convexity is generic to the loss landscape and unrelated to this symptom; and backprop's whole design is to reach every layer, so the last option misstates the algorithm itself."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Implement backprop for a 2-layer MLP (linear → sigmoid → linear) from scratch in NumPy — no autograd. Walk through the shapes.",
+      "a": "Forward: `Z1 = X@W1+b1` (N,h) → `A1 = sigmoid(Z1)` (N,h) → `Z2 = A1@W2+b2` (N,d_out) as the prediction; cache `X, Z1, A1`, since backward needs them. Backward, starting from `dL/dZ2` (for MSE, `(Z2−Y)/N`): `dW2 = A1.T @ dZ2` (h,d_out), `db2 = dZ2.sum(0)` (d_out,), `dA1 = dZ2 @ W2.T` (N,h), `dZ1 = dA1 * A1*(1-A1)` (chain through sigmoid, N,h), `dW1 = X.T @ dZ1` (d_in,h), `db1 = dZ1.sum(0)` (h,). The fast sanity check: every gradient's shape must match its corresponding parameter's shape — that alone catches most hand-rolled-backprop bugs."
+    },
+    {
+      "q": "Training a large network, the loss goes to NaN after a few hundred steps. How do you determine if it's a gradient/backprop issue, and fix it?",
+      "a": "Log the global and per-layer gradient norm every step — a sharp spike right before the NaN points to exploding gradients rather than a forward-pass bug. Turn on `torch.autograd.set_detect_anomaly(True)` to localize the exact op emitting a NaN/Inf gradient. Common root causes: no gradient clipping paired with a learning rate that's fine on average but spikes occasionally; a numerically unstable op (log of ~0, unshifted softmax, division without an epsilon); fp16 mixed precision without proper loss scaling; or a corrupt/outlier batch. Fix in order: add `clip_grad_norm_`, stabilize the suspect op, verify AMP loss scaling, and only then suspect a genuine model/architecture problem."
+    },
+    {
+      "q": "Why does training large models (transformers/LLMs) commonly use gradient/activation checkpointing? What's the exact tradeoff?",
+      "a": "Backprop needs every forward activation cached until its matching backward step consumes it; for a transformer that's `O(layers × batch × sequence_length × hidden_dim)` of memory, which hits the GPU memory ceiling long before compute does. Activation checkpointing stores activations at only a subset of layers and recomputes the rest during the backward pass on demand, cutting activation memory from roughly `O(layers)` toward `O(√layers)` or `O(1)` at the cost of about one extra forward pass (~33% more compute). That trade is almost always worth it: it lets a larger batch size or model fit on the same hardware, and compute is far more elastic than a hard memory ceiling."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "gradient-descent",
+    "neural-network-regularization",
+    "neural-networks-mlp",
+    "normalization-batch-and-layer",
+    "optimizers-sgd-momentum-adam",
+    "self-attention",
+    "vanishing-and-exploding-gradients"
+  ],
+  "followUps": [
+    "neural-network-regularization",
+    "normalization-batch-and-layer",
+    "optimizers-sgd-momentum-adam",
+    "self-attention",
+    "vanishing-and-exploding-gradients"
+  ],
+  "metadata": {
+    "inputHash": "8a384f9c95d2b0f9",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T10:47:33Z"
+  }
+}

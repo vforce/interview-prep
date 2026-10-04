@@ -1,0 +1,97 @@
+{
+  "id": "data-leakage",
+  "title": "Data Leakage",
+  "definition": "Data leakage is when information that would not be available at inference time — including the target itself, future data, or statistics computed across train/validation boundaries — leaks into model training or feature computation, producing offline metrics that don't reflect real production performance.",
+  "summary": "Leakage is the single most common reason a model looks great in cross-validation and then fails in production. It usually enters through preprocessing fit on the full dataset, features derived from or correlated with the outcome after the fact, grouped entities split across folds, or temporal ordering violations. Unlike overfitting, no amount of regularization fixes it — the validation signal itself is corrupted, so you have to fix the data/pipeline, not the model.",
+  "objectives": [
+    "Define data leakage and explain why it's a distinct failure mode from overfitting.",
+    "Recognize the four common leakage sources: preprocessing, target, temporal, and group leakage.",
+    "Build sklearn `Pipeline`s so all fitted transforms are scoped to the training fold only.",
+    "Design leakage-safe CV (`GroupKFold`, forward-chaining time splits) for non-iid data.",
+    "Spot leakage red flags during model review and production incident postmortems."
+  ],
+  "lesson": "The intuition: leakage means the model got to peek at an answer key it won't have in production. CV only estimates generalization correctly if every fold reproduces the *exact* information boundary that will exist at inference time — anything that crosses that boundary makes your validation score a lie, not an estimate.\n\nThe classic beginner version is preprocessing leakage: fitting `StandardScaler`, a `PCA`, or an imputer on the full dataset before splitting. Fold statistics (mean, std, components) get computed with validation rows baked in. The fix is mechanical — put every fitted transform inside a `Pipeline` and let `cross_val_score` fit it fresh per fold:\n\n```python\nfrom sklearn.pipeline import Pipeline\nfrom sklearn.preprocessing import StandardScaler\nfrom sklearn.linear_model import LogisticRegression\nfrom sklearn.model_selection import cross_val_score\n\npipe = Pipeline([\n    (\"scale\", StandardScaler()),\n    (\"clf\", LogisticRegression()),\n])\nscores = cross_val_score(pipe, X, y, cv=5)  # scaler refit per fold, train-only\n```\n\nThe gotcha senior engineers actually get burned by is **target leakage**: a feature that is causally *downstream* of the label. Example: predicting churn with a feature `cancellation_confirmation_sent` — that field only populates after the customer already churned. It's not noisy, it's not subtle — it correlates ~perfectly with the label because it's effectively a copy of it, recorded slightly later in the pipeline. It sails through feature importance checks (high importance looks like a good sign!) and destroys the model in production, where that field is still null at prediction time.\n\nThe general rule: for every feature, ask \"would this value actually exist, with this content, at the moment I'd need to make this prediction in production?\" If the answer requires knowing the outcome, it's leakage — no fold structure fixes it, only removing or re-timestamping the feature does.",
+  "examples": "**1. Target encoding leakage (a leakage bug that hides inside feature engineering, not preprocessing)**\n\n```python\n# LEAKY: mean-target-encode using the whole dataset, then CV\ndf[\"city_enc\"] = df.groupby(\"city\")[\"churned\"].transform(\"mean\")\n# every row's encoding includes its own label -> inflated CV score\n\n# FIX: compute the encoding out-of-fold (or inside the CV loop)\nfrom sklearn.model_selection import KFold\noof = pd.Series(index=df.index, dtype=float)\nfor tr_idx, val_idx in KFold(5, shuffle=True, random_state=0).split(df):\n    means = df.iloc[tr_idx].groupby(\"city\")[\"churned\"].mean()\n    oof.iloc[val_idx] = df.iloc[val_idx][\"city\"].map(means)\ndf[\"city_enc\"] = oof\n```\n\n**2. Group + temporal leakage in a patient/time-series setting**\n\n```python\n# LEAKY: random KFold when one patient contributes many rows over time\n# -> same patient's future visit ends up in train, past visit in validation\n\nfrom sklearn.model_selection import GroupKFold\ngkf = GroupKFold(n_splits=5)\nsplits = gkf.split(X, y, groups=df[\"patient_id\"])  # no patient spans folds\n\n# If features also use rolling/future stats, additionally enforce time order:\n# TimeSeriesSplit (or a manual forward-chaining split) so validation\n# timestamps are always later than every timestamp used to build train features.\n```",
+  "tradeoffs": "Rigorous leakage-proofing (nested CV, per-fold refitting of every stateful transform, strict feature timestamping, group-aware splits) costs real engineering time and makes pipelines more complex — for quick prototyping on genuinely iid tabular data with simple, pre-cutoff features, lightweight checks (sanity-check feature timestamps, eyeball feature importances for suspiciously perfect predictors) are often enough. Invest heavily when stakes are high (credit, health, fraud, safety) or data has grouped/temporal structure, since leakage there silently produces confidently wrong decisions rather than an obviously broken model. Never skip the target-leakage audit regardless of project size — it's cheap to check and catastrophically expensive to ship.",
+  "diagnosticQuiz": [
+    {
+      "q": "Which statement best defines data leakage in a machine learning pipeline?",
+      "choices": [
+        "A gradual decline in model performance after deployment due to distribution shift",
+        "Using too few cross-validation folds, leading to high-variance performance estimates",
+        "A model architecture that is too complex for the amount of training data available",
+        "Information from outside the training set (including future or target-derived data) improperly influencing training, inflating offline metrics"
+      ],
+      "answer": 3,
+      "explanation": "Leakage is specifically about information crossing a boundary it shouldn't (future/target data reaching training). Option A describes overfitting, C describes concept drift, and D describes an estimation-variance problem — all real issues, but not leakage."
+    },
+    {
+      "q": "A team computes target encoding (replacing each category with the mean target value for that category) using the entire dataset, then runs 5-fold CV on the encoded feature. What happens to the reported CV score?",
+      "choices": [
+        "It is unaffected as long as at least 5 folds are used",
+        "It is biased high (optimistic), because each row's own label contributed to the encoding used to predict that same row",
+        "It is unbiased, because target encoding is a deterministic transform",
+        "It is biased low, because target encoding adds noise to the features"
+      ],
+      "answer": 1,
+      "explanation": "Every row's encoded value is computed including its own label, so validation rows are predicted partly from their own answer. The fix is computing the encoding out-of-fold (or inside the CV loop) so no row's label touches its own feature value. The \"more folds fixes it\" and \"deterministic = safe\" framings are the common misconceptions here."
+    },
+    {
+      "q": "Fitting `StandardScaler` on the full dataset before splitting (instead of fitting only on the train fold) is a classic leakage bug. Why is its optimistic bias on the reported metric usually much smaller than target or temporal leakage?",
+      "choices": [
+        "Because the leakage only affects the training fold, never the validation fold",
+        "Because StandardScaler never touches the target — it only leaks aggregate feature statistics (mean/std) computed over a handful of extra rows",
+        "Because scikit-learn automatically detects and corrects this leakage internally",
+        "Because StandardScaler is incompatible with cross_val_score, so the bug can't occur in practice"
+      ],
+      "answer": 1,
+      "explanation": "Scaling leakage shifts summary statistics only slightly and never involves the label, so the bias is usually mild. Label-touching leakage (target encoding, post-outcome features) tends to be far more severe. There is no automatic detection in sklearn, and this bug is common precisely because it runs silently without error."
+    },
+    {
+      "q": "You're forecasting next week's demand using rolling 7/30/90-day sales averages as features. Which CV strategy avoids temporal leakage?",
+      "choices": [
+        "Forward-chaining (time-based) splits, where every validation fold is strictly later in time than the data used to build its training features",
+        "Stratified K-Fold, stratified on the demand quantile",
+        "Leave-one-out cross-validation over all rows",
+        "Standard shuffled K-Fold, since rolling averages already smooth out time effects"
+      ],
+      "answer": 0,
+      "explanation": "Time-dependent features must never be computed using data from after the validation window, and forward-chaining splits enforce that. Shuffling (A, B) or stratifying on the label (D) ignores time order entirely, letting the model train on rolling stats that peek into its own \"future.\""
+    },
+    {
+      "q": "In a churn-prediction pipeline, which feature is the clearest example of target leakage?",
+      "choices": [
+        "`avg_monthly_spend_last_90_days`, computed from transactions before the prediction date",
+        "`support_tickets_last_30_days`, computed from transactions before the prediction date",
+        "`account_tenure_months`, the number of months since signup",
+        "`cancellation_confirmation_sent`, a flag that is only set after the customer has already churned"
+      ],
+      "answer": 3,
+      "explanation": "This field is only populated as a consequence of the churn event itself, so it's effectively a delayed copy of the label rather than a predictive signal available at scoring time. The other three are ordinary pre-outcome behavioral features computed with a proper time cutoff."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "You inherit a fraud model with 98% offline AUC, but in production it barely flags anything. How do you investigate for leakage?",
+      "a": "Treat the offline/online gap as the primary symptom. Check, in order: (1) **feature timestamps** — for every feature, confirm it would actually be populated, with that value, at the real scoring moment (not backfilled from data recorded after the fraud decision); (2) **target-adjacent features** — anything set by a downstream process that only fires after the fraud outcome (chargebacks, confirmation flags, manual review notes); (3) **split integrity** — duplicate or near-duplicate rows, or the same entity (user/account/device) appearing in both train and validation; (4) **feature importance sanity check** — a single feature with implausibly high importance is a leakage flag, not a win. I'd ablate the top few features one at a time and watch AUC crater — a big single-feature drop pinpoints the leak."
+    },
+    {
+      "q": "How do you set up a leakage-safe cross-validation strategy for predicting customer churn from a dataset with many transactions per customer?",
+      "a": "Split by entity, not by row: use `GroupKFold` (or manual grouped splits) keyed on `customer_id` so no customer's rows appear in both train and validation — otherwise the model partially memorizes per-customer patterns instead of generalizing. If the data also has a time dimension (which it usually does for churn), add a temporal cutoff on top of the grouping so training rows precede validation rows in time, not just in different customers. Any feature engineering (rolling aggregates, target encodings) must then be recomputed strictly within that same train-only scope per fold."
+    },
+    {
+      "q": "What's the difference between data leakage and overfitting, and why does that distinction matter in a production incident postmortem?",
+      "a": "Overfitting is a model-capacity problem: the model fits noise in a *valid* training set, showing up as a real train/validation performance gap that shrinks with regularization, more data, or a simpler model. Leakage is a *measurement* problem: the validation score itself is invalid because contaminated information crossed the train/validation boundary, so the gap you'd use to diagnose overfitting is meaningless. In a postmortem this matters because the fixes are disjoint — tuning regularization or collecting more data does nothing for leakage; you have to re-audit feature timestamps, the split logic, and any fitted transforms, then re-validate from scratch before trusting any metric again."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "cross-validation"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "fde4d4d6e8346dbc",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T09:54:11Z"
+  }
+}

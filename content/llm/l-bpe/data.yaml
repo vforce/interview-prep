@@ -1,0 +1,42 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: l-bpe
+type: concept
+area: Tokenization & Embeddings
+order: 2
+front: How does the Byte-Pair Encoding (BPE) algorithm actually work?
+back: |-
+  Training: start from a base vocab (characters, or all 256 bytes). Repeatedly find the most frequent adjacent pair of symbols in the corpus, merge it into one new symbol, and record that merge. Stop at the target vocab size — the ordered list of merges IS the tokenizer.
+
+  Encoding: greedily apply the learned merges to new text in merge order. Frequent words collapse to a single token; rare/novel strings fall back to subwords or raw bytes, so nothing is ever out-of-vocabulary.
+
+  Byte-level BPE (GPT-2 onward) merges over bytes, so any Unicode is covered from a 256-symbol base.
+more: |-
+  ## Training trace (with counts)
+  Corpus (word : freq), pre-split into characters:
+  ```
+  h u g  :10     p u g :5      p u n :12
+  b u n  : 4     h u g s:5
+  ```
+  Tally every adjacent pair across the weighted corpus:
+  ```
+  ug: 10+5+5 = 20   ← winner
+  pu:  5+12   = 17
+  un: 12+4    = 16
+  hu: 10+5    = 15
+  ```
+  Merge `u g → ug` (rule 1). Re-tally → `un`=16 wins (rule 2). Then `h ug → hug`=15 (rule 3).
+
+  **Merge list = the tokenizer:**
+  ```
+  1. u g  → ug
+  2. u n  → un
+  3. h ug → hug
+  ```
+  Encoding just replays them in order: `hugs` → `h u g s` → `h ug s` → `hug s` → `[hug][s]`.
+
+  **Variants:**
+  - **WordPiece** (BERT): merges the pair maximizing `freq(ab) / (freq(a)·freq(b))`, not raw count — favors *surprising* pairs; continuations marked `##`.
+  - **Unigram** (SentencePiece/T5): starts with a huge vocab and *prunes* tokens that least hurt corpus likelihood; probabilistic, allows multiple segmentations.
+
+  Byte-level BPE (GPT-2+) runs this over the 256 bytes, so nothing is ever OOV.

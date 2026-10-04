@@ -1,0 +1,30 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: k-mqa-gqa
+type: concept
+area: Inference & KV Cache
+order: 19
+front: What are MQA and GQA, and why use them?
+back: |-
+  Multi-Query Attention (MQA): all query heads share ONE K/V head → shrinks the KV cache by ~h×.
+  Grouped-Query Attention (GQA): groups of query heads share a K/V head — a middle ground keeping near-MHA quality with a much smaller cache.
+
+  Llama-2/3 and others use GQA to make long-context decoding memory-feasible.
+more: |-
+  ## Cache scales with *KV* heads, not query heads
+
+  Cache size ∝ number of **K/V heads** — query heads are free (they read the shared K,V). Take Llama-2-70B: 64 query heads, `head_dim=128`, 80 layers, fp16.
+
+  Per-token KV across all layers = `2·n_kv·128·2·80`:
+
+  | Scheme | KV heads | KV/token | vs MHA |
+  |---|---|---|---|
+  | MHA | 64 | 2.6 MB | 1× |
+  | **GQA-8** | 8 | 328 KB | 1/8 |
+  | MQA | 1 | 41 KB | 1/64 |
+
+  `2·8·128·2·80` = 327,680 B ≈ **328 KB/token** — exactly the GQA figure Llama actually ships.
+
+  **Why not always MQA?** Collapsing to one K/V head degrades quality and destabilizes training. GQA (Ainslie et al. 2023) keeps *G* groups as a knob between the two, recovering near-MHA quality at a fraction of the cache.
+
+  **Uptraining gotcha:** you don't train GQA from scratch. Take an existing MHA checkpoint, **mean-pool** the K,V heads within each group into one, then fine-tune on only ~5% of original tokens. Cheap conversion, hence why GQA retrofits everywhere (Llama-2/3, Mistral).

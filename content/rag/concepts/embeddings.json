@@ -1,0 +1,103 @@
+{
+  "id": "embeddings",
+  "title": "Embeddings",
+  "definition": "An embedding is a dense, fixed-length vector representation of a piece of text produced by a trained encoder such that semantic similarity between texts corresponds to geometric proximity (typically cosine similarity) in vector space, enabling retrieval via nearest-neighbor search instead of exact keyword matching.",
+  "summary": "Embeddings are the mechanism that lets RAG retrieve by meaning instead of by keyword: documents are embedded once at index time, the query is embedded at request time with the same model, and retrieval becomes k-nearest-neighbor search over those vectors. Embedding quality is a hard ceiling on RAG quality — the LLM can only generate from what retrieval surfaces, so a weak or mismatched embedding model silently caps the whole system's accuracy. In production, embeddings must be treated as a versioned artifact (model + prompt template + preprocessing), not a stateless function call.",
+  "objectives": [
+    "Explain how embedding models convert text into vectors so retrieval becomes nearest-neighbor search",
+    "Compute and rank passages by cosine similarity to a query in Python",
+    "Identify the query/passage asymmetry gotcha and why silent recall degradation is the top production failure mode",
+    "Reason about production tradeoffs: dense vs. sparse retrieval, dimensionality/cost, and safe model-version migration"
+  ],
+  "lesson": "Intuition: an embedding model is a function `f: text → R^d`, trained via contrastive learning (e.g., InfoNCE loss on positive/negative pairs) so that semantically related texts land close together under cosine similarity, and unrelated texts land far apart. In RAG, this converts retrieval from \"does this passage contain the query's keywords\" into \"is this passage's meaning close to the query's meaning\" — a nearest-neighbor search problem. That's why RAG pipelines look like: chunk documents → embed each chunk offline → store vectors in an ANN index (HNSW / IVF-PQ) → at query time embed the user's question with the *same* model → retrieve top-k nearest vectors → feed those chunks to the LLM as context.\n\nWorked example (conceptual): embed \"How do I reset my password?\" against two candidates: \"To reset your password, go to Settings > Security\" (high similarity, few shared keywords) vs. \"Passwords must be at least 8 characters\" (lower similarity despite sharing \"password\" and being lexically closer). Pure keyword search might rank these the other way; embeddings capture that the first chunk actually answers the question.\n\nKey gotcha (production): embedding spaces are model-specific and not portable — two failure modes show up constantly. First, query/document asymmetry: models like E5 or BGE are trained with different instructions for queries (`\"query: ...\"`) vs. documents (`\"passage: ...\"`); skipping the prefix doesn't error, it just quietly tanks recall. Second, version drift: re-embedding only new documents after a model upgrade leaves old vectors in the old geometric space — cosine similarity between v1 and v2 vectors is meaningless even at identical dimensionality. This is a silent correctness bug, not a crash, which is exactly why it's a favorite interview scenario: it tests whether you treat embeddings as a versioned artifact rather than a stateless utility function.\n\nThe fix in both cases is the same discipline: treat \"embedding model + prompt template + preprocessing\" as one versioned unit, and never compare vectors produced by different versions of that unit.",
+  "examples": "**Example 1 — cosine similarity retrieval**\n\n```python\nfrom sentence_transformers import SentenceTransformer\n\nmodel = SentenceTransformer(\"all-MiniLM-L6-v2\")  # 384-dim, symmetric\n\nquery = \"How do I reset my password?\"\nchunks = [\n    \"To reset your password, go to Settings > Security > Reset Password.\",\n    \"Passwords must be at least 8 characters and include a number.\",\n    \"Our office is open Monday through Friday, 9am to 5pm.\",\n]\n\nq_vec = model.encode(query, normalize_embeddings=True)\nc_vecs = model.encode(chunks, normalize_embeddings=True)\n\n# vectors are unit-normalized, so dot product == cosine similarity\nscores = c_vecs @ q_vec\nfor score, chunk in sorted(zip(scores, chunks), reverse=True):\n    print(f\"{score:.3f}  {chunk}\")\n\n# illustrative ranking (exact values depend on model/version):\n# 0.62  To reset your password, go to Settings > Security > Reset Password.\n# 0.41  Passwords must be at least 8 characters and include a number.\n# 0.08  Our office is open Monday through Friday, 9am to 5pm.\n```\n\n**Example 2 — the asymmetric-prefix gotcha (E5/BGE-style models)**\n\n```python\n# E5/BGE were trained with different prefixes for queries vs. documents.\n# Forgetting this is the #1 silent production bug in embedding retrieval:\n# no exception, just degraded recall.\nmodel = SentenceTransformer(\"intfloat/e5-base-v2\")\n\nq_vec = model.encode(f\"query: {query}\", normalize_embeddings=True)\nc_vecs = model.encode(\n    [f\"passage: {c}\" for c in chunks], normalize_embeddings=True\n)\nscores = c_vecs @ q_vec  # correct: matches training-time distribution\n```",
+  "tradeoffs": "Dense embeddings excel at paraphrase and semantic matching but underperform on exact-match needs — IDs, part numbers, rare acronyms, code symbols — where sparse retrieval (BM25/SPLADE) is more reliable; most production RAG systems hybridize both (e.g., reciprocal rank fusion) rather than picking one. Higher-dimensional embeddings (e.g., 3072-dim) improve recall marginally but multiply storage and ANN latency/cost at scale — Matryoshka-trained models (OpenAI text-embedding-3, nomic-embed) let you truncate dimensions to trade quality for cost without re-embedding. Default to a strong general-purpose model for fast time-to-value; fine-tune or switch models only when evaluation shows systematic recall failures on your domain vocabulary, and budget for a full corpus re-embed plus a shadow-index cutover — vectors from different model versions are never comparable.",
+  "diagnosticQuiz": [
+    {
+      "q": "Which statement most accurately captures what an embedding model does and how it is trained for retrieval?",
+      "choices": [
+        "It compresses text into a fixed-length vector optimized purely for minimizing reconstruction error, similar to a lossless autoencoder.",
+        "It maps text to a dense, fixed-length vector such that semantically related texts land close together under cosine similarity, typically trained via contrastive learning (e.g., InfoNCE on positive/negative pairs).",
+        "It maps text to a sparse vector of vocabulary term weights, trained by counting word co-occurrence frequencies across the corpus.",
+        "It classifies text into a fixed set of topic labels, and retrieval works by matching documents that share the same predicted label."
+      ],
+      "answer": 1,
+      "explanation": "An embedding model f: text → R^d is trained so cosine similarity in vector space reflects semantic similarity in text, most commonly via contrastive objectives like InfoNCE that pull positive pairs together and push negatives apart. The sparse term-weight option describes something closer to BM25/TF-IDF or SPLADE, which the lesson explicitly contrasts with dense embeddings. The reconstruction-error and topic-classification options swap in different objectives (compression fidelity, discrete labeling) that don't explain the continuous nearest-neighbor geometry that makes ANN retrieval work."
+    },
+    {
+      "q": "In Example 1, both the query and chunks are encoded with `normalize_embeddings=True`, and ranking is computed via `c_vecs @ q_vec` (a plain dot product). Why is this valid?",
+      "choices": [
+        "Dot product and cosine similarity are mathematically identical formulas regardless of vector length, so normalization is just a stylistic choice.",
+        "Cosine similarity is dot product divided by the product of vector norms; once every vector is unit-normalized (norm = 1), that division term becomes 1, so the plain dot product equals cosine similarity.",
+        "Normalizing the embeddings converts the dot product into a Euclidean distance, which is what the ANN index actually searches over.",
+        "`normalize_embeddings=True` rescales vectors so their raw component magnitudes, rather than their direction, determine similarity, which is why the dot product works here."
+      ],
+      "answer": 1,
+      "explanation": "cosine_similarity(a,b) = (a·b)/(‖a‖‖b‖); with ‖a‖=‖b‖=1, a·b reduces exactly to cosine similarity — that's the whole reason the code can skip the division. The \"identical regardless of length\" option is the common trap: dot product scales with magnitude, so unnormalized vectors pointing the same direction but differing in length would inflate the raw dot product without meaning higher similarity. The Euclidean-distance and \"raw magnitude\" options both misdescribe normalization, which preserves direction (the semantic signal) while fixing magnitude to 1 — it doesn't introduce distance semantics or emphasize magnitude."
+    },
+    {
+      "q": "In the worked example, \"To reset your password, go to Settings > Security\" outranks \"Passwords must be at least 8 characters and include a number\" for the query \"How do I reset my password?\" — even though the second candidate is lexically closer (shares \"password\" more directly). What does this illustrate?",
+      "choices": [
+        "Embeddings capture that the first passage semantically answers the question (an action/procedure), while pure keyword overlap would over-rank the second passage just because it repeats the literal word \"password.\"",
+        "The embedding model made an error, since the passage with more shared keywords should always score higher in a correctly trained model.",
+        "Cosine similarity is unreliable for short queries, which is why production systems should default to keyword search for questions under 10 words.",
+        "The second passage scores lower because it's a longer sentence, and embedding models systematically penalize longer chunks regardless of content."
+      ],
+      "answer": 0,
+      "explanation": "This is the lesson's core point about converting retrieval from \"keyword overlap\" to \"meaning proximity\": the reset-instructions passage semantically answers the query with few shared tokens, while the requirements passage shares \"password\" but doesn't answer \"how do I reset it.\" The \"model made an error\" option reflects the keyword-matching mental model the lesson explicitly warns against — high lexical overlap isn't ground-truth relevance. The length-penalty and short-query claims aren't mechanisms discussed anywhere in the lesson; they're plausible-sounding fabrications rather than something the material supports."
+    },
+    {
+      "q": "A product search system needs to retrieve exact matches for SKUs like \"XR2000-45B\" and rare part numbers. Per the tradeoffs discussed, what's the most reliable approach?",
+      "choices": [
+        "Rely on dense embeddings exclusively, since cosine similarity generalizes to exact-match cases as a special case of semantic similarity.",
+        "Use a Matryoshka-trained model and truncate its dimensions, since truncation is specifically designed to improve exact-match accuracy on rare tokens.",
+        "Switch to a higher-dimensional embedding model (e.g., 3072-dim instead of 384-dim), since more dimensions directly translate into better exact-match recall.",
+        "Use sparse retrieval (BM25/SPLADE) for exact-match tokens like IDs and part numbers, since dense embeddings excel at paraphrase/semantic matching but underperform on exact-match needs — many production systems hybridize both (e.g., via reciprocal rank fusion)."
+      ],
+      "answer": 3,
+      "explanation": "The lesson states plainly that dense embeddings underperform on exact-match needs (IDs, part numbers, rare acronyms, code symbols), where sparse retrieval is more reliable, and that hybridizing both via something like reciprocal rank fusion is the common production pattern. The higher-dimension option misapplies a real but unrelated tradeoff (marginal recall gains vs. storage/latency cost) as if it fixed exact-match specifically. Matryoshka truncation is a cost/quality dial for dense embeddings, not an exact-match mechanism — conflating it with exact-match is the kind of surface-level pattern-matching the question is designed to catch."
+    },
+    {
+      "q": "A team upgrades their embedding model from v1 to v2 and re-embeds only newly ingested documents going forward, leaving previously indexed documents as v1 vectors. What happens when v2 query vectors are compared against those old v1 document vectors?",
+      "choices": [
+        "As long as v1 and v2 produce vectors of the same dimensionality, similarity remains valid, because dimensionality — not model version — determines whether vectors are comparable.",
+        "Similarity scores will be slightly lower than optimal but still directionally usable, since embedding spaces from consecutive model versions are typically close enough for ranking purposes.",
+        "Cosine similarity between v1 and v2 vectors is meaningless even at identical dimensionality, because the two model versions define different geometric spaces — this fails silently rather than throwing an error, which is why it's treated as a favorite interview scenario.",
+        "The ANN index (e.g., HNSW or IVF-PQ) will raise a dimension-mismatch exception at query time, alerting the team immediately."
+      ],
+      "answer": 2,
+      "explanation": "The lesson calls this out directly: comparing v1 and v2 vectors is \"a silent correctness bug, not a crash,\" precisely because nothing structurally prevents the comparison — identical dimensionality doesn't imply the same geometric space. That silence is exactly why it's framed as a favorite interview scenario testing whether you treat \"embedding model + prompt template + preprocessing\" as a versioned artifact rather than a stateless function. The \"slightly lower but usable\" option is the dangerous misconception the lesson is warning against — it says meaningless, not degraded-but-workable — and the dimension-mismatch-exception option is the reassuring failure mode people wish existed, contradicted directly by the text."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "How would you choose an embedding model for a production RAG system?",
+      "a": "Benchmark on your own labeled eval set, not just the MTEB leaderboard — domain vocabulary match matters more than aggregate scores. Then weigh:\n- **Dimensionality vs. cost**: storage ≈ `n_docs × dims × 4 bytes`; ANN query latency scales with dims.\n- **Context window**: must comfortably fit your chunk size.\n- **Hosted API vs. self-hosted**: API is simpler and has no GPU ops burden; self-hosted gives data-residency control and lower marginal cost at scale.\n- **Symmetric vs. asymmetric training**: determines whether you need query/passage prefixes.\nTriggers to switch later: measured recall regression, cost at scale, latency SLA breach, need for multilingual or domain fine-tuning, or vendor deprecation."
+    },
+    {
+      "q": "How do you safely roll out an embedding model upgrade on a live corpus with millions of documents?",
+      "a": "Treat it like a schema migration, not a config flag flip:\n- Tag every vector with the embedding-model id/version.\n- Build a new shadow index by fully re-embedding the corpus with v2 in the background.\n- Run offline retrieval eval (recall@k, nDCG) comparing v1 vs. v2 on a labeled or LLM-judged query set.\n- Shadow-test v2 against live traffic and compare online metrics before cutover.\n- Cut over only after the full backfill completes — never let one query hit a mixed index — and keep v1 available for rollback until v2 is validated."
+    },
+    {
+      "q": "Dense embedding retrieval vs. BM25 — when would you use each, and why do production systems combine them?",
+      "a": "Dense embeddings handle paraphrase and semantic/synonym matching well but are weak on rare tokens, IDs, numbers, and out-of-domain jargon the model never saw in training. BM25 gives exact lexical matching, needs no training, is interpretable, and is strong on rare/precise terms, but misses synonymy and paraphrase entirely. Their failure modes are complementary, so production systems typically hybridize (sparse + dense scores fused via reciprocal rank fusion or a weighted combination), which consistently beats either alone — especially in domains with structured or technical vocabulary like legal citations, SKUs, or code identifiers."
+    }
+  ],
+  "version": 2,
+  "relatedConcepts": [
+    "hnsw",
+    "hybrid-search",
+    "reranking"
+  ],
+  "followUps": [
+    "hnsw",
+    "hybrid-search",
+    "reranking"
+  ],
+  "metadata": {
+    "inputHash": "0d55368d4fe1fb0a",
+    "model": "sonnet",
+    "generatedAt": "2026-07-03T10:36:13Z",
+    "quizUpdatedAt": "2026-07-04T05:42:28Z"
+  }
+}

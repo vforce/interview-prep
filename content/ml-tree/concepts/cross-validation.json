@@ -1,0 +1,100 @@
+{
+  "id": "cross-validation",
+  "title": "Cross-Validation",
+  "definition": "Cross-validation is a resampling procedure that estimates a model's generalization performance by repeatedly splitting the data into disjoint training and validation folds, fitting on each training portion and scoring on the held-out portion, then aggregating the per-fold scores.",
+  "summary": "A single train/test split gives a high-variance, one-shot estimate of generalization error, especially on small datasets. K-fold cross-validation averages that estimate over k independent held-out folds, and the spread across folds tells you how much to trust the number. It's the standard tool for model selection and hyperparameter tuning before a model reaches production.",
+  "objectives": [
+    "Explain why k-fold CV gives a lower-variance estimate of generalization error than one holdout split.",
+    "Implement leakage-safe k-fold CV in scikit-learn using `Pipeline`.",
+    "Choose the right CV scheme for grouped, time-series, or imbalanced data.",
+    "Diagnose data leakage introduced by preprocessing fit outside the CV loop.",
+    "Reason about how k itself trades off bias, variance, and compute cost of the estimate."
+  ],
+  "lesson": "A single train/test split gives one noisy estimate of generalization error — which points land in the test set matters a lot, especially with limited data. Cross-validation reduces that noise by repeating the split: in **k-fold CV**, you partition the dataset into k disjoint folds, train on k−1 of them, evaluate on the held-out fold, rotate through all k folds, then average the k scores. The mean is your point estimate of generalization performance; the standard deviation across folds tells you how stable that estimate is — a number production teams should report alongside the mean, not instead of it.\n\nChoosing k is itself a bias-variance tradeoff on the *estimate*, not the model. As k → N (leave-one-out CV), each training fold is nearly the full dataset, so the trained model closely matches what you'd actually ship — low bias. But the N training sets now overlap almost completely, so the N error estimates are highly correlated with each other, making the averaged estimate high-variance and expensive (N model fits). Small k (2-3) is cheap and decorrelated but each training fold is a meaningfully smaller, different dataset than production, biasing the estimate upward. k=5 or k=10 is the standard sweet spot — an empirical finding (Kohavi, 1995), not a provable optimum.\n\n**The key production gotcha is leakage.** Any statistic derived from the full dataset before splitting — a fitted `StandardScaler`, a feature selected by correlation with `y`, a target-encoded categorical, imputation means — leaks validation-fold information into training, producing an optimistically biased CV score that won't hold in production. The fix is mechanical: wrap every data-dependent transform in a `Pipeline` so `.fit()` only ever sees the training fold; `cross_val_score`/`cross_validate` do this correctly as long as you pass the whole pipeline, not just the bare model.\n\nA second gotcha: plain k-fold assumes i.i.d. rows. If rows are grouped (multiple visits per patient, multiple events per user) or ordered in time, random folds either leak (same entity in train and test) or peek into the future. Use `GroupKFold` or `TimeSeriesSplit` respectively — matching the split to how the model is actually deployed matters more than the fold count.",
+  "examples": "**1. Leakage-safe preprocessing**\n\n```python\n# ❌ Leaky: scaler sees the full dataset, including future validation folds\nfrom sklearn.preprocessing import StandardScaler\nfrom sklearn.model_selection import KFold, cross_val_score\nfrom sklearn.linear_model import LogisticRegression\n\nscaler = StandardScaler().fit(X)          # fit on ALL of X first — leakage\nX_scaled = scaler.transform(X)\nscores = cross_val_score(LogisticRegression(), X_scaled, y, cv=5)\n\n# ✅ Safe: scaler is refit on the training fold only, inside each split\nfrom sklearn.pipeline import Pipeline\n\npipe = Pipeline([(\"scale\", StandardScaler()), (\"clf\", LogisticRegression())])\ncv = KFold(n_splits=5, shuffle=True, random_state=0)\nscores = cross_val_score(pipe, X, y, cv=cv, scoring=\"roc_auc\")\nprint(f\"{scores.mean():.3f} ± {scores.std():.3f}\")\n```\n\n**2. Grouped / time-ordered production data**\n\n```python\nfrom sklearn.model_selection import GroupKFold, TimeSeriesSplit\n\n# Multiple rows per user -> group by user_id so no user leaks across folds\ngkf = GroupKFold(n_splits=5)\nfor train_idx, val_idx in gkf.split(X, y, groups=user_id):\n    ...\n\n# Forecasting: only ever validate on data *after* the training window\ntscv = TimeSeriesSplit(n_splits=5)\nfor train_idx, val_idx in tscv.split(X):\n    ...  # train_idx is always chronologically before val_idx\n```",
+  "tradeoffs": "Standard k-fold (k=5-10) is the default for model/hyperparameter selection whenever retraining k times is affordable. Leave-one-out only earns its cost on very small N (tens to low hundreds of rows); otherwise its variance and compute aren't worth the bias reduction. Stratified k-fold should replace plain k-fold for classification whenever classes are imbalanced, so every fold keeps the full dataset's class ratio. Nested CV (inner loop tunes hyperparameters, outer loop reports performance) is the right call when you need an unbiased estimate *and* you're tuning — reusing the same folds for both is optimistically biased — but it costs k_outer × k_inner fits, so reserve it for final comparisons, not daily iteration. In production, CV is often skipped in favor of a single large holdout or rolling backtest: at large N a single split already has low variance, and retraining a large model 5-10× per experiment isn't worth the cost.",
+  "diagnosticQuiz": [
+    {
+      "q": "What does k-fold cross-validation primarily estimate?",
+      "choices": [
+        "The training error of the final model deployed to production",
+        "The optimal number of features to use in the model",
+        "The exact accuracy the model will achieve on any future dataset",
+        "How a model trained on similar data is expected to perform on unseen data, plus its variance across folds"
+      ],
+      "answer": 3,
+      "explanation": "k-fold CV averages held-out performance across k train/validation splits, giving a point estimate of generalization performance and, via the spread across folds, a sense of how stable that estimate is. The top wrong answer confuses it with training error, which is always optimistic. It's an estimate for *similar* unseen data, not a guarantee for any future distribution — shift can still break it."
+    },
+    {
+      "q": "With N = 1,000 samples and 5-fold CV (even splits), how many samples are in each held-out fold, and how many models are trained in total?",
+      "choices": [
+        "200 samples/fold; 1 model total",
+        "500 samples/fold; 5 models total",
+        "200 samples/fold; 1,000 models total",
+        "200 samples/fold; 5 models total"
+      ],
+      "answer": 3,
+      "explanation": "1,000/5 = 200 samples per fold, and CV rotates the held-out fold through all 5 partitions, training one model per rotation → 5 models. 1,000 models would be leave-one-out CV (k=N), a common mix-up between \"k-fold\" and \"LOOCV.\""
+    },
+    {
+      "q": "Why does pushing k toward N (leave-one-out CV) reduce the bias of the error estimate but increase its variance?",
+      "choices": [
+        "Each training set becomes tiny, closely matching production, but folds become uncorrelated",
+        "Each training set is nearly the full dataset (low bias vs. the deployed model), but the N training sets overlap heavily, so the error estimates are highly correlated",
+        "LOOCV always overfits the model itself, which mechanically inflates variance",
+        "Bias and variance are unrelated to k; only compute cost changes with k"
+      ],
+      "answer": 1,
+      "explanation": "As k→N, each fold trains on N−1 points, nearly identical to the full-data model you'd ship, so bias drops. But the training sets differ by only one point across folds, so the resulting error estimates are strongly correlated, and averaging correlated estimates doesn't cut variance the way k independent samples would — that's what drives LOOCV's variance up, not the model overfitting."
+    },
+    {
+      "q": "You have sensor readings logged multiple times per device and want to estimate generalization to devices never seen before. Which CV scheme fits?",
+      "choices": [
+        "TimeSeriesSplit",
+        "Plain shuffled KFold",
+        "StratifiedKFold on the label only",
+        "GroupKFold, grouping by device id"
+      ],
+      "answer": 3,
+      "explanation": "Grouping by device id guarantees no device's readings appear in both train and validation, so the score reflects generalization to *new* devices, not new readings from already-seen ones. Plain shuffled KFold is the common mistake — it silently leaks device identity across folds and overstates performance since the model can partly memorize per-device patterns."
+    },
+    {
+      "q": "A team fits a `TargetEncoder` on the full training set's categorical columns (using the label), then runs 5-fold `cross_val_score` on the encoded features. What's wrong?",
+      "choices": [
+        "Target encoding always underfits, so CV is unaffected",
+        "The label information leaks into the validation folds' encoded features, inflating the CV score",
+        "5-fold CV can't be used with encoded categorical features at all",
+        "Nothing — target encoding is label-based only within scikit-learn, so it's safe"
+      ],
+      "answer": 1,
+      "explanation": "Target encoding replaces each category with a label-derived statistic (e.g., mean of y); computing that on the full dataset lets rows sharing a category leak `y` information into each other's validation-fold encoding. The encoder must be fit only inside each training fold — same discipline as scaling or imputation."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "In a production model-selection pipeline, why pick 5- or 10-fold CV instead of leave-one-out?",
+      "a": "It's a bias/variance/compute tradeoff on the *estimate itself*. LOOCV has the lowest bias (each training fold ≈ full dataset) but the N training sets overlap almost completely, making the error estimates highly correlated, so the averaged estimate has high variance; it also costs N model fits. k=5-10 trades a small amount of bias for a much lower-variance, far cheaper estimate — the empirically-validated sweet spot (Kohavi, 1995) — which matters whenever retraining cost is non-trivial, i.e. almost always in production."
+    },
+    {
+      "q": "How do you prevent data leakage in a CV pipeline that includes preprocessing like scaling, imputation, or target encoding?",
+      "a": "Treat every data-dependent transform as part of the model, not a one-time preprocessing step. Wrap scaler/imputer/encoder and estimator in a single `sklearn.Pipeline` and pass that whole pipeline to `cross_val_score`/`cross_validate`, so each `.fit()` inside the CV loop only ever sees the current training fold. For label-based encoders (target encoding), plain fitting inside the fold still aggregates over the whole training fold at once — use an out-of-fold/nested encoding, or a library with built-in CV smoothing (e.g., `category_encoders`)."
+    },
+    {
+      "q": "Your model shows 0.95 CV AUC offline but 0.80 AUC in production. What did cross-validation likely miss, and how would you catch it beforehand?",
+      "a": "The CV split probably doesn't match how the model is actually deployed: random k-fold assumes i.i.d. rows, but production may have temporal order (fix with `TimeSeriesSplit`), repeated entities like the same user/device in both train and validation (fix with `GroupKFold`), or a feature that encodes future/label information unavailable at serving time. Before shipping, rerun CV with folds mirroring production's real train/serve boundary, audit features for leakage, and validate on a genuine out-of-time or out-of-entity holdout rather than trusting the random-split number alone."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "bias-variance-tradeoff",
+    "data-leakage"
+  ],
+  "followUps": [
+    "data-leakage"
+  ],
+  "metadata": {
+    "inputHash": "10fdd72eaef4704b",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T09:52:31Z"
+  }
+}

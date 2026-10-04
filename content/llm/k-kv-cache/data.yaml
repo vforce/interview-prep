@@ -1,0 +1,82 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: k-kv-cache
+type: concept
+area: Inference & KV Cache
+order: 16
+front: What is the KV cache and why does it exist?
+back: |-
+  In autoregressive decoding, each new token attends to the Keys and Values of ALL previous tokens. Those K,V don't change once computed, so we cache them per layer/head instead of recomputing.
+
+  This turns each step from recomputing attention over the whole prefix into just the new token's Query against the cached K,V — O(n) per step instead of O(n²).
+more: |-
+  ## Per-step cost, *n* tokens already in context
+
+  K and V for past tokens are **byte-identical every step**, so caching them turns a full re-attention over the prefix into one query lookup. Only the new token's Q,K,V are computed; its K,V are appended.
+
+  | Step work | No cache | With cache |
+  |---|---|---|
+  | Q/K/V projections | all *n* tokens | 1 new token |
+  | Attention | *n×n* | 1×*n* |
+
+  Concrete, at `d_model=4096`, `n=2048` (per decode step):
+  - **No cache:** reproject 2048 toks → `3·2048·4096²` ≈ **1.0×10¹¹ MACs** (+ full *n²* attention).
+  - **With cache:** `3·4096²` ≈ **5×10⁷ MACs** (+ 1×*n* attention).
+
+  That's ~**2000× less work** for this token — precisely the O(*n*) vs O(*n²*) gap, and the factor grows with *n*. The price is memory: you now store K,V for every layer/head (see the memory card), and the cache is the thing that OOMs at long context, not the FLOPs. Note Q is *not* cached — it's recomputed and thrown away each step.
+
+  q => question
+  k => label/index
+  v => value
+
+  ```
+  Already generated:
+
+  The   cat   sat   on   the
+
+   │     │     │     │     │
+
+  KV    KV    KV    KV    KV
+
+   │     │     │     │     │
+
+   └───── Cached ───────────┘
+
+  New decoding step:
+
+          New token
+
+              │
+
+           Compute Q,K,V
+
+              │
+
+              ▼
+
+        Query (Q) compares with
+
+        all cached Keys (K)
+
+              │
+
+              ▼
+
+        Retrieves weighted
+
+        cached Values (V)
+
+              │
+
+              ▼
+
+        Predict next token
+
+  Afterward:
+
+  - Keep the new K and V in the cache.
+
+  - Discard the new Q.
+  ```
+
+  The key intuition is: old tokens never change, so their Keys and Values never change either. Instead of recomputing them thousands of times, the model computes them once, caches them, and only computes a fresh Query for the newest token at each decoding step. This reduces the per-step computation from roughly “work proportional to all pairs of tokens” (O(n²)) to “one new token looking back over the existing context” (O(n)).

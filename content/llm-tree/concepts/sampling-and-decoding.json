@@ -1,0 +1,103 @@
+{
+  "id": "sampling-and-decoding",
+  "title": "Sampling and Decoding",
+  "definition": "Decoding is the algorithm that converts a language model's per-step logits into an actual chosen token — repeated autoregressively — via either likelihood-maximizing search (greedy, beam) or stochastic sampling (temperature, top-k, top-p/nucleus, min-p).",
+  "summary": "The LM head gives you logits at every step; decoding decides what to actually do with them. Deterministic strategies (greedy, beam search) maximize sequence probability but degrade into repetition on open-ended text; stochastic strategies (temperature + truncated sampling) trade determinism for more natural, diverse output. In production, the decoding config is a first-class lever — it affects correctness, repetition, latency, cost, and reproducibility as much as the model weights do.",
+  "objectives": [
+    "Explain how temperature, top-k, and top-p each transform the logits/probability distribution before sampling.",
+    "State the correct order of operations: temperature → softmax → top-k → top-p → renormalize → sample.",
+    "Explain why greedy/beam decoding degenerates into repetition on open-ended generation (Holtzman et al.).",
+    "Pick an appropriate decoding config for a given production task (deterministic extraction vs. open-ended chat).",
+    "Diagnose a production model that's looping or repeating, using decoding-level knobs."
+  ],
+  "lesson": "Decoding is the loop that turns per-step logits into a committed token before the next forward pass. Everything downstream — repetition, \"personality,\" even correctness — is this strategy's job, not the model's alone. You already know the model emits logits over the vocab each step; decoding is what happens *after* that.\n\nSplit strategies into two families. **Deterministic/search-based**: greedy (argmax each step) and beam search (track the top-B partial sequences by cumulative log-prob, expand, prune back to B). Both maximize sequence likelihood. **Stochastic/sampling-based**: draw from `p = softmax(logits / T)`, usually truncated first to a smaller candidate set — top-k, top-p (nucleus), or min-p — so you don't sample the long tail of near-zero-probability tokens.\n\nThe key gotcha: **maximizing likelihood is not the same as sounding good.** Holtzman et al., \"The Curious Case of Neural Text Degeneration,\" showed greedy/beam decoding on open-ended generation tends to fall into repetition loops (\"I don't know. I don't know. I don't know...\") — because the highest-probability *sequence* in natural language is often bland and repetitive, and once a phrase repeats, repeating it again becomes even more likely (self-reinforcing). Truncated sampling avoids this by injecting controlled randomness while still discarding the implausible tail.\n\nOrder of operations is a favorite whiteboard question: apply temperature to the logits, softmax, apply top-k, apply top-p on what's left, renormalize, then sample. Get the order wrong (e.g., threshold on raw logits) and the thresholds stop meaning what you think.\n\nTemperature reshapes sharpness: T→0 collapses to greedy/argmax; T=1 leaves softmax(logits) unchanged; T>1 flattens the distribution (more diversity, more incoherence risk). Top-k is a fixed cutoff — blunt, since the \"right\" k varies step to step. Top-p adapts the cutoff to cumulative probability mass — better calibrated, but can still over- or under-include when the distribution is unusually peaked or flat. min-p (newer, simple, robust) scales the cutoff to the top token's own probability: keep a token if `p(token) ≥ min_p × p(top_token)`, which self-adjusts without per-prompt tuning of k or p.",
+  "examples": "**1. Minimal production sampler — order of operations matters:**\n\n```python\nimport numpy as np\n\ndef sample_next_token(logits, temperature=1.0, top_k=0, top_p=1.0):\n    logits = np.asarray(logits, dtype=np.float64)\n    if temperature != 1.0:\n        logits = logits / max(temperature, 1e-5)      # 1. temperature\n\n    probs = np.exp(logits - logits.max())\n    probs /= probs.sum()                              # 2. softmax\n\n    order = np.argsort(-probs)\n    probs = probs[order]\n\n    if top_k > 0:                                      # 3. top-k\n        probs[top_k:] = 0\n\n    if top_p < 1.0:                                     # 4. top-p (nucleus)\n        cum = np.cumsum(probs)\n        cutoff = np.searchsorted(cum, top_p) + 1\n        probs[cutoff:] = 0\n\n    probs /= probs.sum()                               # 5. renormalize (easy to forget!)\n    choice = np.random.choice(len(probs), p=probs)\n    return order[choice]                                # 6. sample -> map back to token id\n```\n\n**2. Numeric trace — 5-token vocab, logits `[4.0, 3.5, 2.0, 1.0, 0.1]`** for tokens `[the, a, cat, dog, xyzzy]`:\n\n```\nsoftmax (T=1):     the=0.552  a=0.335  cat=0.075  dog=0.027  xyzzy=0.011\ncumulative:         0.552     0.887    0.961      0.989      1.000\n\ntop_k=2  -> keep {the, a}, renormalize -> the=0.622, a=0.378\ntop_p=0.9 -> cumulative crosses 0.9 at \"cat\" (0.961) -> keep {the, a, cat}\n             renormalize over 0.961 -> the=0.574, a=0.348, cat=0.078\n```\n\nGreedy always emits \"the.\" Sampling with top_p=0.9 usually does too, but ~35% of the time picks \"a,\" and rarely \"cat\" — that controlled variance is exactly what breaks repetition loops.",
+  "tradeoffs": "Greedy/beam are deterministic, reproducible, and cheap to reason about — right for tasks with one correct answer (extraction, classification-as-generation, translation, constrained code-gen), but they chase sequence likelihood, which produces bland or looping text on open-ended generation, and beam search adds real memory/compute cost for a benefit that's often marginal outside MT/ASR. Sampling (temperature + top-k/top-p/min-p) gives natural, varied output well-suited to chat and creative tasks, at the cost of non-determinism — harder to test, cache, or reproduce evals, and prone to incoherence if temperature is too high or truncation too loose. Production systems typically default to temperature≈0.7–1.0 with top_p≈0.9 for general chat, temperature=0 for deterministic/structured tasks, and add a repetition/frequency penalty as a cheap second line of defense against loops.",
+  "diagnosticQuiz": [
+    {
+      "q": "In decoding, what does the temperature parameter T mathematically do?",
+      "choices": [
+        "Clips logits to the range [-T, T] before softmax",
+        "Multiplies the final softmax probabilities by T",
+        "Adds Gaussian noise with variance T to the logits",
+        "Divides the logits by T before applying softmax"
+      ],
+      "answer": 3,
+      "explanation": "Temperature is applied as `softmax(logits / T)` — it rescales the logits before normalization, so T<1 sharpens the distribution toward argmax and T>1 flattens it. The tempting wrong answer (scaling final probabilities) reflects a common confusion between reshaping the pre-softmax logits (correct) and post-hoc reweighting an already-normalized distribution (which wouldn't stay a valid distribution without renormalizing anyway)."
+    },
+    {
+      "q": "A model outputs logits [2.0, 1.0, 0.0] for 3 candidate tokens. Using standard softmax (T=1), what is the probability assigned to the first token, rounded to the nearest 5%?",
+      "choices": [
+        "~65%",
+        "~50%",
+        "~35%",
+        "~90%"
+      ],
+      "answer": 0,
+      "explanation": "e^2 ≈ 7.39, e^1 ≈ 2.72, e^0 = 1, sum ≈ 11.11, so p1 ≈ 7.39/11.11 ≈ 0.665. The ~50% distractor is the common mistake of eyeballing \"logit 2 is roughly double logit 1\" and assuming probability scales linearly with logits, when softmax is exponential."
+    },
+    {
+      "q": "Why does pure greedy decoding often produce repetitive, degenerate text in open-ended generation (e.g., chit-chat, story writing)?",
+      "choices": [
+        "Greedy always picks the single highest-probability token at each step, and the highest-likelihood full sequence in natural language tends to be generic and loopy, not the most natural-sounding one",
+        "Greedy decoding forces temperature to a negative value, which is numerically unstable",
+        "Greedy decoding is too computationally slow, so implementations truncate generation early, causing repeats",
+        "Greedy decoding is implemented with beam width 0, which is an off-by-one bug in most libraries"
+      ],
+      "answer": 0,
+      "explanation": "This is the Holtzman et al. \"neural text degeneration\" finding — maximizing likelihood is not the same as sounding human, and once a phrase repeats, repeating it again often becomes the new highest-probability move (a self-reinforcing loop). The \"too slow, so it truncates\" distractor reflects a common but false belief that repetition is a performance/timeout artifact rather than a structural property of likelihood-maximizing search itself."
+    },
+    {
+      "q": "A production endpoint must return one deterministic completion that exactly matches a fixed spec (e.g., extracting a JSON field). Which decoding config is most appropriate?",
+      "choices": [
+        "temperature=1.0, top_p=0.9 — typical chat defaults",
+        "temperature=0 (greedy / argmax)",
+        "temperature=0.7 with a heavy repetition penalty",
+        "temperature=1.5, top_k=0 (unrestricted) for maximum creativity"
+      ],
+      "answer": 1,
+      "explanation": "Deterministic, single-correct-answer tasks want argmax at every step — no randomness, fully reproducible, cacheable. Picking \"typical chat defaults\" (B) is the common production mistake of reusing one decoding config for every endpoint instead of tailoring it to the task's determinism needs; it will occasionally emit a wrong field for zero upside."
+    },
+    {
+      "q": "What's a common implementation bug when writing top-p (nucleus) sampling from scratch?",
+      "choices": [
+        "Computing the cumulative sum over raw logits instead of over softmax probabilities before applying the p threshold",
+        "Setting top_p below the cutoff implied by top_k, so the two methods \"disagree\"",
+        "Using top_p together with a temperature other than 1.0",
+        "Forgetting to renormalize the truncated (nucleus) probabilities so they sum to 1 again before sampling"
+      ],
+      "answer": 3,
+      "explanation": "After zeroing out mass outside the nucleus, the remaining values no longer sum to 1, so sampling directly from them under-weights the survivors relative to what softmax intended — real implementations (e.g., Hugging Face) renormalize before sampling. The best-wrong option (cumsum on raw logits) is a genuine but different misconception: logits aren't probabilities and don't sum to a fixed total, so a \"cumulative probability mass ≥ p\" threshold only makes sense after softmax."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "How would you choose a decoding strategy for a production chat product versus a production data-extraction endpoint?",
+      "a": "For chat: moderate randomness — temperature ≈0.7–1.0 with top_p ≈0.9 (or min_p as a more robust default), plus a repetition penalty, since responses should be varied and non-determinism is acceptable or even desirable. For extraction/classification-as-generation: temperature=0 (greedy), because there's one correct answer — determinism gives reproducibility, easy caching, and simpler evals, and any injected randomness only adds hallucination risk with no upside. For hard reasoning tasks where you still want higher accuracy despite wanting a single final answer, a common production pattern is self-consistency: sample N times at moderate temperature and majority-vote, rather than relying on one greedy pass."
+    },
+    {
+      "q": "Why does beam search often perform worse than sampling for open-ended text generation, even though it explicitly searches for higher-likelihood sequences?",
+      "a": "Because in open-ended generation, human-like text is not the argmax/maximum-likelihood sequence — natural text carries real entropy at each step. Forcing a high-likelihood sequence produces bland, repetitive, generic output (the degeneration failure mode), while truncated sampling better matches the natural variability of human text. Beam search earns its keep when there is a single well-defined target and higher sequence likelihood really does track correctness — machine translation, ASR, constrained code generation — though even there, very large beam widths can hurt quality (the \"beam search curse\") for added compute cost, so small beams or greedy are often preferred in practice."
+    },
+    {
+      "q": "You see an LLM API endpoint looping or repeating the same phrase forever in production. What decoding-level knobs would you check first?",
+      "a": "In order: (1) temperature — near 0 behaves like greedy and is prone to loops; (2) top_p/top_k — too narrow a truncation collapses to the same effect; (3) repetition/frequency/presence penalty — check it's actually set and non-zero; (4) stop sequences/max_tokens — the model may never be hitting EOS, so it just keeps going; (5) a truncation-sampling implementation bug (e.g., missing renormalization after top-k/top-p, discussed above). Concrete fix: raise temperature slightly, set top_p ≈0.9–0.95 (or min_p), add a repetition penalty (~1.1–1.3) or no-repeat-ngram constraint, and confirm stop tokens are configured."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "hallucination",
+    "logits-and-the-lm-head",
+    "prefill-vs-decode",
+    "pretraining"
+  ],
+  "followUps": [
+    "hallucination",
+    "prefill-vs-decode"
+  ],
+  "metadata": {
+    "inputHash": "df87cd3f111edaa4",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T13:57:35Z"
+  }
+}

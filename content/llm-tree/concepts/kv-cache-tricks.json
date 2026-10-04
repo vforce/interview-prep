@@ -1,0 +1,97 @@
+{
+  "id": "kv-cache-tricks",
+  "title": "KV Cache Tricks",
+  "definition": "KV cache tricks are the architectural (GQA/MQA), numerical (quantization), and systems-level (paged allocation, prefix caching, sliding-window/eviction) techniques used to reduce or bound the memory and bandwidth cost of the key/value cache during autoregressive LLM inference.",
+  "summary": "The KV cache grows linearly with batch size, sequence length, layers, and heads, and at long context or high concurrency it often costs more memory than the model's own weights — while also being the main thing read from HBM at every decode step, which caps serving throughput. Production stacks combine several tricks at once: fewer KV heads (GQA/MQA) shrink the cache itself, quantization shrinks each stored value, and systems techniques like PagedAttention and prefix caching pack more useful sequences into the same GPU memory without touching the model at all.",
+  "objectives": [
+    "Explain how GQA and MQA cut KV cache size by sharing key/value heads across query heads, and compute the savings from a head-count ratio.",
+    "Describe how PagedAttention and prefix caching remove memory fragmentation and let concurrent requests share cached prefixes via copy-on-write.",
+    "Explain what KV cache quantization (int8/fp8) buys in memory and what accuracy risk it introduces.",
+    "Identify when sliding-window/attention-sink caching is the right memory bound, and when it silently breaks long-range recall.",
+    "Choose the right combination of tricks for a given production constraint: GPU memory, throughput, context length, or retraining budget."
+  ],
+  "lesson": "You already know the KV cache trades compute for memory: it stores every past token's K and V per layer/head so decoding doesn't recompute them, and its size grows as `2 × layers × kv_heads × head_dim × seq_len × batch × bytes`. At long context or high concurrency, that memory bill often exceeds the model weights themselves, and the cache read at every decode step is what saturates HBM bandwidth (the actual decode bottleneck). \"KV cache tricks\" are the levers for shrinking that bill without giving up throughput.\n\nThe biggest lever is architectural: reduce `kv_heads` independent of query heads. Multi-Query Attention (MQA) collapses all query heads onto one shared K/V head; Grouped-Query Attention (GQA) is the middle ground — groups of query heads (e.g. 8 groups of 8) each share one KV head. Cache size scales only with `kv_heads`, so going from 64 to 8 KV heads is an 8x cache reduction with most of MHA's quality retained (this is why Llama-2-70B, Llama 3, and Mistral all ship GQA). The catch: this must be baked in — a shipped MHA checkpoint's heads were never trained to share K/V, so retrofitting GQA needs a short \"uptraining\" step (mean-pool head groups, continue training on a small slice of data), not a free post-hoc merge.\n\nA second lever is numerical: store cached K/V in int8 or fp8 instead of bf16/fp16, halving or quartering cache bytes per token for a small, retrain-free quality cost.\n\nA third lever is systems-level and essentially free: PagedAttention (vLLM) allocates the cache in fixed-size blocks like OS virtual memory instead of one padded contiguous buffer per sequence, killing fragmentation and letting identical prefixes (shared system prompts, few-shot examples, beam search branches) point at the same physical blocks via copy-on-write — computed and stored once, not once per request.\n\nA fourth lever bounds cache size outright: sliding-window or attention-sink caching (Mistral, StreamingLLM) keeps only the last W tokens (plus a few \"sink\" tokens), so memory stays O(1) regardless of conversation length — at the cost of true long-range recall.\n\nThe gotcha, common to all of these: standard perplexity/short-context evals don't stress what these tricks sacrifice. A quantized or windowed cache can look perfectly fine on aggregate perplexity and still fail a needle-in-a-haystack or long-document retrieval test — always validate on a long-context, recall-specific eval before shipping.",
+  "examples": "**Example 1 — GQA/MQA cache savings.**\n\n```python\ndef kv_cache_gib(layers, kv_heads, head_dim, seq_len, batch=1, dtype_bytes=2):\n    bytes_total = 2 * layers * kv_heads * head_dim * seq_len * batch * dtype_bytes  # K + V\n    return bytes_total / 2**30\n\nlayers, head_dim, seq_len = 80, 128, 4096      # Llama-2-70B shape, bf16\nfor name, kv_heads in [(\"MHA, 64 kv heads (hypothetical)\", 64),\n                        (\"GQA, 8 kv heads (actual)\", 8),\n                        (\"MQA, 1 kv head\", 1)]:\n    print(f\"{name:34s}: {kv_cache_gib(layers, kv_heads, head_dim, seq_len):5.2f} GiB / 4096-token sequence\")\n```\n```\nMHA, 64 kv heads (hypothetical)  : 10.00 GiB / 4096-token sequence\nGQA, 8 kv heads (actual)         :  1.25 GiB / 4096-token sequence\nMQA, 1 kv head                   :  0.16 GiB / 4096-token sequence\n```\nLlama-2-70B actually ships with GQA (8 kv heads); the MHA row is a hypothetical baseline to show the 8x saving GQA buys over it.\n\n**Example 2 — quantization vs. model weights at long context.** A 7B model (32 layers, 32 heads, head_dim 128, standard MHA — Llama-2-7B's actual shape) serving a single 32,768-token request needs:\n\n`2 (K,V) × 32 layers × 32 heads × 128 head_dim × 32768 tokens × 2 bytes (bf16) = 16 GiB` of KV cache — already larger than the ~13 GiB the bf16 weights themselves take up (7B params × 2 bytes). Quantizing K/V to int8 halves that to 8 GiB; int4 quarters it to 4 GiB. Past a certain context length, the cache — not the weights — is what you're actually provisioning GPU memory for.",
+  "tradeoffs": "PagedAttention-style paged allocation and prefix caching are close to free wins — systems-level, no accuracy cost — so a production serving stack should already have them; there's little reason to avoid them. KV cache quantization (int8/fp8) is the next-easiest lever since it needs no retraining, but it's a real accuracy risk, not a free lunch: validate on long-context/recall-heavy evals, not just perplexity, before shipping. GQA/MQA give the largest structural savings (8-64x) but are a training-time decision — you get them by training the model that way, or paying for a brief uptraining pass, not by flipping a serving flag on an existing MHA checkpoint. Sliding-window/attention-sink caching gives the strongest memory bound (O(1) regardless of length) and fits open-ended chat/streaming well, but avoid it whenever the product needs exact recall of something far back in the context — use full (optionally quantized) caching instead.",
+  "diagnosticQuiz": [
+    {
+      "q": "What problem do KV cache \"tricks\" (GQA, quantized KV cache, PagedAttention, sliding-window caching) primarily address?",
+      "choices": [
+        "The FLOPs cost of the training forward pass",
+        "The size of the tokenizer vocabulary",
+        "The memory and memory-bandwidth cost of storing K/V tensors for autoregressive decoding",
+        "The number of trainable attention weight parameters"
+      ],
+      "answer": 2,
+      "explanation": "All of these tricks target the same bottleneck: KV cache memory grows with batch × sequence length × layers × heads and has to be streamed from HBM on every decode step, which is what caps batch size, context length, and throughput in serving. None of them touch training FLOPs or the tokenizer. The tempting wrong answer is \"parameter count\" — GQA does shrink the K/V projection matrices, but that's a side effect; the reason teams adopt it is the inference-time cache cost, not a smaller model."
+    },
+    {
+      "q": "In a model with 64 query heads, switching from full multi-head attention (64 KV heads) to GQA with 8 KV heads changes KV cache size by what factor, all else equal?",
+      "choices": [
+        "64x smaller",
+        "8x smaller",
+        "No change — GQA doesn't affect cache size",
+        "2x smaller"
+      ],
+      "answer": 1,
+      "explanation": "Cache size scales with the number of KV heads, not query heads, so 64 → 8 is a straightforward 8x reduction — this is exactly Llama-2-70B's real configuration (64 query heads, 8 KV heads). 64x smaller would require dropping to a single KV head, i.e. full MQA, not GQA."
+    },
+    {
+      "q": "Why does PagedAttention's block-based allocation particularly help when many concurrent requests share a long common prefix (e.g. the same system prompt)?",
+      "choices": [
+        "It automatically quantizes the prefix's K/V tensors to int4",
+        "It lets requests share the same physical KV blocks for an identical prefix via copy-on-write, so that prefix's K/V is computed and stored once instead of once per request",
+        "It reduces the number of KV heads the model uses for that prefix",
+        "It extends the model's maximum context window"
+      ],
+      "answer": 1,
+      "explanation": "Because the cache is organized into fixed-size blocks referenced like OS virtual-memory pages, identical prefix blocks across sequences can point at the same physical memory, with copy-on-write only when a sequence diverges from the shared prefix — so that shared portion is computed and stored once, not per-request. It doesn't quantize, change head count, or extend context length; those are separate, orthogonal tricks (quantization, GQA/MQA, and windowing, respectively)."
+    },
+    {
+      "q": "You're serving a chat product where conversations can run indefinitely and users mainly care about recent context, not exact recall from hours ago. Which trick best bounds KV cache memory for this case?",
+      "choices": [
+        "Full MHA with an fp32 KV cache for maximum precision",
+        "PagedAttention prefix caching",
+        "A sliding-window / attention-sink cache that keeps only the last N tokens plus a few initial \"sink\" tokens",
+        "Increasing the number of KV heads"
+      ],
+      "answer": 2,
+      "explanation": "Sliding-window / attention-sink caching keeps memory at O(window size) forever, independent of how long the conversation runs — exactly the profile StreamingLLM was built for. Prefix caching helps when many requests share a common prefix, not when a single conversation keeps growing; more precision (fp32) or more KV heads would make the memory problem worse, not solve it."
+    },
+    {
+      "q": "A team wants to cut KV cache memory by converting an already-deployed, fully-trained MHA checkpoint into GQA purely at serving time — grouping its 64 trained KV heads down to 8, with no further training. What's the main risk?",
+      "choices": [
+        "The model's context window shrinks automatically",
+        "Quality degrades noticeably, because the query heads in a group were never trained to share a KV head; recovering GQA-level quality needs a brief \"uptraining\" step (e.g. mean-pool heads into groups, then continue training), not a naive post-hoc merge",
+        "Inference throughput gets worse, not better",
+        "None — grouping KV heads is purely a memory-layout change with no effect on outputs"
+      ],
+      "answer": 1,
+      "explanation": "GQA's head-sharing is a property the model has to be trained (or uptrained) into — the query heads in a group were never optimized to agree on a shared K/V head, so a naive post-hoc merge causes a real, measurable quality drop, as shown in the original GQA paper, which instead recovers quality via a short uptraining pass. Throughput does improve, and context window is unaffected — the risk is specifically quality, which is the misconception the other options reflect."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Your serving cluster is GPU-memory-bound and you need to raise either max batch size or max context length for a fixed model. Walk through the KV-cache-side levers you'd pull, in order of effort and risk.",
+      "a": "1. **Systems-level first (near-zero risk, no retrain):** confirm the serving engine already does paged KV allocation plus prefix/system-prompt caching (vLLM, TensorRT-LLM, SGLang-style) — this alone often reclaims memory lost to fragmentation and duplicate shared-prefix storage.\n2. **Quantize the KV cache** (int8/fp8) — no retraining needed, roughly 2-4x more sequences fit in the same HBM; validate on long-context/recall evals, not just perplexity, before shipping.\n3. **Move the architecture to GQA** (or MQA for max savings) if you control training or can afford a short uptraining run — cuts cache memory by the query-head:kv-head ratio (Llama-2-70B: 8x from 64→8) with little quality loss for GQA.\n4. **Bound recall with a sliding-window/attention-sink cap** only if the product tolerates it — last resort, since it trades away exact long-range recall for O(1) memory."
+    },
+    {
+      "q": "Why does Llama-2-70B use 8 KV heads (GQA) instead of 1 (MQA) or 64 (full MHA)? What is GQA actually buying you?",
+      "a": "GQA is a deliberate middle point on a memory/quality curve: full MHA (64 KV heads) has the smallest memory savings but the highest quality ceiling; full MQA (1 KV head) gives the largest cache/bandwidth savings but the biggest quality and training-stability cost. GQA groups query heads (here, 8 groups of 8) so each group shares one KV head — cache size drops 8x versus MHA while empirically recovering close to MHA quality, since there's still enough KV diversity across groups to specialize. That's why it's the default where cache cost matters most (large models, long contexts) rather than a blanket \"just use MQA\"."
+    },
+    {
+      "q": "You quantize your KV cache to int8, perplexity on your eval set barely moves, and you ship it. Two weeks later, long-document QA accuracy has dropped. What happened, and how do you catch this earlier next time?",
+      "a": "Perplexity is dominated by short-range, high-confidence next-token predictions and doesn't stress long-range attention — a query that needs to precisely retrieve something from far back in context is exactly where quantization error in K/V compounds and shows up, while it barely nudges average next-token loss. Fix the process: never ship a KV cache change (quantization, windowing, eviction) on perplexity alone — gate it on task-specific, long-context evals (needle-in-a-haystack, long-document QA/summarization) that actually exercise long-range recall before rollout."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "kv-cache-memory"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "9911575d85835a9f",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T14:33:10Z"
+  }
+}

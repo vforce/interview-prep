@@ -1,0 +1,104 @@
+{
+  "id": "self-attention",
+  "title": "Self-Attention",
+  "definition": "Self-attention is a mechanism that, for every token in a sequence, computes a weighted average of all tokens' value vectors, where the weights are the softmax-normalized, scaled dot-product similarities between that token's query and every token's key.",
+  "summary": "Self-attention lets every position in a sequence directly attend to every other position in a single step, giving O(1) path length between any two tokens (vs. O(n) for RNNs). It's computed via three learned projections (Q, K, V) of the same input sequence, followed by scaled dot products and a softmax. This is the core primitive that makes transformers parallelizable and long-range-context-aware — and also the source of their O(n²) serving cost.",
+  "objectives": [
+    "Derive scaled dot-product attention and explain the role of each term (Q, K, V, the sqrt(d_k) scale)",
+    "Explain why we scale by sqrt(d_k) and what breaks numerically if you don't",
+    "Distinguish self-attention from cross-attention and multi-head attention",
+    "Implement attention (with causal masking) from scratch in PyTorch",
+    "Reason about the O(n²) cost in production: KV caching, FlashAttention, long-context serving"
+  ],
+  "lesson": "Self-attention answers, for each token i: how much should I borrow from token j's representation, for every j in the sequence? It projects input X (shape `[n, d_model]`) three ways: `Q = XW_Q, K = XW_K, V = XW_V`. Then `weights = softmax(QK^T / sqrt(d_k))`, and `output = weights @ V`.\n\nWhy three separate projections instead of comparing X directly? Query and Key are compared for similarity — a search: \"what am I looking for\" vs. \"what do I contain.\" Value is \"what do I actually contribute once selected.\" Splitting these roles lets the model learn a similarity metric independent of the content being retrieved; reusing one projection for both would couple search and content and cost expressiveness.\n\nWhy scale by sqrt(d_k)? QK^T entries are dot products of d_k-dimensional vectors; if each component has unit variance, the dot product's variance grows linearly with d_k. Unscaled, large d_k pushes logits into the tails, softmax saturates near one-hot, and gradients vanish. Dividing by sqrt(d_k) keeps variance ~1 regardless of dimension — a numerical-stability fix, not a modeling choice.\n\nWorked intuition: for \"The cat sat,\" token \"sat\"'s query dot-products against all three keys; softmax turns the three scores into a distribution, say `[0.1, 0.2, 0.7]` favoring itself. Output for \"sat\" = `0.1·V_the + 0.2·V_cat + 0.7·V_sat` — a context-aware blend, same dimensionality as V.\n\nKey gotcha for interviews: self-attention is permutation-invariant on its own — swap two tokens' positions and (ignoring positional encodings) the output for that content set is identical up to permutation. This is exactly why transformers need explicit positional encodings (sinusoidal, learned, RoPE) — attention alone cannot recover order. A second gotcha: the O(n²) term is primarily a *memory* problem, not a compute one — the n×n score matrix must materialize (or be tiled, as in FlashAttention) at every layer and head, and that materialization, not FLOPs, is the real production bottleneck for long-context serving.",
+  "examples": "**Minimal single-head self-attention (PyTorch):**\n\n```python\nimport torch\nimport torch.nn.functional as F\n\ndef self_attention(x, Wq, Wk, Wv):\n    # x: [seq_len, d_model]\n    Q, K, V = x @ Wq, x @ Wk, x @ Wv          # each [seq_len, d_k]\n    d_k = K.shape[-1]\n    scores = Q @ K.T / d_k ** 0.5              # [seq_len, seq_len]\n    weights = F.softmax(scores, dim=-1)        # rows sum to 1\n    return weights @ V                         # [seq_len, d_k]\n\ntorch.manual_seed(0)\nd_model, d_k, seq_len = 8, 4, 3\nx = torch.randn(seq_len, d_model)\nWq, Wk, Wv = (torch.randn(d_model, d_k) for _ in range(3))\nout = self_attention(x, Wq, Wk, Wv)\nprint(out.shape)  # torch.Size([3, 4])\n```\n\n**Causal (decoder) masking** — needed so token i can't see future tokens j > i:\n\n```python\nmask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1).bool()\nscores = scores.masked_fill(mask, float(\"-inf\"))\nweights = F.softmax(scores, dim=-1)  # -inf -> ~0 weight after softmax\n```",
+  "tradeoffs": "Self-attention's win is an unbounded receptive field with O(1) sequential steps — every token sees every other token in one layer, so it parallelizes perfectly on GPUs and avoids the vanishing-gradient decay RNNs suffer over long ranges. The cost is O(n²) time and memory in sequence length, the dominant constraint for long-context LLMs (long documents, agent traces, large KV caches). Production mitigations worth knowing: FlashAttention (IO-aware tiling, mathematically equivalent, just avoids materializing the full n×n matrix), sparse/local/windowed attention, linear-attention approximations, and KV-cache reuse during autoregressive decode (cache K/V per token so each new token costs O(n), not O(n²)). Use full self-attention for short-to-moderate sequences needing dense global context; reach for sparse/linear variants, chunking, or retrieval when context length dominates the latency/memory budget.",
+  "diagnosticQuiz": [
+    {
+      "q": "What is the correct formula for scaled dot-product self-attention output?",
+      "choices": [
+        "(QK^T / sqrt(d_k)) @ softmax(V)",
+        "softmax(Q @ V^T / sqrt(d_k)) @ K",
+        "softmax(QK^T) / sqrt(d_k) @ V",
+        "softmax(QK^T / sqrt(d_k)) @ V"
+      ],
+      "answer": 3,
+      "explanation": "The sqrt(d_k) scaling must be applied to the logits *before* the softmax, not after — softmax is non-linear, so scaling post-softmax (option A) distorts an already-normalized distribution instead of stabilizing the pre-softmax variance. Option B is the standard \"Attention Is All You Need\" formulation."
+    },
+    {
+      "q": "If d_k = 64 and Q, K entries are i.i.d. with unit variance, roughly what is the standard deviation of a raw (unscaled) QK^T dot-product entry?",
+      "choices": [
+        "About 64",
+        "About 4096",
+        "About 1",
+        "About 8"
+      ],
+      "answer": 3,
+      "explanation": "Each dot product sums 64 independent unit-variance products, so its variance is ~64 and standard deviation is sqrt(64) = 8 — which is exactly why we divide by sqrt(d_k) = 8, to bring logits back to roughly unit variance so softmax doesn't saturate. The distractor \"about 64\" comes from confusing variance with standard deviation."
+    },
+    {
+      "q": "Why does self-attention use three separate learned projections (Q, K, V) instead of comparing raw token embeddings directly?",
+      "choices": [
+        "It is required to make attention permutation-invariant",
+        "It decouples \"what I'm looking for\" from \"what I contain\" from \"what I contribute,\" letting the model learn a similarity function independent of the retrieved content",
+        "It guarantees the attention matrix is symmetric",
+        "It reduces the parameter count of the model"
+      ],
+      "answer": 1,
+      "explanation": "Q/K define a learned similarity/search function, while V defines what's actually passed forward once a token is attended to — separating these roles is strictly more expressive than reusing one projection for both jobs. Permutation-invariance is a structural property of attention regardless of Q/K/V being separate, so C is a distractor."
+    },
+    {
+      "q": "You're serving a 32k-context LLM and latency is dominated by attention on long prompts. Which fix directly targets this without changing the model's learned outputs?",
+      "choices": [
+        "Increase the learning rate during fine-tuning",
+        "Add more attention heads",
+        "Switch to a smaller model checkpoint",
+        "Use FlashAttention-style fused/tiled kernels"
+      ],
+      "answer": 3,
+      "explanation": "FlashAttention is a mathematically-equivalent, IO-aware reordering of the same computation — it avoids materializing the full n×n score matrix in slow memory, cutting latency and memory without changing numerical results (aside from floating-point order-of-operations). The other options either change model quality/behavior or don't address the quadratic bottleneck at all."
+    },
+    {
+      "q": "A colleague claims \"self-attention inherently understands word order because it processes the whole sequence at once.\" What's wrong with this claim?",
+      "choices": [
+        "Self-attention only works on sequences shorter than 512 tokens",
+        "Self-attention is permutation-invariant on its own; order information must be injected separately via positional encodings (e.g., sinusoidal, learned, or RoPE)",
+        "Nothing — the claim is correct",
+        "Self-attention processes tokens strictly left-to-right, so order is automatic"
+      ],
+      "answer": 1,
+      "explanation": "Attention weights depend only on content similarity (QK^T), so permuting the input tokens permutes the output identically — there's no inherent notion of position. This is precisely why transformers add positional encodings as a separate signal; without them, \"The dog bit the man\" and \"The man bit the dog\" would attend identically."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Walk me through what happens, mathematically and computationally, in one self-attention layer — and where the production cost actually comes from.",
+      "a": "Given input `X` of shape `[n, d_model]`, project to `Q, K, V = XW_Q, XW_K, XW_V`, each `[n, d_k]`. Compute `scores = QK^T / sqrt(d_k)` (shape `[n, n]`), apply softmax row-wise, then multiply by `V`. FLOP cost is `O(n² · d_k)`, but the *memory* cost — `O(n²)` per head per layer to materialize the score matrix — is usually the real bottleneck for long-context serving, not compute. That's what motivates FlashAttention (tile the computation, never materialize the full matrix) and KV-caching during autoregressive decode (reuse past K/V instead of recomputing them every step)."
+    },
+    {
+      "q": "Why do we divide by sqrt(d_k) in scaled dot-product attention, and what breaks if you skip it?",
+      "a": "Dot products of d_k-dimensional vectors have variance that scales linearly with d_k (given unit-variance components), so raw logits grow with dimension. Large-magnitude logits push softmax toward a near-one-hot distribution, saturating gradients — the model effectively stops learning which tokens to attend to, which is especially damaging early in training. Dividing by sqrt(d_k) keeps logit variance roughly constant regardless of `d_k`, so training behaves consistently as the model is scaled up or down."
+    },
+    {
+      "q": "Why use multi-head attention instead of one large single-head attention with the same total dimensionality?",
+      "a": "A single head produces one weighting scheme per query, so it can only represent one \"kind\" of relationship at a time (e.g., only syntactic adjacency, or only coreference). Multiple smaller heads let the model learn several independent similarity subspaces in parallel and concatenate the results — empirically capturing richer structure (different heads specializing in different relation types) than one head of equivalent total width, at essentially the same FLOP cost since per-head dimensionality shrinks proportionally."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "kv-cache",
+    "multi-head-attention",
+    "quadratic-attention-cost",
+    "transformer-overview"
+  ],
+  "followUps": [
+    "kv-cache",
+    "multi-head-attention",
+    "quadratic-attention-cost"
+  ],
+  "metadata": {
+    "inputHash": "2d5ff5a3aef8f09a",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T13:24:58Z"
+  }
+}

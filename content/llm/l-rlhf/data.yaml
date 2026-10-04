@@ -1,0 +1,36 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: l-rlhf
+type: concept
+area: Training & Alignment
+order: 7
+front: What is instruction tuning / RLHF?
+back: |-
+  After pretraining, align the raw next-token predictor:
+  1. SFT — supervised fine-tune on instruction→response demonstrations.
+  2. Reward model — trained from human preference comparisons.
+  3. Policy optimisation against the reward (PPO, or DPO which skips the explicit RM).
+
+  Makes the model helpful, harmless, and instruction-following.
+more: |-
+  ## A preference pair
+  Prompt: *"Explain gravity to a 5-year-old."*
+  - **chosen** → "It's what pulls things down — drop a ball and it falls!"
+  - **rejected** → "Gravity is spacetime curvature per the Einstein field equations…"
+
+  A reward model learns r(chosen) > r(rejected); Bradley-Terry sets P(chosen wins) = σ(r_c − r_r).
+
+  **DPO** skips the reward model and optimizes the policy directly:
+  ```
+  L = −log σ( β·[ log πθ(y_w|x)/π_ref(y_w|x)
+                − log πθ(y_l|x)/π_ref(y_l|x) ] )
+  ```
+  Plain English: raise the chosen response's log-prob and lower the rejected one's, *relative to the frozen reference model* — the β·KL term stops it drifting into gibberish.
+
+  **Failure modes:**
+  - **Reward hacking** — longer answers score higher → bloated lists/markdown.
+  - **Sycophancy** — agreeing with the user wins preferences.
+  - **Over-refusal** — harmlessness pressure refuses benign asks.
+  - **Mode collapse** — PPO narrows output diversity.
+
+  SFT teaches the *format*; the reward step teaches *which* of two valid answers humans prefer.

@@ -1,0 +1,99 @@
+{
+  "id": "what-is-a-language-model",
+  "title": "What is a Language Model",
+  "definition": "A language model is a function that assigns a probability to a sequence of tokens, conventionally factorized via the chain rule into a product of next-token conditionals P(xᵢ | x_<i).",
+  "summary": "A language model assigns a probability to any token sequence, decomposed by the chain rule into a product of next-token conditionals P(xᵢ | x_<i) — one object that supports both scoring (perplexity/likelihood) and generation (autoregressive sampling). Modern LLMs are language models trained at scale with a transformer decoder estimating that conditional; chat/assistant behavior is a separate fine-tuning stage layered on top, not part of the base definition.",
+  "objectives": [
+    "Define a language model as a probability distribution over token sequences via chain-rule factorization.",
+    "Compute perplexity from token-level probabilities and know what it does/doesn't measure.",
+    "Explain why next-token prediction is a powerful, label-free pretraining objective — and why it structurally produces hallucination.",
+    "Distinguish a base (pretrained) language model from an instruction-tuned/chat model and its production implications.",
+    "Choose correctly between scoring with an LM (perplexity), a classifier, or full generation for a given production task."
+  ],
+  "lesson": "A language model isn't \"a thing that understands language\" — formally it's a probability distribution over token sequences, P(x₁,...,x_n). The chain rule lets us write this exactly as a product of next-token conditionals:\n\n```\nP(x_1, ..., x_n) = P(x_1) · P(x_2 | x_1) · ... · P(x_n | x_1, ..., x_{n-1})\n                 = ∏_{i=1}^{n} P(x_i | x_<i)\n```\n\nThis isn't just notation — it *is* the training objective. Pretraining a GPT-style model means: for every position i in every document in a huge unlabeled corpus, compute the model's predicted distribution over the vocabulary given x_<i, and minimize cross-entropy against the actual x_i. A transformer decoder is simply the parametric function used to produce each P(x_i | x_<i) efficiently, via causal (masked) self-attention over everything before position i. Once trained, that same conditional supports two different uses of one model: score a sequence (sum log-probs → likelihood, or its normalized cousin, perplexity) or generate one (sample x_i from P(·|x_<i), append it, repeat — autoregressive decoding).\n\n**Perplexity, precisely.** Perplexity is exponentiated average negative log-likelihood: with cross-entropy H = -(1/N) · Σ log P(x_i | x_<i), perplexity is PPL = e^H (or 2^H if the logs are base 2). That's exactly what `torch.exp(loss)` computes in Example 2 — training loss and perplexity are the same quantity in two different units. The intuition worth keeping: perplexity is the *effective number of equally-likely choices* the model is juggling at each next-token step. PPL = 1 means the model puts probability 1 on the actual next token every time (no surprise at all); PPL = |vocabulary| means it's no better than picking uniformly at random; a well-trained LM on in-distribution text typically lands in the tens — far below the 50k+ vocabulary size of a modern tokenizer.\n\n**Worked intuition.** Given \"The cat sat on the ___\", the model doesn't \"know\" the answer is \"mat\" — it has learned that, across its training distribution, tokens like \"mat,\" \"floor,\" or \"chair\" get high conditional probability in that context, and \"airplane\" gets very low probability. That mechanism is identical in a toy bigram model and a 70B-parameter transformer; only how P(x_i | x_<i) is estimated changes.\n\n**The key gotcha.** The training objective is \"assign high probability to a plausible next token given the training distribution,\" not \"assign high probability to a true statement.\" So fluent, confident, factually wrong output isn't a bug bolted onto an otherwise-correct system — it's the structural consequence of what an LM is optimized to do. Hallucination mitigation (RAG, tool use, RLHF for calibration) exists precisely because the base LM objective has no notion of truth built in.",
+  "examples": "**Example 1 — probability and perplexity by hand.**\n\nSuppose a trained LM assigns these conditional probabilities to \"I love pizza\" (3 tokens):\n\n```\nP(I)               = 0.8\nP(love | I)        = 0.5\nP(pizza | I, love) = 0.5\n\nP(seq) = 0.8 × 0.5 × 0.5 = 0.2                    (chain rule)\nPPL    = (1 / P(seq))^(1/N) = (1/0.2)^(1/3) ≈ 1.71 (N = 3 tokens)\n\nH      = -(1/N) · ln P(seq) = -(1/3) · ln(0.2) ≈ 0.536 nats/token\nPPL    = e^H ≈ 1.71                                (cross-entropy form, same answer)\n```\n\nLower perplexity = the model was less \"surprised\" by this sequence — equivalently, lower average cross-entropy per token.\n\n**Example 2 — from math to production code.**\n\n```python\n# (a) minimal from-scratch bigram LM — makes the chain rule concrete\nfrom collections import defaultdict\n\ndef train_bigram(corpus_tokens):\n    counts = defaultdict(lambda: defaultdict(int))\n    for sent in corpus_tokens:\n        for w1, w2 in zip(sent, sent[1:]):\n            counts[w1][w2] += 1\n    return {w1: {w2: c / sum(nxt.values()) for w2, c in nxt.items()}\n            for w1, nxt in counts.items()}\n\ndef sequence_prob(bigram_probs, unigram_probs, tokens):\n    p = unigram_probs[tokens[0]]\n    for w1, w2 in zip(tokens, tokens[1:]):\n        p *= bigram_probs.get(w1, {}).get(w2, 1e-6)  # backoff for unseen pairs\n    return p\n```\n\n```python\n# (b) the production pattern: perplexity from a real pretrained LM\nimport torch\nfrom transformers import AutoModelForCausalLM, AutoTokenizer\n\ntok = AutoTokenizer.from_pretrained(\"gpt2\")\nmodel = AutoModelForCausalLM.from_pretrained(\"gpt2\")\n\nids = tok(\"The cat sat on the mat.\", return_tensors=\"pt\").input_ids\nwith torch.no_grad():\n    loss = model(ids, labels=ids).loss   # mean cross-entropy per token\nperplexity = torch.exp(loss).item()\n```\n\n`labels=ids` makes the model compute ∏ P(xᵢ|x_<i) internally (shifted by one position) and return the average negative log-likelihood — `exp(loss)` is exactly the perplexity from the definition above, computed the way it's actually done in practice.",
+  "tradeoffs": "Perplexity/likelihood is cheap (one forward pass, no labels) and is the LM's native mode — good for scoring, ranking, and OOD/gibberish detection, and for comparing checkpoints within the *same* tokenizer/model family. It's a poor proxy once you leave that: it doesn't transfer across tokenizers without normalization (e.g., bits-per-byte), and it doesn't reliably track downstream task quality or human preference — a model can have great perplexity and still answer badly, so production evals lean on task-specific benchmarks and preference judging, not perplexity alone. Autoregressive generation is sequential by construction (each token needs the previous ones), so latency scales with output length; KV-caching avoids recomputing past attention but you still pay per token. If a task reduces to a fixed label set (spam/not-spam, intent classification), a small encoder classifier is almost always cheaper and faster than routing it through a generative LM — reach for the full LM when you actually need open-ended scoring or generation.",
+  "diagnosticQuiz": [
+    {
+      "q": "In precise terms, what does a language model compute?",
+      "choices": [
+        "A probability distribution over sequences of tokens, factorized via the chain rule into a product of next-token conditional probabilities",
+        "A deterministic function that maps a sentence in one language to a sentence in another",
+        "A fixed set of grammar rules used to validate sentence syntax",
+        "A lookup table that maps whole input sentences directly to output labels"
+      ],
+      "answer": 0,
+      "explanation": "An LM defines P(x₁,...,x_n), and the chain rule lets us write this as ∏ᵢ P(xᵢ | x_<i) — exactly the objective next-token-prediction training optimizes. The lookup-table option is the tempting wrong answer: it reflects thinking of a model as a discriminative classifier with a fixed input→label mapping, but an LM is generative — at every position its output is a full distribution over the vocabulary, not a static lookup entry."
+    },
+    {
+      "q": "A model assigns these next-token probabilities while scoring a 3-token sequence: P(x1)=0.6, P(x2|x1)=0.5, P(x3|x1,x2)=0.5. What is the perplexity of this sequence?",
+      "choices": [
+        "6.67",
+        "0.15",
+        "≈1.88",
+        "≈0.53"
+      ],
+      "answer": 2,
+      "explanation": "Perplexity = (1/P(sequence))^(1/N), the geometric mean of per-token inverse probability. Here P(seq) = 0.6 × 0.5 × 0.5 = 0.15, N=3, so PPL = (1/0.15)^(1/3) ≈ 1.88. The \"6.67\" option is the common gotcha: taking 1/P but skipping the Nth-root length normalization, which makes the number meaningless for comparing sequences of different lengths."
+    },
+    {
+      "q": "Why is next-token prediction such an effective pretraining objective at scale?",
+      "choices": [
+        "Predicting the next token forces the model to implicitly learn syntax, semantics, and world knowledge from raw unlabeled text",
+        "It requires a hand-labeled example for every downstream task the model will ever perform",
+        "Optimizing next-token likelihood guarantees the generated text is factually correct",
+        "Next-token prediction is only computationally feasible on very short documents"
+      ],
+      "answer": 0,
+      "explanation": "Next-token prediction is a free, self-supervised signal — any text is training data — yet doing it well on broad enough text requires internalizing grammar, facts, and reasoning patterns, which is why scale keeps paying off. The \"guarantees factual correctness\" option is the common misconception: minimizing next-token loss optimizes for plausible continuations under the training distribution, not true ones — hallucination follows directly from the objective."
+    },
+    {
+      "q": "You need to flag garbled/OCR-corrupted text in a production pipeline before it reaches a downstream summarizer, with no labeled examples available. What's the most direct use of a language model here?",
+      "choices": [
+        "Score the candidate text's perplexity under a pretrained LM and flag anything above a threshold",
+        "Write a growing set of regex rules to catch known garbling patterns",
+        "Language models can't help here; you need a classifier trained from scratch",
+        "Call the largest available instruction-tuned chat model and ask it \"is this garbled? yes/no\" for every input"
+      ],
+      "answer": 0,
+      "explanation": "High perplexity means the text is statistically implausible under natural language — exactly the unsupervised signal wanted here, at the cost of one forward pass on a small base model with zero labeling effort. Routing every input through a full chat-tuned LLM as a zero-shot classifier is the tempting production anti-pattern: 10-100x more latency and cost for a problem the LM's native scoring mode already solves directly."
+    },
+    {
+      "q": "A team compares raw perplexity from Model A (50k-token BPE vocab) against Model B (32k-token BPE vocab) on the same corpus to decide which \"models language better.\" What's wrong with this?",
+      "choices": [
+        "Perplexity only applies to older n-gram models, not neural language models",
+        "Nothing — perplexity is a universal, tokenizer-agnostic metric",
+        "Perplexity can't be computed at all for BPE-tokenized models",
+        "Perplexity is measured per token, and different tokenizers define different tokens, so raw perplexity is only comparable across models sharing the same vocabulary"
+      ],
+      "answer": 3,
+      "explanation": "Perplexity averages over per-token probabilities, and \"token\" means different units under different vocabularies — different BPE vocabs segment the same string into different numbers of pieces, shifting per-token entropy for reasons unrelated to which model is actually better. Treating perplexity as a universal, tokenizer-agnostic score (option C) is the gotcha teams fall into; a fair comparison needs a shared unit like bits-per-byte."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Give a precise, formal definition of a language model, and explain how that definition literally is the training objective for models like GPT or Llama.",
+      "a": "A language model defines a probability distribution over token sequences, P(x₁,...,x_n). By the chain rule this factors into ∏ᵢ P(xᵢ|x_<i) — the probability of each token given everything before it. Training a GPT-style model is literally maximizing this: at each position, minimize cross-entropy between the model's predicted next-token distribution and the actual next token, averaged over a massive unlabeled corpus. There's no separate \"understanding\" objective bolted on — next-token prediction at scale *is* the entire pretraining signal, and a transformer decoder is just the parametric family used to compute each conditional."
+    },
+    {
+      "q": "What's the practical difference between a base pretrained language model and an instruction-tuned/chat model, and why does it matter for what you put behind a production API?",
+      "a": "Both are the same architecture and both are language models formally, but a base model only continues text plausibly given its pretraining distribution — prompted with a question it may ramble, repeat the prompt, or ask another question, because \"answer helpfully and stop\" was never its training signal. An instruction-tuned/chat model adds a further stage (SFT, often plus RLHF/DPO) that shifts the distribution toward \"produce a helpful, on-topic, appropriately terminated response.\" In production this decides integration cost: a base model needs careful few-shot prompting and output parsing but gives raw control (good for scoring/completion/templated tasks); a chat model gives predictable turn-taking out of the box but carries alignment side effects (refusals, verbosity, fixed persona) you can't always prompt away."
+    },
+    {
+      "q": "A teammate wants to A/B \"model quality\" by comparing raw perplexity between your production LLM and a candidate from a different vendor. What do you tell them?",
+      "a": "That comparison isn't valid as-is. Perplexity is a per-token average of inverse likelihood, and \"token\" is defined by each model's own tokenizer — different vocabularies segment the same string into a different number of pieces, so per-token entropy shifts for reasons unrelated to which model models language better. To compare fairly, normalize to a shared unit like bits-per-byte over held-out text, or better, skip perplexity and compare on the actual downstream task/eval, since perplexity is a proxy that doesn't always track task performance anyway."
+    }
+  ],
+  "version": 2,
+  "relatedConcepts": [
+    "tokenization"
+  ],
+  "followUps": [
+    "tokenization"
+  ],
+  "metadata": {
+    "inputHash": "3e28bee6ad706fa0",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T13:00:36Z"
+  }
+}

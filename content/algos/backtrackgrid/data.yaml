@@ -1,0 +1,11 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: backtrackgrid
+fam: backtracking
+label: Backtracking (Grid)
+order: 10
+trigger: word/path search in a grid, sudoku, place-and-validate
+insight: DFS, mark the cell visited in place, restore it on the way out
+probs:
+- {n: Word Search, slug: word-search, d: M}
+- {n: Sudoku Solver, slug: sudoku-solver, d: H}

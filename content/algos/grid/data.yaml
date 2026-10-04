@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: grid
+fam: graphs
+label: Grid BFS/DFS
+order: 15
+trigger: islands, regions, multi-source spread (rot, distance)
+insight: flood-fill marking visited; MULTI-SOURCE = seed all sources into the queue at once, then BFS outward
+probs:
+- {n: Flood Fill, slug: flood-fill, d: E}
+- {n: Number of Islands, slug: number-of-islands, d: M}
+- {n: Making A Large Island, slug: making-a-large-island, d: H}

@@ -1,0 +1,100 @@
+{
+  "id": "resources",
+  "title": "Resources",
+  "definition": "An MCP Resource is a URI-addressable, read-only piece of context — a file, record, log, schema, etc. — that a server exposes via `resources/read` for the *host application* (not the model) to decide when to attach to a conversation.",
+  "summary": "Resources are MCP's data primitive: servers advertise them through `resources/list` (fixed URIs) or `resources/templates/list` (RFC 6570 templates), and clients fetch content through `resources/read`, getting back `text` or base64 `blob` per item. The `resources` capability negotiated at `initialize` declares two independent flags — `subscribe` (per-resource update pushes) and `listChanged` (the available set changed). Unlike Tools, which the model invokes on its own judgment, attaching a Resource to context is an application/user decision — that control-model distinction is exactly what interviewers probe for.",
+  "objectives": [
+    "Explain the control-model split between Resources (application-driven), Tools (model-driven), and Prompts (user-driven).",
+    "Implement `resources/list`, `resources/templates/list`, and `resources/read`, handling both `text` and base64 `blob` content.",
+    "Describe the `resources` capability's `subscribe` and `listChanged` flags and when each is worth the added server state.",
+    "Identify production risks: URI validation/path traversal, unbounded single-resource size, and list-vs-content pagination.",
+    "Recognize that a model cannot pull a Resource into context on its own — it only works with what's already attached."
+  ],
+  "lesson": "MCP gives servers three ways to add value to a session, split by *who decides*: Tools are model-controlled — the LLM invokes them mid-reasoning; Prompts are user-controlled — picked from a menu; Resources are application-controlled — the host or orchestration layer decides what data to attach. Resources model *data*, not *actions*: a file, a DB row, a log tail, a config blob.\n\nEvery resource has a `uri`, `name`, optional `description`, and optional `mimeType`. Static ones are advertised via `resources/list`; parameterized ones via `resources/templates/list`, which returns RFC 6570 templates like `file:///{path}` that a client fills in before calling `resources/read`. A read returns one or more content items, each with a `uri`, `mimeType`, and *either* `text` (UTF-8) *or* `blob` (base64) — never both, and binary content always pays roughly a 33% base64 size tax.\n\nWorked intuition: in a code-review assistant, the repo's files are Resources — a file picker lets a user attach `file:///src/auth.py`. Whether to run a linter on it is a Tool call — the model decides that autonomously based on what it sees. That split keeps \"what data enters context\" auditable and host-controlled, while \"what actions happen\" stays under model judgment. The most common design mistake is expecting the model to reach out and pull a resource into its own context on its own initiative: without a Tool wrapping the fetch, the model can only work with resources it has already been handed.\n\nBuilding on capability negotiation: a server that supports resources declares the `resources` capability at `initialize` with two independent flags — `subscribe` (clients may call `resources/subscribe` on a URI and get pushed `notifications/resources/updated`) and `listChanged` (the server may push `notifications/resources/list_changed` when the available set changes, e.g. a new log file rotates in). Skipping both just means the client polls `resources/list`/`resources/read` on a timer — correct, just wasteful at scale.\n\nGotcha for production: MCP's pagination (`cursor`) applies to *listing* resources, not to the *content* of one large resource — `resources/read` on a 2 GB file returns it whole. Chunking an oversized resource is the server's job, not the protocol's.",
+  "examples": "**1. Declaring resources (FastMCP high-level API)**\n\n```python\nfrom mcp.server.fastmcp import FastMCP\n\nmcp = FastMCP(\"ci-server\")\n\n@mcp.resource(\"config://build\")\ndef build_config() -> str:\n    \"\"\"Current CI build configuration (static resource).\"\"\"\n    return json.dumps({\"target\": \"prod\", \"workers\": 8})\n\n@mcp.resource(\"logs://{job_id}/tail\")\ndef job_log_tail(job_id: str) -> str:\n    \"\"\"Last 200 lines of a CI job's log (templated resource).\"\"\"\n    return \"\\n\".join(read_last_lines(f\"/var/log/ci/{job_id}.log\", n=200))\n```\n\nA host discovers `logs://{job_id}/tail` via `resources/templates/list`, fills in `job_id=\"4521\"`, and calls `resources/read` on `logs://4521/tail` — the model never picks the URI itself, the client/orchestrator does.\n\n**2. Reading content: text vs. binary, and subscribing**\n\n```python\nfrom mcp import ClientSession\n\nasync def attach_resource(session: ClientSession, uri: str):\n    result = await session.read_resource(uri)\n    for item in result.contents:\n        if item.text is not None:\n            add_to_context(item.text)          # e.g. the log tail above\n        else:\n            save_binary(item.blob)             # base64 str -> decode + store\n\n    # push-based freshness instead of re-polling resources/read\n    await session.subscribe_resource(uri)\n```",
+  "tradeoffs": "Resources are cheap to expose — read-only, no side effects, easy to cache and list liberally — but they push the \"what enters context\" decision onto the host/orchestration layer; if that layer is unsophisticated, useful data never reaches the model. Subscriptions buy freshness without polling but cost the server per-subscriber state and fan-out — worth it for a handful of actively-watched resources (a live log, a running job), not \"subscribe to everything.\" Prefer a Resource for anything static/read-only and identifiable by URI; reach for a Tool instead when the model must decide dynamically, mid-turn, what to fetch or with what parameters — a resource template it can't invoke itself is the wrong fit for that.",
+  "diagnosticQuiz": [
+    {
+      "q": "Which statement best defines an MCP Resource?",
+      "choices": [
+        "A capability flag exchanged during the `initialize` handshake",
+        "A reusable prompt template a user selects from a menu",
+        "A named function the model can invoke to perform an action or computation",
+        "A URI-addressable, read-only piece of context that a host fetches via `resources/read` and injects into the conversation"
+      ],
+      "answer": 3,
+      "explanation": "Resources are the \"data\" primitive — addressable by URI, fetched read-only through `resources/read`, and attached to context by the application/user rather than invoked by the model. Option A describes a Tool and C describes a Prompt; D describes the negotiation mechanism that *advertises* Resources, the classic trap of conflating a primitive with the handshake that announces it."
+    },
+    {
+      "q": "A server exposes a 300 KB binary file as a Resource. The client reads it and gets a `blob`. Approximately how large is that payload on the wire?",
+      "choices": [
+        "~900 KB, base64 triples binary size",
+        "~400 KB, from base64's ~4/3 expansion",
+        "~300 KB, no change",
+        "~150 KB, base64 compresses binary"
+      ],
+      "answer": 1,
+      "explanation": "Base64 encodes every 3 raw bytes as 4 ASCII characters, roughly a 33% size increase, so 300 KB becomes ~400 KB. \"No change\" is the tempting wrong answer — the misconception that MCP's JSON-RPC transport is somehow binary-transparent, when anything not sent as `text` pays the encoding tax."
+    },
+    {
+      "q": "Why can't the model, mid-turn, silently pull in an MCP Resource the way it invokes a Tool?",
+      "choices": [
+        "Resources are always too large for the context window",
+        "Attaching context is an application/user-controlled decision by design, not a model-initiated action",
+        "The protocol has no `resources/read` method",
+        "Resources require a database connection Tools don't"
+      ],
+      "answer": 1,
+      "explanation": "MCP's control model deliberately separates *who decides*: Tools are model-controlled, Resources are application-controlled, Prompts are user-controlled — a split that keeps context injection auditable. Treating Resources as \"Tools without an invocation step\" is the core misconception the other options gesture at."
+    },
+    {
+      "q": "You're designing an MCP server for a CI system. Which is the better fit for a Resource rather than a Tool?",
+      "choices": [
+        "\"Re-run the failing job\" — an action with a side effect",
+        "\"Cancel a running deployment\"",
+        "\"The last 200 lines of job #4521's log\" — read-only data referenced by ID",
+        "\"Search all logs for a regex the model decides on the fly\""
+      ],
+      "answer": 2,
+      "explanation": "A log tail addressable by job ID is exactly the static, URI-referenceable data Resources model well — expose it as `logs://{job_id}/tail` and let the host attach it. The other three involve the model deciding, at reasoning time, what action or dynamic query to run — that's Tool territory."
+    },
+    {
+      "q": "A server holds one 2 GB log file behind a single Resource URI. Which statement about handling it is correct?",
+      "choices": [
+        "`resources/list`'s cursor-based pagination automatically chunks it for you",
+        "MCP has no built-in chunking for a single resource's content — the server must enforce size limits or paginate at the application layer itself",
+        "The `listChanged` capability splits large resources on updates",
+        "`resources/read` always streams content lazily, so size is never a concern"
+      ],
+      "answer": 1,
+      "explanation": "List-level pagination (`cursor`) paginates *how many resources are listed*, not the *content of one large resource* — reading it still returns the whole blob/text in one response unless the server designs its own chunking (e.g. separate URIs per range). Conflating list pagination with content pagination is the wrong answer most candidates reach for."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "How would you decide whether a piece of server functionality should be modeled as an MCP Resource or a Tool?",
+      "a": "Ask *who decides when this enters the conversation*. If it's static, read-only data referenced by identity (a file, row, log, schema) that a human or orchestrator chooses to attach, make it a **Resource** — cheap, cacheable, auditable. If the model must decide dynamically, mid-turn, whether to invoke it and with what parameters, make it a **Tool**. Also check for side effects: nothing behind a Resource read should mutate state — if \"reading\" increments a counter or triggers a job, it belongs behind a Tool instead."
+    },
+    {
+      "q": "Your MCP server exposes hundreds of resources (e.g. every file in a large repo). What production concerns come up, and how do you address them?",
+      "a": "Use `resources/templates/list` (e.g. `file:///{path}`) instead of enumerating every file so the set stays derivable rather than a giant literal list; paginate the listing call itself with `cursor`. Validate URIs server-side to block path traversal (`../../etc/passwd`), since the read handler runs with server privileges, and enforce access control per URI rather than trusting the client's requested path. Avoid returning oversized single resources unchunked — cap size or split logically. Once the set is large, prefer `listChanged` notifications over clients polling `resources/list` on a timer."
+    },
+    {
+      "q": "Explain the `subscribe` and `listChanged` resource-capability flags and the production tradeoff between them.",
+      "a": "Both are declared under the `resources` capability at `initialize`. `subscribe: true` lets a client call `resources/subscribe` on a specific URI and get pushed `notifications/resources/updated` when that resource's *content* changes — good for a small number of \"hot\" resources a UI keeps open (a live log tail). `listChanged: true` lets the server push `notifications/resources/list_changed` when the *set* of available resources changes, not any one resource's content. Tradeoff: subscriptions cost per-connection state and fan-out proportional to subscriber count, so they're worth it for a few actively-watched resources, not \"subscribe to everything\" — at scale, coarser polling or re-reading on demand after a `list_changed` push is cheaper and simpler."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "building-an-mcp-server",
+    "lifecycle-and-capability-negotiation"
+  ],
+  "followUps": [
+    "building-an-mcp-server"
+  ],
+  "metadata": {
+    "inputHash": "40b38524c79b5cd0",
+    "model": "sonnet",
+    "generatedAt": "2026-07-06T06:51:37Z"
+  }
+}

@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: histogram
+fam: hard
+label: 'Mono-Stack: Rectangles'
+order: 37
+trigger: largest rectangle under bars or in a matrix
+insight: monotonic stack; popping a bar fixes it as the rectangle's height and the gap gives its width
+probs:
+- {n: Count Submatrices With All Ones, slug: count-submatrices-with-all-ones, d: M}
+- {n: Largest Rectangle in Histogram, slug: largest-rectangle-in-histogram, d: H}
+- {n: Maximal Rectangle, slug: maximal-rectangle, d: H}

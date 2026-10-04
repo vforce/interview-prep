@@ -1,0 +1,97 @@
+{
+  "id": "k-means-clustering",
+  "title": "K-Means Clustering",
+  "definition": "K-Means clustering is an unsupervised algorithm that partitions n data points into k clusters by iteratively assigning each point to its nearest centroid and recomputing each centroid as the mean of its assigned points, until convergence.",
+  "summary": "K-Means minimizes inertia (within-cluster sum of squared distances) via Lloyd's algorithm: assign, update, repeat. It requires k to be fixed in advance, converges only to a local optimum depending on initialization, and assumes clusters are roughly convex, similarly sized, and similarly dense in Euclidean space. In production it's valued for speed and simplicity — O(n·k·d) per iteration, with a mini-batch variant for scale — but it is sensitive to feature scale, outliers, and seed choice.",
+  "objectives": [
+    "Explain the Lloyd's algorithm loop (assign, update, repeat) and the inertia objective it minimizes.",
+    "Trace a small worked example by hand, including a distance/inertia calculation.",
+    "Choose k defensibly using the elbow method and silhouette score.",
+    "Identify K-Means' failure modes: bad initialization, non-convex/unequal-density clusters, outlier sensitivity, unscaled features.",
+    "Justify k-means++ initialization and multiple restarts as the production-standard fix for local optima."
+  ],
+  "lesson": "K-Means is Lloyd's algorithm: pick k, initialize k centroids, then alternate until centroids stop moving (or a max-iteration cap): **(1) assign** each point to its nearest centroid by Euclidean distance, **(2) update** each centroid to the mean of the points assigned to it. Each step never increases inertia — the sum of squared distances from points to their assigned centroid — so the algorithm is guaranteed to converge. It is **not** guaranteed to reach the global optimum; it only finds a local one. That's the key gotcha: a bad initial placement can permanently strand centroids in the wrong configuration, because a point only ever moves to a *nearer existing* centroid — never to an unoccupied region.\n\nConcrete failure: 1-D points `{1, 2, 3, 10, 11, 12}`, k=2. If random init happens to place both centroids at 2 and 3, assignment splits `{1,2,3}` between them and `{10,11,12}` is never reached — updating can't fix this, since no point in the second group is ever nearer to either centroid than points already assigned. **k-means++** fixes this at seed time: pick the first centroid uniformly at random, then pick each subsequent one from the remaining points with probability proportional to squared distance from the nearest already-chosen centroid — far-away points get sampled preferentially, so seeds spread across the real clusters. This is scikit-learn's default `init`; production code still typically layers on multiple restarts (`n_init`) as cheap insurance against an unlucky seed, keeping whichever run has the lowest inertia.\n\nBecause assignment is purely distance-based, feature scaling (which you already know) isn't optional preprocessing here — it's a precondition. A feature ranging over [0, 200000] will dominate the Euclidean distance next to one ranging over [0, 1], so K-Means effectively clusters on the large-magnitude feature alone. Standardize before fitting, always.\n\nChoosing k is a separate decision from fitting: the **elbow method** plots inertia vs. k and looks for the bend (subjective); the **silhouette score** gives one number per k (cohesion vs. separation, range -1 to 1, higher better) that's directly comparable and easier to defend.",
+  "examples": "**1. Fitting with production-sane defaults:**\n```python\nfrom sklearn.preprocessing import StandardScaler\nfrom sklearn.cluster import KMeans\n\nX_scaled = StandardScaler().fit_transform(X)  # required — K-Means has no internal normalization\n\nkm = KMeans(\n    n_clusters=4,\n    init=\"k-means++\",   # spreads seeds apart, avoids the bad-local-optimum trap\n    n_init=10,           # multiple seeded restarts; keep the lowest-inertia run\n    random_state=42,     # reproducible for tests / prod rollout\n)\nlabels = km.fit_predict(X_scaled)\nprint(km.inertia_)       # sum of squared distances to assigned centroid\n```\n\n**2. Choosing k with silhouette score:**\n```python\nfrom sklearn.metrics import silhouette_score\n\nbest_k, best_score = None, -1\nfor k in range(2, 9):\n    labels = KMeans(n_clusters=k, n_init=10, random_state=42).fit_predict(X_scaled)\n    score = silhouette_score(X_scaled, labels)\n    if score > best_score:\n        best_k, best_score = k, score\nprint(best_k, best_score)\n```\nA silhouette near 0 signals overlapping clusters; negative values suggest many points are likely mis-assigned — a sign the data may not be K-Means-shaped (non-convex or uneven density), worth checking against DBSCAN or a GMM.",
+  "tradeoffs": "Use K-Means when clusters are roughly convex and similar in size/density, k is known or cheaply searchable, and you need speed at scale — it's O(n·k·d) per iteration and has `MiniBatchKMeans` for streaming/huge datasets, and a trained model is just k centroid vectors, trivial to serialize and use for fast inference. Avoid it for non-convex shapes (rings, moons), clusters of very different density or size, or heavy outliers (means are outlier-sensitive; consider K-Medoids). Prefer DBSCAN/HDBSCAN when you don't want to fix k or assume sphericity, and GMM when you need soft/probabilistic assignment or elliptical clusters. Also only meaningful in a Euclidean-distance space — high-cardinality categorical features need K-Modes/K-Prototypes or an embedding step first.",
+  "diagnosticQuiz": [
+    {
+      "q": "What objective does Lloyd's algorithm (standard K-Means) minimize?",
+      "choices": [
+        "The maximum distance between any two clusters' centroids",
+        "The sum of squared distances between all pairs of points in a cluster",
+        "The within-cluster sum of squared distances to each cluster's centroid (inertia)",
+        "The number of points misassigned relative to ground-truth labels"
+      ],
+      "answer": 2,
+      "explanation": "K-Means' objective is inertia — the sum, over all points, of squared Euclidean distance to their assigned centroid — and each assign/update iteration never increases it. Option A describes a pairwise-distance criterion (closer to hierarchical linkage), and option C confuses K-Means with a supervised accuracy metric — there are no ground-truth labels to compare against in this unsupervised setting."
+    },
+    {
+      "q": "Centroids sit at μ1 = (0, 0) and μ2 = (4, 0). During assignment, point x = (1, 1) is processed. Which centroid does it join, and what squared distance does it contribute to inertia?",
+      "choices": [
+        "μ1, contributing 10",
+        "μ1, contributing 2",
+        "μ2, contributing 10",
+        "μ2, contributing 2"
+      ],
+      "answer": 1,
+      "explanation": "Squared distance to μ1 is (1-0)² + (1-0)² = 2; to μ2 it's (1-4)² + (1-0)² = 9 + 1 = 10. Assignment picks the nearer centroid, so x joins μ1 and contributes 2 to inertia. The tempting wrong answers swap which centroid is nearer, or use raw (non-squared) distance intuition (≈1.41 vs ≈3.16), forgetting inertia is defined on *squared* distances."
+    },
+    {
+      "q": "You run K-Means with k=2 on 1-D data {1, 2, 3, 10, 11, 12}, and random initialization happens to place both centroids at 2 and 3. What's the most likely outcome?",
+      "choices": [
+        "It errors out, since centroids can't start inside the same natural cluster",
+        "It always converges to {1,2,3} and {10,11,12}, since Lloyd's algorithm guarantees the global optimum",
+        "It automatically re-initializes centroids mid-run until the correct split is found",
+        "It can get stuck splitting {1,2,3} between the two centroids while {10,11,12} is never reached, since points only ever move to a nearer *existing* centroid"
+      ],
+      "answer": 3,
+      "explanation": "Convergence is guaranteed (inertia is monotonically non-increasing and bounded below), but convergence to the *global* optimum is not — a point in {10,11,12} is never nearer to centroid 2 or 3 than points already there, so the update step can't pull a centroid across the gap. This is exactly the failure mode k-means++ is designed to prevent. Option A is the core misconception: guaranteed convergence gets conflated with guaranteed optimality."
+    },
+    {
+      "q": "Your data likely contains clusters of very different density and non-convex shape (e.g., one tight blob and one sparse, elongated arc). What's the best modeling choice?",
+      "choices": [
+        "K-Means with a higher k, using several small centroids to approximate the arc",
+        "K-Means with k-means++ initialization, which correctly handles arbitrary cluster shapes",
+        "A density-based method such as DBSCAN, which makes no convexity/sphericity assumption",
+        "Mini-batch K-Means, since the underlying issue is dataset size, not cluster shape"
+      ],
+      "answer": 2,
+      "explanation": "K-Means assignment always produces convex Voronoi regions around centroids, regardless of initialization scheme — it structurally cannot represent non-convex or uneven-density clusters. DBSCAN groups points by local density instead and makes no shape assumption. Option B is the common misconception (k-means++ fixes *initialization*, not the algorithm's convexity assumption); option A only approximates the arc with many small convex pieces rather than modeling it correctly."
+    },
+    {
+      "q": "An engineer fits K-Means directly on raw features including `annual_income` (range ~20,000–200,000) and `engagement_rate` (range 0–1), without scaling. What's the most likely consequence?",
+      "choices": [
+        "No consequence — K-Means normalizes distances internally before assignment",
+        "`engagement_rate` will dominate, since K-Means always weights low-variance features more heavily",
+        "The model will fail to converge",
+        "Clusters will essentially reflect `annual_income` alone, since it dominates the Euclidean distance"
+      ],
+      "answer": 3,
+      "explanation": "K-Means has no internal normalization; Euclidean distance is computed directly on raw values, so the feature with the far larger numeric range dominates squared distance and effectively drives the clustering alone, silently making `engagement_rate` irrelevant. Convergence is unaffected by scale (rules out C), and K-Means has no mechanism favoring low-variance features (D is backwards — large range/variance dominates, not small)."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Walk me through what happens on each iteration of K-Means, and explain why it's guaranteed to converge but not to the global optimum.",
+      "a": "Each iteration has two steps: **assign** every point to its nearest centroid by Euclidean distance, then **update** each centroid to the mean of its newly assigned points. Both steps can only decrease or hold constant inertia (sum of squared distances to assigned centroids), so the objective is monotonically non-increasing and bounded below by zero — guaranteeing convergence in finitely many iterations. It's not guaranteed to reach the *global* optimum because the algorithm is greedy and initialization-dependent: a poor starting placement can lock into a local minimum (e.g., two centroids splitting one true cluster while two true clusters share one), and no later iteration can escape it, since points only ever move to a nearer *existing* centroid, never into an unoccupied region. In production this is mitigated with k-means++ initialization plus multiple restarts (`n_init`), keeping the lowest-inertia run."
+    },
+    {
+      "q": "A stakeholder says their K-Means customer segments look meaningless — one segment has 90% of users and the rest are tiny slivers. What do you check first, and what would you change?",
+      "a": "First, feature scaling — an unscaled high-magnitude feature (e.g., raw revenue next to a 0–1 engagement rate) dominates Euclidean distance and effectively clusters on that one feature, producing one dominant blob. Second, the shape/density assumption: K-Means assumes roughly convex, similarly sized, similarly dense clusters, so if the real segments are unequal in size or non-convex, K-Means will misrepresent them even after scaling. My fix path: standardize all features, refit with k-means++ and multiple restarts, re-select k via silhouette score, and if imbalance persists, treat it as a signal the true structure isn't K-Means-shaped and try GMM (soft, elliptical clusters) or DBSCAN (density-based, no sphericity assumption)."
+    },
+    {
+      "q": "When would you choose K-Means over DBSCAN or a Gaussian Mixture Model in a production system, and what's the main operational advantage?",
+      "a": "When clusters are expected to be roughly convex and similar in size/density, k is known or cheaply searchable, and — the production-critical factor — you need speed and scale: K-Means is O(n·k·d) per iteration with a mini-batch variant (`MiniBatchKMeans`) for streaming or very large data, while DBSCAN's neighborhood queries degrade in high dimensions and GMM's EM iterations with full covariance estimation cost more per step. The operational win is also simplicity: a trained K-Means model is just k centroid vectors — trivial to serialize, version, and use for fast nearest-centroid inference at request time — versus DBSCAN, which has no natural `predict` for new points, and GMM, which requires storing and scoring against full covariance matrices."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "feature-scaling"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "32b644e2ce38dec0",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T10:36:34Z"
+  }
+}

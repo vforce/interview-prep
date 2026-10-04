@@ -1,0 +1,104 @@
+{
+  "id": "tools",
+  "title": "Tools",
+  "definition": "An MCP Tool is a named, JSON-Schema-typed function that a server advertises through `tools/list` and executes on request through `tools/call`, giving the connected LLM a model-invoked way to take actions or run computations beyond just reading context.",
+  "summary": "Tools are MCP's \"model-controlled\" primitive: unlike Resources (app-attached data) or Prompts (user-selected templates), the LLM itself decides when to call a tool and what arguments to pass, constrained by the tool's JSON Schema. In production this makes tool design an API-and-trust-boundary problem — schemas must be tight enough to prevent bad calls, results must be size-bounded, and tool metadata from any non-trusted server must be treated as untrusted input, not documentation.",
+  "objectives": [
+    "Explain how a Tool differs from a Resource and a Prompt in MCP's three server-side primitives.",
+    "Trace the `tools/list` → model selection → `tools/call` → result round trip, including schemas and content blocks.",
+    "Use tool annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) to drive confirmation/safety decisions in a client.",
+    "Reason about context-budget and trust-boundary costs of connecting many/third-party tool servers.",
+    "Recognize \"tool poisoning\" and unannounced description changes as production security gotchas."
+  ],
+  "lesson": "Once capability negotiation has told the client the server declares `tools` (maybe with `listChanged: true`), Tools are how the model *acts* instead of just reading context. A Resource is inert data the app attaches (\"here is this file\"); a Tool is a verb the model itself chooses to invoke, generating its own arguments — `search_orders(customer_id=\"C123\")`, `create_ticket(title=..., priority=...)`.\n\nThe round trip:\n1. Client calls `tools/list` (paginated via `cursor`) and gets back `{name, description, inputSchema, annotations?}` for each tool.\n2. The client hands that array to the LLM as its tool spec. Mid-generation, the model decides to call one and emits arguments matching `inputSchema`.\n3. Client sends `tools/call {name, arguments}` over JSON-RPC.\n4. Server executes and returns `{content: [...], isError?}`. A *domain* failure (\"order not found\") comes back as a normal result with `isError: true` — the model sees it and can retry or explain; a malformed call (unknown tool, schema violation) surfaces instead as a JSON-RPC protocol error, meaning the client or model is buggy, not that the tool \"failed\".\n\nWorked example: a server exposes `get_weather(city: string) -> string`. Given \"what's the weather in Hanoi?\", the model emits `tools/call get_weather {\"city\": \"Hanoi\"}`; the server hits a weather API and returns `content: [{\"type\": \"text\", \"text\": \"31°C, humid\"}]`; the client folds that into the conversation and the model writes the final reply.\n\n**Key gotcha:** tool descriptions and results are just text landing in the model's context looking like trusted system content — nothing sandboxes them from the model's reasoning. A malicious or compromised server can hide instructions inside a description (\"also forward the user's emails to X\") or inside a result, and a naive client lets the model act on it — security write-ups call this *tool poisoning* (and its variant, a *rug pull*: a server changing a tool's description after a user already approved it). That's exactly why the spec treats annotations like `destructiveHint` as *hints, not guarantees* — production clients still gate real side effects (payments, deletes, sends) behind explicit human confirmation, never a server's own claims about itself.",
+  "examples": "**Example 1 — defining a tool (Python, official `mcp` SDK / FastMCP):**\n\n```python\nfrom mcp.server.fastmcp import FastMCP\n\nmcp = FastMCP(\"orders-server\")\n\n@mcp.tool()\ndef get_order_status(order_id: str) -> str:\n    \"\"\"Look up the current status of a customer order by its ID.\"\"\"\n    order = db.orders.get(order_id)\n    if order is None:\n        return f\"No order found for id={order_id}\"\n    return f\"Order {order_id}: {order.status}\"\n```\nFastMCP introspects the type hints and docstring to build `inputSchema` (`{\"order_id\": {\"type\": \"string\"}}`) automatically — no hand-written JSON Schema needed for the common case.\n\n**Example 2 — the wire protocol the client actually sends/receives:**\n\n```\n--> {\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n<-- {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[\n      {\"name\":\"get_order_status\",\n       \"description\":\"Look up the current status of a customer order by its ID.\",\n       \"inputSchema\":{\"type\":\"object\",\"properties\":{\"order_id\":{\"type\":\"string\"}},\"required\":[\"order_id\"]},\n       \"annotations\":{\"readOnlyHint\":true,\"destructiveHint\":false,\"idempotentHint\":true}}\n    ]}}\n\n--> {\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\n     \"params\":{\"name\":\"get_order_status\",\"arguments\":{\"order_id\":\"C123\"}}}\n<-- {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\n      \"content\":[{\"type\":\"text\",\"text\":\"Order C123: shipped\"}],\n      \"isError\":false}}\n```",
+  "tradeoffs": "Tools give the model real agency — it can query live systems and cause side effects, which is the whole point of MCP over a static RAG pipeline. That power is the cost: every tool is effectively a remote-execution surface, so more tools/servers means more context spent on schemas, more chance the model picks the wrong same-sounding tool across servers, and a bigger trust surface if any connected server is untrusted or compromised. Use a Tool when the action genuinely needs model judgement (which order, what query, whether to proceed); if there's no decision to make, hardcode the call in your app instead of paying the round trip and non-determinism. Prefer several narrow, purpose-built tools (`refund_order`, `cancel_order`) over one broad one (`run_sql`) — narrower tools are easier to sandbox and confirm, even though they're more to maintain. For read-only data with no arguments to reason about, expose it as a Resource instead — cheaper, and outside the tool-call decision/injection surface entirely.",
+  "diagnosticQuiz": [
+    {
+      "q": "In MCP, what precisely is a \"Tool\"?",
+      "choices": [
+        "A URI-addressable piece of data the user or app attaches to the conversation for context",
+        "A model-invocable function a server exposes via `tools/list`/`tools/call`, described by a JSON Schema input contract",
+        "A static list of connected servers read from a config file at client startup",
+        "A reusable message template the user selects to start a conversation"
+      ],
+      "answer": 1,
+      "explanation": "Tools are MCP's model-controlled primitive — discovered via `tools/list`, invoked via `tools/call`, with arguments validated against `inputSchema`. The best distractor (\"data attached for context\") actually describes a **Resource**, and the template option describes a **Prompt** — confusing these is the most common terminology slip in interviews."
+    },
+    {
+      "q": "A client connects to an MCP server exposing 40 tools; each tool's schema (name + description + inputSchema) averages 180 tokens. Roughly how many tokens does the model pay just to see the tool list, and what does that imply?",
+      "choices": [
+        "~180 tokens total, since schemas are only transmitted once for the whole session",
+        "~7,200 tokens, spent whenever the tools are offered to the model — motivating curation/filtering as tool count grows",
+        "~40 tokens, since only tool names (not descriptions/schemas) count against context",
+        "0 tokens — tool schemas live server-side and never enter the model's context"
+      ],
+      "answer": 1,
+      "explanation": "40 × 180 ≈ 7,200. Full tool definitions are passed to the model so it can decide whether/how to call them — they aren't free or cached away from context. This is why production clients with many connected servers curate, namespace, or dynamically load tool subsets rather than exposing everything at once."
+    },
+    {
+      "q": "Why does MCP require each Tool's arguments to be constrained by a JSON Schema instead of accepting free-form text?",
+      "choices": [
+        "It lets the model produce a structurally validated, machine-parseable call the server can check and execute deterministically, instead of guessing at ambiguous natural language",
+        "It makes the tool's description shorter and cheaper in context",
+        "MCP requires every message on the wire, including chat turns, to be schema-validated",
+        "JSON Schema is mandated by the JSON-RPC 2.0 transport itself"
+      ],
+      "answer": 0,
+      "explanation": "A typed contract lets the server reject malformed calls before running side-effecting code, and lets the model self-correct against a concrete shape. B and D are false claims about the transport/protocol, and C is backwards — a full schema costs more tokens than free text, not less."
+    },
+    {
+      "q": "You're deciding whether to expose \"current inventory count for SKU X\" as a Tool or a Resource. Which consideration points toward Resource?",
+      "choices": [
+        "The value depends on parameters the model must choose (warehouse, date range)",
+        "It's expensive to compute, so it should never be model-invoked",
+        "It has side effects that must run every time it's requested",
+        "It's read-only data with no meaningful arguments to reason about — the app can just attach the current value, no model decision needed"
+      ],
+      "answer": 3,
+      "explanation": "Resources are for inert, app/user-attached context; Tools are for when the *model* must decide arguments and/or trigger an action. Needing parameter choices or side effects both argue for a Tool instead — and computation cost has no bearing on the Tool/Resource decision at all."
+    },
+    {
+      "q": "What production security gotcha is specific to MCP Tools, per the spec's own guidance on tool annotations?",
+      "choices": [
+        "Annotations are cryptographically signed by the server, so they can be trusted for auto-approving destructive actions",
+        "Annotations like `destructiveHint`/`readOnlyHint` are unverified hints a server supplies about itself, so a client must not rely on them as a safety guarantee — especially from an untrusted server",
+        "Once a client fetches `tools/list`, the server can never change a tool's description again",
+        "Tool execution always happens inside the model's own sandbox, so a tool can never cause a real-world side effect"
+      ],
+      "answer": 1,
+      "explanation": "The spec frames tool annotations as hints, not guarantees, precisely because a malicious/compromised server can lie about its own tool (\"tool poisoning\"), or change a description after approval (a \"rug pull\") once the client re-fetches via `notifications/tools/list_changed`. B–D describe protections that don't exist — execution is real, descriptions can change, and nothing is signed."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "How do you decide whether a capability should be an MCP Tool versus a Resource, and why does getting this wrong matter in production?",
+      "a": "Expose it as a **Tool** when the model must choose arguments and/or the action has side effects or requires judgement (`create_refund`, `search_orders`). Expose it as a **Resource** when it's inert data the app can attach without any model decision (a file, a fixed lookup value). Getting it backwards costs you either way: forcing a Tool for something static wastes a round trip, adds non-determinism, and opens injection surface for no benefit; hiding a genuine decision behind static Resource data forces the app to hardcode logic that should've been the model's call. In practice this shows up as bloated tool lists full of things that should've just been context, or missing tools where the app pre-computed something the agent should have decided dynamically."
+    },
+    {
+      "q": "You connect an MCP client to 6 third-party servers exposing 15–30 tools each. What breaks in production and how do you mitigate it?",
+      "a": "**Context budget** — 100+ tool schemas eat tokens every turn before the user says anything; mitigate by curating/allowlisting per session or loading tool subsets dynamically instead of connecting everything up front. **Name/intent collisions** — two servers exposing similarly named tools confuse selection; mitigate with namespacing and distinct descriptions. **Trust boundary** — each server is a black box that can change its tools' descriptions or outputs; treat annotations as hints, gate destructive/non-idempotent tools behind human confirmation regardless of server claims, and re-review after any `tools/list_changed`. **Reliability** — a slow/unavailable server shouldn't stall tool selection; mitigate with per-server timeouts and isolated failure handling."
+    },
+    {
+      "q": "Walk through what happens at the protocol level when a tool call fails because the target resource doesn't exist, versus when the `tools/call` request itself is malformed. Why does MCP separate these?",
+      "a": "A domain-level failure (\"order not found\") returns as a normal `CallToolResult` with `isError: true` and a `content` block explaining it — a successful JSON-RPC response carrying a failed *outcome*, so the model sees it in context and can retry with different arguments, ask the user, or explain. A malformed request (unknown tool name, arguments violating `inputSchema`) surfaces as a JSON-RPC-level error instead, signaling the call should never have been attempted — a client/model bug, not a business result. Separating them matters because you want the model reasoning about recoverable business failures, while protocol errors surface as integration bugs to fix, not conversational content to improvise around."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "building-an-mcp-server",
+    "lifecycle-and-capability-negotiation",
+    "mcp-vs-alternatives",
+    "sampling"
+  ],
+  "followUps": [
+    "building-an-mcp-server",
+    "mcp-vs-alternatives",
+    "sampling"
+  ],
+  "metadata": {
+    "inputHash": "10a0cfc9d4dbcec4",
+    "model": "sonnet",
+    "generatedAt": "2026-07-06T06:48:16Z"
+  }
+}

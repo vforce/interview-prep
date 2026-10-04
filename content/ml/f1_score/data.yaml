@@ -1,0 +1,24 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: f1_score
+type: kata
+area: Classification Metrics
+order: 33
+title: F1 score (pure Python)
+prompt: Implement the F1 score for binary 0/1 labels. Return 0.0 when precision + recall is 0.
+sig: 'def f1_score(y_true, y_pred):'
+stub: "def f1_score(y_true, y_pred):\n    \n    return f1\n"
+reference: |-
+  def f1_score(y_true, y_pred):
+      tp = sum(t == 1 and p == 1 for t, p in zip(y_true, y_pred))
+      fp = sum(t == 0 and p == 1 for t, p in zip(y_true, y_pred))
+      fn = sum(t == 1 and p == 0 for t, p in zip(y_true, y_pred))
+      p = tp / (tp + fp) if (tp + fp) else 0.0
+      r = tp / (tp + fn) if (tp + fn) else 0.0
+      return 2 * p * r / (p + r) if (p + r) else 0.0
+test: |
+  def _c(a, b): return abs(a - b) < 1e-6
+  assert _c(f1_score([1,0,1,0,1], [1,1,1,0,0]), 2/3), f1_score([1,0,1,0,1], [1,1,1,0,0])
+  assert _c(f1_score([1,1], [1,1]), 1.0), "perfect"
+  assert _c(f1_score([0,1], [1,0]), 0.0), "p=r=0 -> 0"
+  print("PASS - 3 cases")

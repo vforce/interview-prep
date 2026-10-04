@@ -1,0 +1,31 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: np_zscore
+type: kata
+area: NumPy
+order: 40
+title: Z-score standardize (NumPy)
+prompt: Given a 2-D NumPy array, standardize each COLUMN to mean 0 and standard deviation 1 (z-score). Return a new array of the same shape. Vectorized — no Python loops.
+sig: 'def zscore(x):'
+stub: "import numpy as np\n\ndef zscore(x):\n    \n    return z\n"
+reference: |
+  import numpy as np
+
+  def zscore(x):                  # x is (n, d): n rows, d columns
+      # THE axis rule, and the one everyone forgets: axis=k is the axis you COLLAPSE.
+      # It's the axis that DISAPPEARS from the result. axis=0 walks down the rows and
+      # leaves one number per column; axis=1 would walk across and leave one per row.
+      mu = x.mean(axis=0)        # (n, d) -> (d,)   one mean per column
+      sd = x.std(axis=0)         # (n, d) -> (d,)   population std (ddof=0; pandas defaults to 1!)
+      # Broadcasting: numpy right-aligns the shapes and stretches any length-1 / missing axis.
+      #   (n, d) - (d,)  ->  the (d,) is reused for all n rows  ->  (n, d)
+      return (x - mu) / sd       # (n, d)
+test: |
+  import numpy as np
+  x = np.array([[1.0, 10.0], [2.0, 20.0], [3.0, 30.0]])
+  z = zscore(x)
+  assert z.shape == x.shape, z.shape
+  assert np.allclose(z.mean(axis=0), 0, atol=1e-9), z.mean(axis=0)
+  assert np.allclose(z.std(axis=0), 1, atol=1e-9), z.std(axis=0)
+  assert np.allclose(z[:, 0], z[:, 1]), z   # col 1 is a linear scale of col 0 -> same z
+  print("PASS - 3 checks")

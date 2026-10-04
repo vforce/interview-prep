@@ -1,0 +1,100 @@
+{
+  "id": "multi-head-attention",
+  "title": "Multi-Head Attention",
+  "definition": "Multi-head attention runs several scaled dot-product attention operations in parallel, each on a different learned linear projection (\"head\") of Q/K/V into a lower-dimensional subspace, then concatenates the per-head outputs and applies one final linear projection to mix them back into the model dimension.",
+  "summary": "Instead of one attention distribution over the full `d_model`-dimensional space, MHA splits Q/K/V into `h` independent subspaces of size `d_k = d_model/h`, lets each head learn its own notion of \"what's relevant,\" and recombines the results. It's the core operator inside every Transformer block — self-attention *is* multi-head attention in practice; nobody ships single-head. The interesting production fact: it costs almost the same as single-head attention in FLOPs and params, but its KV-cache footprint at serving time is exactly what motivates MQA/GQA.",
+  "objectives": [
+    "Explain why splitting into `h` subspaces beats one large attention op, without adding real FLOPs",
+    "Derive per-head shapes and show the FLOP/param count is invariant to `h` for fixed `d_model`",
+    "Implement scaled dot-product attention and the multi-head wrapper, including the reshape/transpose step",
+    "Connect head count to the KV-cache cost that drives GQA/MQA decisions in production serving",
+    "Spot the classic reshape/transpose bug that silently corrupts attention without crashing"
+  ],
+  "lesson": "Single-head self-attention forces one softmax, over one similarity function, to capture everything a token might need — adjacent-word position, subject-verb agreement, long-range coreference, etc. Multi-head attention factors `d_model` into `h` smaller subspaces so the model learns `h` different relevance functions at once, then lets a final linear layer (`W_O`) recombine whatever each head found. Nothing forces heads to specialize, but redundant heads waste capacity, so gradient descent tends to spread them out.\n\nMechanically: project `X` (shape `T x d_model`) to `Q, K, V` via `W_Q, W_K, W_V` (each `d_model x d_model`). Reshape the last dim into `(h, d_k)` with `d_k = d_model/h`, transpose so heads become a batch dimension, run `softmax(QKᵀ/√d_k)V` independently per head, then transpose back, concatenate, and apply `W_O`.\n\nThe fact that surprises people: this is *not* h times more expensive than single-head attention at the same `d_model`. `W_Q/W_K/W_V/W_O` are each `d_model x d_model` regardless of `h` — splitting into heads doesn't add parameters. The score computation `QKᵀ` costs `h × (T² × d_k) = T² × d_model` in total, exactly the same as one head with `d_k = d_model`. Multi-head attention buys representational diversity for free in compute terms; it isn't a \"spend more, get more\" knob.\n\nThe key gotcha is the reshape/transpose order. You must go `(T, d_model) → view(T, h, d_k) → transpose to (h, T, d_k)` before the batched matmul. Get the transpose wrong — or use a raw `.reshape()` that reinterprets memory instead of permuting axes — and PyTorch won't error: shapes still line up, the model still trains and loss still drops, but each \"head\" is now a scrambled mix of positions or of other heads' features. This shows up as attention maps that look like noise on inspection, not as a crash. Always split with `view` then `transpose`/`permute`, never a bare `reshape` across those axes.\n\nOne more production-relevant point: the KV cache stored per token at inference is `2 × d_model` values per layer (K and V, concatenated across all heads) — independent of `h`. That invariance is exactly why *changing head count alone doesn't shrink serving cost*; only reducing the number of distinct K/V projections (MQA/GQA) does.",
+  "examples": "**1. Minimal from-scratch implementation** (the reshape pattern is the part worth memorizing):\n\n```python\nimport torch, torch.nn as nn, torch.nn.functional as F\n\nclass MultiHeadAttention(nn.Module):\n    def __init__(self, d_model, n_heads):\n        super().__init__()\n        assert d_model % n_heads == 0\n        self.h, self.d_k = n_heads, d_model // n_heads\n        self.qkv = nn.Linear(d_model, 3 * d_model)\n        self.out = nn.Linear(d_model, d_model)\n\n    def forward(self, x, mask=None):\n        B, T, D = x.shape\n        q, k, v = self.qkv(x).chunk(3, dim=-1)            # each (B, T, D)\n\n        split = lambda t: t.view(B, T, self.h, self.d_k).transpose(1, 2)\n        q, k, v = split(q), split(k), split(v)            # each (B, h, T, d_k)\n\n        scores = q @ k.transpose(-2, -1) / self.d_k ** 0.5  # (B, h, T, T)\n        if mask is not None:\n            scores = scores.masked_fill(mask == 0, float('-inf'))\n        attn = F.softmax(scores, dim=-1)\n        out = attn @ v                                      # (B, h, T, d_k)\n\n        out = out.transpose(1, 2).contiguous().view(B, T, D)  # merge heads\n        return self.out(out)\n```\n\n**2. Shapes and cost, worked numerically** (base Transformer config: `d_model=512, h=8, d_k=64, T=1024`):\n\n```\nparams (Q,K,V,O):  4 * 512 * 512             ≈ 1.05M   (independent of h)\nscore FLOPs:        8 heads * (1024*1024*64)  ≈ 537M\n                    == 1 head * (1024*1024*512) ≈ 537M   (identical either way)\n\nKV cache / token / layer (fp16): 2 * 512 * 2 bytes = 2 KB   (also independent of h)\n  -> at, say, 32 layers: 64 KB / token total  (layer count here is illustrative)\n```",
+  "tradeoffs": "Plain MHA is the default for training and for serving where memory bandwidth isn't the bottleneck. The head count `h` is a real hyperparameter: too many heads makes `d_k` tiny (e.g. `d_k=8`) and starves each head of representational room; too few loses the diversity benefit — in practice `d_k` in the 64–128 range has held up well across model scales. In production serving, standard MHA's real cost is the KV cache: every head keeps its own K/V, and that cache — not the QKᵀ FLOPs — is what limits batch size and context length under a fixed memory/bandwidth budget. That's the specific problem Multi-Query Attention (one shared K/V for all heads) and Grouped-Query Attention (K/V shared within groups of heads) exist to solve, at a small quality cost. Reach for plain MHA when training from scratch or serving short context at low concurrency; reach for GQA (the now-standard middle ground) when you're memory-bandwidth-bound at inference.",
+  "diagnosticQuiz": [
+    {
+      "q": "What does multi-head attention do differently from single-head self-attention?",
+      "choices": [
+        "It replaces the softmax with several softmaxes computed over the full d_model dimension",
+        "It runs the identical attention computation several times and averages the outputs",
+        "It projects Q/K/V into several smaller subspaces, attends independently in each, then concatenates and projects the results",
+        "It lets the model process longer sequences than single-head attention can"
+      ],
+      "answer": 2,
+      "explanation": "MHA splits `d_model` into `h` subspaces of size `d_k`, each with its own learned `W_Q/W_K/W_V`, so each head can learn a different relevance function; concatenation plus `W_O` recombines them. The best distractor — \"runs the identical computation and averages\" — is the common misconception that heads are an ensemble of copies; they aren't, each head has distinct parameters operating on a distinct projected subspace, not a repeated computation."
+    },
+    {
+      "q": "With `d_model=768` and `h=12`, what is `d_k`, and what shape is the per-head score matrix `QKᵀ` for a sequence of length `T=128` (batch=1)?",
+      "choices": [
+        "d_k=64; scores shape (128, 128)",
+        "d_k=768; scores shape (128, 128)",
+        "d_k=12; scores shape (128, 128)",
+        "d_k=64; scores shape (768, 768)"
+      ],
+      "answer": 0,
+      "explanation": "`d_k = d_model/h = 768/12 = 64`, and since `Q, K ∈ R^{T x d_k}`, `QKᵀ` is always `T x T` — the score matrix scales with sequence length, not with `d_model` or `d_k`. The best distractor gets `d_k` right but wrongly scales the score matrix by `d_model`, conflating the \"channel\" axis with the \"sequence\" axis."
+    },
+    {
+      "q": "Different heads in a trained model often specialize (e.g., one tracks adjacent positions, another tracks coreference) even though nothing in the architecture assigns them roles. Why does this happen?",
+      "choices": [
+        "The training data is partitioned so each head only sees a different subset of examples",
+        "Each head has its own randomly-initialized projection into a smaller subspace, and since redundant heads waste capacity, optimization pressure spreads heads toward covering different useful signal",
+        "The architecture hard-codes which position or relation each head must attend to",
+        "Each head uses a different similarity function (e.g., dot-product vs. additive attention)"
+      ],
+      "answer": 1,
+      "explanation": "specialization is emergent — different random initializations plus the pressure to make each head useful (since one final projection must combine all of them for one loss) pushes heads apart; it is not an explicit design. The best distractor reflects a real misconception people pick up from papers that name specific heads (e.g., \"induction heads\"): those roles are discovered by interpretability analysis after training, not architected in."
+    },
+    {
+      "q": "You're serving a large model at long context with high concurrency, and profiling shows you're memory-bandwidth-bound on the KV cache. What's the most direct lever?",
+      "choices": [
+        "Increase the number of transformer layers",
+        "Increase the number of attention heads to add more representational diversity",
+        "Increase d_model so each head has more room",
+        "Switch from standard multi-head attention to grouped-query or multi-query attention to shrink the KV cache"
+      ],
+      "answer": 3,
+      "explanation": "GQA/MQA reduce the number of distinct K/V projections stored and read per token, directly targeting a memory-bandwidth bottleneck. The best distractor — adding more heads — is tempting but does nothing under standard MHA: total KV cache per token is `2 × d_model` regardless of `h`, since `h × d_k = d_model` always; only reducing the number of distinct KV projections (not query heads) shrinks the cache."
+    },
+    {
+      "q": "A team's from-scratch MHA implementation trains fine — loss decreases — but inspected attention maps look like noise, and no shape/runtime error ever appeared. What's the most likely cause?",
+      "choices": [
+        "A `.reshape()` (or wrong transpose order) mixed the head and sequence dimensions when splitting into heads, instead of cleanly permuting them",
+        "Softmax was applied along the wrong axis, which would have raised a shape mismatch",
+        "The learning rate was set too high",
+        "They forgot to apply the causal mask"
+      ],
+      "answer": 0,
+      "explanation": "a mis-ordered reshape/transpose silently reinterprets the tensor's memory layout without breaking any shape check — dimensions still line up so nothing crashes, but each \"head\" now mixes data across positions or other heads, producing exactly this pattern of decreasing loss with meaningless attention maps. Option D is the tempting technical-sounding distractor, but a genuine wrong-axis softmax reliably errors or produces obviously-broken output, whereas the reshape bug is the one that hides in plain sight."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Why isn't multi-head attention meaningfully more expensive than single-head attention at the same `d_model`, and where does its real cost show up in production?",
+      "a": "`W_Q/W_K/W_V/W_O` are each `d_model x d_model` no matter how many heads you split into, so parameter count is invariant to `h`. The `QKᵀ` score computation costs `h × (T² × d_k) = T² × d_model` in total — identical to one head with `d_k = d_model`. So MHA is essentially free diversity in training FLOPs. The real production cost is the **KV cache**: at inference you cache K/V per token per layer (`2 × d_model` values, again independent of `h`), and reading that cache every decode step is memory-bandwidth bound — this, not attention FLOPs, is what limits batch size and context length, and it's exactly the problem GQA/MQA were built to solve."
+    },
+    {
+      "q": "How do you pick the number of heads `h` (and thus `d_k`) when tuning a transformer, and what breaks if `d_k` is too small?",
+      "a": "Convention is `d_k = d_v = d_model/h`; empirically `d_k` in roughly the 64–128 range holds up well, from the original Transformer (`d_k=64`) through much larger models. Push `h` up while holding `d_model` fixed and `d_k` shrinks — below some point a head doesn't have enough dimensions to represent a useful similarity/value function, so quality degrades even though nothing crashes. In practice this is tuned empirically alongside `d_model` and depth, not solved in closed form; it's rarely worth a from-scratch search — copy a proven ratio from a model at similar scale."
+    },
+    {
+      "q": "You inherit a standard-MHA model in production and you're KV-cache-bound — it caps max batch size/context well before compute does. Walk through the fix.",
+      "a": "Convert to grouped-query attention: partition the `h` query heads into `g` groups, each sharing one K/V projection, shrinking the KV cache by a factor of `h/g` (LLaMA-2's 34B/70B models, for example, use 8 KV heads under 64 query heads — an 8x reduction). You can train GQA from scratch, or \"uptrain\" an existing MHA checkpoint by mean-pooling each group's K/V projection weights into one and continuing pretraining for a small fraction of the original compute, per the GQA paper. This trades a small quality drop (much smaller than the more aggressive single-KV-head MQA) for a large, direct increase in serviceable batch size/context at the same memory budget."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "mqa-and-gqa",
+    "self-attention"
+  ],
+  "followUps": [
+    "mqa-and-gqa"
+  ],
+  "metadata": {
+    "inputHash": "b002007d4f802ba1",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T13:32:32Z"
+  }
+}

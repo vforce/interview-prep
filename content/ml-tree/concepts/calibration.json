@@ -1,0 +1,97 @@
+{
+  "id": "calibration",
+  "title": "Calibration",
+  "definition": "Calibration is the property that a classifier's predicted probabilities match the true empirical frequency of the outcome — e.g., among all cases predicted at 0.7, roughly 70% are actually positive.",
+  "summary": "Calibration is orthogonal to discrimination: a model can rank examples perfectly (AUC = 1) while its probability *values* are systematically over- or under-confident, which matters whenever a threshold, cost formula, or expected-value calculation consumes the probability itself rather than just its rank. Tree-based models are the classic offender — single trees and bagged forests skew one way, boosted trees and SVMs another — and are typically fixed post-hoc with Platt scaling or isotonic regression fit on held-out data. Diagnose with a reliability diagram and Brier score before trusting any probability-driven decision in production.",
+  "objectives": [
+    "Define calibration and distinguish it from discrimination/ranking ability (AUC)",
+    "Explain why Random Forest, boosted trees, and SVMs tend to be miscalibrated",
+    "Diagnose miscalibration with a reliability diagram and Brier score",
+    "Apply Platt scaling vs. isotonic regression correctly, including the held-out-fold requirement",
+    "Connect calibration to setting a cost-sensitive decision threshold in production"
+  ],
+  "lesson": "Calibration asks a different question than accuracy or AUC: not \"does the model rank positives above negatives?\" but \"when it says 70%, is it right 70% of the time?\" A model can rank perfectly and still be calibration-garbage — squash every true positive to 0.99 and every true negative to 0.01, and AUC is still 1.0, because AUC depends only on relative order, never on the actual probability values.\n\nTrees are the textbook case, for two opposite reasons. A single deep tree's leaf probability is just the class proportion at that leaf — a high-variance estimate that's often exactly 0 or 1 at small, pure leaves (overconfident). Bagging many such trees (Random Forest) averages these noisy leaf estimates together; averaging noisy, roughly-independent estimates reduces variance, and variance reduction pulls extremes toward the mean — so Random Forest probabilities tend to be *underconfident*, compressed toward 0.5 even for examples the ensemble is actually sure about. Gradient boosting optimizes log-loss (a proper scoring rule) directly, so it's often closer to calibrated out of the box — but that's a tendency, not a guarantee; heavy regularization, few rounds, or imbalance reweighting can still leave it off. SVMs don't produce probabilities at all — the decision function is a signed margin distance — so Platt scaling exists specifically to bolt a probability onto that margin.\n\nWorked example: a model predicts p ≈ 0.9 for 200 held-out examples, but only 140 (70%) are actually positive. Rank order among those 200 might still be flawless — but anyone treating 0.9 as \"90% expected value\" is off by 20 points.\n\nThe key gotcha: Platt scaling and isotonic regression are both *monotonic* transforms of the raw score, so they can only fix the probability values, never a bad ranking — and fitting either on the same data that trained the base model silently overfits, since that model has already partly memorized those rows. Always calibrate on a held-out split or via cross-fitting.",
+  "examples": "**1. Detect and fix miscalibration (sklearn):**\n\n```python\nfrom sklearn.calibration import CalibratedClassifierCV, calibration_curve\nfrom sklearn.ensemble import RandomForestClassifier\nfrom sklearn.metrics import brier_score_loss\nfrom sklearn.model_selection import train_test_split\n\nX_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=0)\n\nrf = RandomForestClassifier(n_estimators=300, random_state=0).fit(X_train, y_train)\nraw_probs = rf.predict_proba(X_test)[:, 1]\n\n# cv=5 cross-fits internally: fits a clone of rf on each training fold,\n# calibrates on that fold's held-out slice, then averages — never calibrates\n# on rows the base model was fit on.\ncalibrated = CalibratedClassifierCV(rf, method=\"isotonic\", cv=5).fit(X_train, y_train)\ncal_probs = calibrated.predict_proba(X_test)[:, 1]\n\nprint(\"Brier (raw):  \", brier_score_loss(y_test, raw_probs))\nprint(\"Brier (calib):\", brier_score_loss(y_test, cal_probs))  # lower = better, 0 = perfect\n\nfrac_pos, mean_pred = calibration_curve(y_test, raw_probs, n_bins=10)\n# frac_pos < mean_pred at high bins => overconfident there; frac_pos > mean_pred => underconfident\n```\n\n**2. Reading a reliability table by hand:**\n\n| Predicted bin | Mean predicted p | n   | Actual positive rate | Gap                     |\n|---------------|-------------------|-----|-----------------------|--------------------------|\n| [0.0, 0.2)    | 0.11              | 340 | 0.13                  | +0.02 (near-perfect)     |\n| [0.4, 0.6)    | 0.51              | 220 | 0.49                  | −0.02 (near-perfect)     |\n| [0.8, 1.0)    | 0.93              | 180 | 0.71                  | −0.22 (badly overconfident) |\n\nA threshold of 0.9 here doesn't mean what the business thinks it means — expected-value math using that bin's raw probability is off by 22 points, even though ranking could still be fine.",
+  "tradeoffs": "Platt scaling (a 2-parameter sigmoid fit on the raw score) is robust with small calibration sets (hundreds of rows) and works well when the distortion is roughly sigmoid-shaped — the common case for SVMs and boosted trees. It cannot fix non-sigmoid distortions.\n\nIsotonic regression fits an arbitrary monotonic step function — more flexible, no shape assumption — but effectively has one degree of freedom per distinct score, so it needs more held-out data (rough rule of thumb: 1000+ rows) or it overfits into a jagged, unstable curve.\n\nBoth cost you data (a held-out split or cross-fitting), an extra serving-time transform, and a second artifact to version and monitor — and both need periodic recalibration if the production base rate drifts. Skip calibration entirely when only ranking matters (top-k recommendations, pure AUC metrics): it cannot change prediction order, so it's pure overhead there.",
+  "diagnosticQuiz": [
+    {
+      "q": "Which statement best defines a well-calibrated binary classifier?",
+      "choices": [
+        "Among all examples assigned predicted probability p, approximately p fraction are actually positive, for every p",
+        "It assigns exactly 0 or 1 to every example with high confidence",
+        "Its predicted probabilities are uniformly distributed between 0 and 1",
+        "Its ROC-AUC is above 0.9 on held-out data"
+      ],
+      "answer": 0,
+      "explanation": "Calibration is the correspondence between predicted probability and empirical outcome frequency — orthogonal to how well the model ranks examples (that's discrimination, measured by AUC). A model can have perfect AUC and be poorly calibrated, since AUC depends only on relative order, never on the actual probability values. The uniform-distribution option describes a property unrelated to correctness; a well-calibrated model's probabilities need no particular shape, just accuracy against outcomes."
+    },
+    {
+      "q": "You bin 500 held-out predictions into [0.7, 0.8). Mean predicted probability in the bin is 0.75, and 300 of the 500 are actually positive. What does this say?",
+      "choices": [
+        "The bin is too small to draw any conclusion",
+        "The model is underconfident here — actual rate is higher than predicted",
+        "The model is well-calibrated here — 0.75 is close enough to 300/500",
+        "The model is overconfident here — actual rate (0.60) is well below predicted (0.75)"
+      ],
+      "answer": 3,
+      "explanation": "300/500 = 0.60 actual positive rate versus a mean predicted probability of 0.75 — a 15-point gap in the overconfident direction. This is the arithmetic behind a reliability diagram: compare each bin's mean predicted probability to its empirical positive rate, and the sign of the gap tells you over- vs under-confident. 500 examples is plenty to trust the signal, so the \"too small\" option is a distractor for second-guessing a clear result."
+    },
+    {
+      "q": "Why do bagged ensembles like Random Forest tend to compress probability estimates toward 0.5, even for examples the ensemble is actually quite sure about?",
+      "choices": [
+        "Because each tree in the forest is individually poorly trained",
+        "Because bagging enables class_weight=\"balanced\" by default",
+        "Because averaging many noisy, roughly independent tree-leaf estimates reduces variance, which pulls extreme values toward the mean",
+        "Because Random Forest applies a sigmoid output layer that saturates near 0.5"
+      ],
+      "answer": 2,
+      "explanation": "Each tree's leaf proportion is a high-variance estimate; averaging many such noisy estimates reduces variance, and variance reduction by averaging regresses extreme values toward the ensemble mean — the same reason averaging noisy measurements converges toward a central value rather than committing to an extreme. Random Forest has no sigmoid layer (that mechanism belongs to logistic regression/neural nets), and `class_weight` isn't on by default and wouldn't cause this compression regardless."
+    },
+    {
+      "q": "For which use case is getting calibration right most critical before deploying?",
+      "choices": [
+        "A recommender system that only needs to rank items to show a top-10 list",
+        "A search engine reordering results by relevance score",
+        "An A/B test that only compares which model variant has higher AUC",
+        "A loan-default model whose predicted probability directly multiplies expected loss for pricing"
+      ],
+      "answer": 3,
+      "explanation": "When the probability value itself feeds a downstream calculation — expected loss = P(default) × exposure, expected value, or a cost-based threshold — miscalibration directly corrupts that number, not just the ranking. In the other three cases only relative order matters, and a monotonic miscalibration leaves rank order untouched, so calibration work there is pure overhead."
+    },
+    {
+      "q": "A team fits `CalibratedClassifierCV` using the exact same rows that trained the base classifier, with no held-out fold. What goes wrong?",
+      "choices": [
+        "sklearn raises a runtime error since this is forbidden",
+        "The calibrator overfits to the base model's already-memorized predictions, so calibration looks great in-sample but is wrong on new data",
+        "The calibrated probabilities will always equal the raw probabilities",
+        "Nothing — calibration is a post-hoc step, so data reuse is harmless"
+      ],
+      "answer": 1,
+      "explanation": "The base model has already partly memorized this data (e.g., a tree with near-pure leaves is confidently correct on rows it was fit on), so a calibrator fit on those same predictions learns a mapping that's too optimistic and won't transfer to new traffic. That's exactly why cross-fitting (`cv=5`) or a separate held-out split is standard practice — skipping it is a real, common bug that only surfaces once the model is live."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Your fraud model has AUC 0.95, but the risk team says the dollar-loss estimates it drives are way off. What's happening and how do you fix it?",
+      "a": "- AUC measures ranking, not the accuracy of the probability values — the model can rank perfectly and still be miscalibrated (common for RF underconfidence, SVM margins that aren't probabilities at all, or boosted trees under strong regularization).\n- Diagnose with a reliability diagram and Brier score / Expected Calibration Error on held-out data.\n- Fix by refitting Platt scaling (small calibration set, sigmoid-shaped distortion) or isotonic regression (larger set, arbitrary shape), always via cross-fitting or a held-out split — never on data the base model trained on.\n- Re-check the reliability diagram after calibrating, and monitor it in production, since prior/class-balance drift (e.g., seasonal fraud rate) silently breaks calibration again."
+    },
+    {
+      "q": "How do you choose between Platt scaling and isotonic regression for a production calibration step, and how do you validate the choice?",
+      "a": "- Platt: 2-parameter logistic fit, robust on small calibration sets (hundreds of rows), best when the distortion is roughly sigmoid-shaped (typical for SVMs, boosted trees).\n- Isotonic: nonparametric monotonic fit, more flexible, but needs much more held-out data (1000s of rows) or it overfits into a jagged curve.\n- Validate both the same way: reliability diagram + Brier score on a test split disjoint from whatever fit the calibrator; pick whichever lowers Brier score without a visibly overfit reliability curve."
+    },
+    {
+      "q": "How does calibration interact with picking a decision threshold in a cost-sensitive production setting, e.g. a fraud-block threshold?",
+      "a": "- The cost-optimal threshold formula, `t* = C_FP / (C_FP + C_FN)`, assumes the model's output is a true probability — if it's miscalibrated, that formula picks the wrong operating point even though ranking is fine.\n- Two valid fixes: (1) calibrate first, then apply the cost formula to the calibrated probability, or (2) skip calibration and sweep the ROC/PR curve directly on validation data to find the threshold hitting your target FP/FN tradeoff empirically.\n- Do (1) if the probability is also consumed elsewhere (reporting, loss estimates); (2) is enough if thresholding is the only consumer."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "decision-threshold"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "7e3220b86799f4f3",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T09:47:08Z"
+  }
+}

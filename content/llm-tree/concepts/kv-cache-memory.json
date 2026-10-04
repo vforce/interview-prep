@@ -1,0 +1,104 @@
+{
+  "id": "kv-cache-memory",
+  "title": "KV Cache Memory",
+  "definition": "KV cache memory is the GPU memory consumed by the cached key and value tensors for every previously processed token — across all layers, attention heads, and concurrently served sequences — and it scales linearly with sequence length, batch size, layer count, KV-head count, and numeric precision.",
+  "summary": "KV cache memory is the runtime GPU footprint of the cached K/V tensors kept during autoregressive decoding, and because it scales linearly with batch size and sequence length, it competes directly with model weights for the same fixed HBM budget. In practice it — not raw compute — is what limits how many requests a server can batch or how long a context it can serve, which is why production systems attack it via architecture (GQA/MQA/MLA), numeric precision (INT8/FP8 cache quantization), and memory management (PagedAttention, sliding-window eviction) rather than by adding more GPUs.",
+  "objectives": [
+    "Compute a model's KV cache memory footprint from its architecture (layers, KV heads, head_dim), sequence length, batch size, and dtype.",
+    "Explain why KV cache memory, not FLOPs, is usually the binding constraint on serving throughput and max batch size.",
+    "Compare GQA/MQA, KV cache quantization, PagedAttention, and sliding-window eviction as memory-reduction levers, and what each trades away.",
+    "Diagnose production symptoms — OOM at higher batch size, latency growth over long conversations — as KV-cache-memory effects.",
+    "Size a deployment's max batch size from GPU memory, model config, and target context length."
+  ],
+  "lesson": "You already know the KV cache avoids recomputing attention keys/values for past tokens. The production question is different: how much memory does that cache actually cost, and why does it end up dominating your serving capacity, not the model weights?\n\nPer cached token, per layer, you store one K vector and one V vector per KV head:\n\n```\nbytes_per_token = 2 (K,V) × n_kv_heads × head_dim × dtype_bytes\n```\n\nMultiply by `num_layers` for the whole model, `seq_len` for every cached position, and `batch_size` for every concurrent sequence. Memory grows linearly in all of these — including the two dimensions (`seq_len`, `batch_size`) that are set by traffic, not by the model.\n\nQuick intuition with real numbers: Llama-2-7B (32 layers, 32 heads, head_dim 128, standard MHA so `n_kv_heads = 32`) costs ~512 KB of cache per token in fp16. Trivial for one prompt — but at a 4K-token context and 64 concurrent requests that's ~137 GB, roughly 10× the ~14 GB the weights themselves occupy. You provision GPU memory for the cache, not the model.\n\nThe gotcha: single-token decoding is memory-bandwidth-bound, not compute-bound — each step does small matmuls but must read the entire KV cache for every active sequence. So the cache is both a capacity problem (does it fit in HBM) and a latency problem (bigger cache → slower reads per step). That's why production fixes shrink the cache directly instead of adding compute: cut `n_kv_heads` architecturally (GQA/MQA), cut `dtype_bytes` (INT8/FP8 cache quantization), stop preallocating for worst-case `seq_len` and allocate in fixed blocks on demand instead (PagedAttention), or cap `seq_len` outright with sliding-window eviction when exact long-range recall isn't required. None of these change what the model computes much; all of them change whether your service fits on the GPU you actually have.",
+  "examples": "**Example 1 — computing the footprint, and why head count matters:**\n\n```python\ndef kv_cache_bytes(num_layers, num_kv_heads, head_dim, seq_len, batch_size, dtype_bytes=2):\n    \"\"\"Total KV cache memory (K+V, all layers), in bytes.\"\"\"\n    return 2 * num_layers * num_kv_heads * head_dim * seq_len * batch_size * dtype_bytes\n\nconfigs = {\n    \"Llama-2-7B  (MHA, 32 kv heads)\": dict(num_layers=32, num_kv_heads=32, head_dim=128),\n    \"Llama-3-8B  (GQA,  8 kv heads)\": dict(num_layers=32, num_kv_heads=8,  head_dim=128),\n    \"Hypothetical MQA (1 kv head)\":   dict(num_layers=32, num_kv_heads=1,  head_dim=128),\n}\n\nfor name, cfg in configs.items():\n    gb = kv_cache_bytes(**cfg, seq_len=4096, batch_size=64, dtype_bytes=2) / 1e9\n    print(f\"{name:32s} {gb:6.1f} GB\")\n\n# Llama-2-7B  (MHA, 32 kv heads)     137.4 GB\n# Llama-3-8B  (GQA,  8 kv heads)      34.4 GB\n# Hypothetical MQA (1 kv head)         4.3 GB\n```\n\nSame context length (4096) and batch (64), same weights — going from MHA to GQA alone is a 4× memory cut just from sharing KV heads across query-head groups.\n\n**Example 2 — stacking quantization on top:**\n\nApply INT8 KV cache (`dtype_bytes=1`) to the Llama-3-8B/GQA config above:\n\n```python\nkv_cache_bytes(num_layers=32, num_kv_heads=8, head_dim=128,\n                seq_len=4096, batch_size=64, dtype_bytes=1) / 1e9\n# -> 17.2 GB\n```\n\nMHA+fp16 (137.4 GB) → GQA+INT8 (17.2 GB) is an 8× reduction with zero change to parameter count — this is why real serving stacks apply both together rather than picking one.",
+  "tradeoffs": "GQA/MQA/MLA cut cache size architecturally but must be baked in at (pre)training time, or added later via costly \"uptraining\" from an MHA checkpoint — you can't retrofit them onto an already-deployed model for free, and too few KV heads can measurably hurt quality on some tasks. INT8/FP8 cache quantization is close to free to add at serving time, but naive quantization can lose accuracy on outlier-heavy activations without per-channel calibration. PagedAttention-style block allocation has essentially no downside for a serving engine — a small pointer-indirection cost for eliminating fragmentation waste — which is why it's close to a default in vLLM/TensorRT-LLM today. Sliding-window/attention-sink eviction is the most aggressive lever: it bounds memory regardless of conversation length, but sacrifices exact recall of anything pushed outside the window, so avoid it for tasks like long-document QA that must reference arbitrary earlier context. Default to the cheap, architecture-agnostic wins (quantization, paged allocation); reach for GQA/MQA/MLA or windowing only when concurrency or context length genuinely demand it.",
+  "diagnosticQuiz": [
+    {
+      "q": "In production LLM serving, what does \"KV cache memory\" specifically refer to?",
+      "choices": [
+        "The CPU RAM used to hold the tokenizer's vocabulary and merge rules",
+        "The GPU memory consumed by the cached key/value tensors for every previously processed token, across all layers and heads, for each active sequence",
+        "The disk space used to store model checkpoint files across versions",
+        "The memory used to store gradients and optimizer state during training"
+      ],
+      "answer": 1,
+      "explanation": "KV cache memory is a runtime/inference concept — GPU memory holding K/V tensors so attention need not be recomputed each decoding step — not a training concept (gradients, optimizer state) or static storage (checkpoint files, tokenizer tables). The common misconception is lumping it in with general \"model storage,\" missing that it's per-request, per-sequence, and grows during decoding rather than being fixed like the weights."
+    },
+    {
+      "q": "A model has 40 layers, 8 KV heads (GQA), head_dim 128, and runs its KV cache in fp16 (2 bytes/element). What is the KV cache memory for one cached token, across all layers, per sequence?",
+      "choices": [
+        "320 KB",
+        "160 KB",
+        "640 KB",
+        "80 KB"
+      ],
+      "answer": 1,
+      "explanation": "`2 (K,V) × 40 layers × 8 kv_heads × 128 head_dim × 2 bytes = 163,840 bytes = 160 KB`. The wrong options each drop one factor: 80 KB forgets the ×2 for storing both K and V, 640 KB uses the 32 query heads instead of the 8 KV heads, and 320 KB uses fp32 (4 bytes) instead of fp16."
+    },
+    {
+      "q": "Why does KV cache memory, rather than raw FLOPs, typically become the bottleneck that limits batch size in production LLM serving?",
+      "choices": [
+        "Autoregressive decoding is memory-bandwidth-bound per step, and the KV cache — which grows with batch size × sequence length — shares the same fixed GPU HBM budget as the model weights, capping how many sequences fit",
+        "Attention FLOPs scale faster than memory during decoding, saturating compute before memory fills up",
+        "The GPU cannot read the KV cache and the model weights within the same kernel launch, which doubles latency",
+        "The KV cache lives in CPU RAM and must be transferred over PCIe before every generated token"
+      ],
+      "answer": 0,
+      "explanation": "Single-token decoding runs tiny matmuls with low arithmetic intensity, so it's bound by how much data must move through memory rather than by FLOPs — and the memory that dominates is the KV cache, which scales with batch size and context length while the weights stay fixed. The tempting wrong answer assumes decoding is compute-bound, which is backwards from what actually happens and is why adding more FLOPs alone doesn't raise achievable batch size."
+    },
+    {
+      "q": "You're serving a 128K-context document-QA model at high concurrency on limited GPU memory. Which combination most directly relieves KV cache memory pressure?",
+      "choices": [
+        "Move the entire KV cache to CPU RAM on every decoding step",
+        "Increase the model's hidden size and add more attention heads",
+        "Use GQA or MQA to reduce KV heads, quantize the KV cache to INT8/FP8, and serve on a PagedAttention-based engine",
+        "Increase max batch size and disable KV caching to save memory"
+      ],
+      "answer": 2,
+      "explanation": "GQA/MQA shrinks the cache at the head dimension, quantization shrinks it at the byte-width, and block-based (paged) allocation removes preallocation/fragmentation waste — standard, composable production levers. Disabling the cache is the classic trap: it removes cache memory but reintroduces O(n²) recomputation per generated token, wrecking latency instead of fixing the problem."
+    },
+    {
+      "q": "A team raises max_batch_size from 32 to 64 and immediately hits an OOM, even though the model weights use only 14 GB of an 80 GB GPU. What's the most likely cause?",
+      "choices": [
+        "KV cache memory scales linearly with batch size (and sequence length); doubling batch size roughly doubles KV cache usage, which at long context lengths can dwarf the small, fixed weight footprint",
+        "The GPU's FLOPs capacity was exceeded, which raises an out-of-memory error",
+        "PyTorch enforces a hard-coded 32-sequence batch limit",
+        "The model weights were accidentally duplicated during batching"
+      ],
+      "answer": 0,
+      "explanation": "This is a classic capacity-planning trap: teams size deployments off the small, fixed weight memory and forget the KV cache is per-sequence, growing with both batch size and context length, so it easily becomes the dominant memory consumer. The tempting wrong answer confuses compute limits (which cause slowdown or throttling) with memory limits (which cause OOM); the other two options describe mechanisms that don't exist."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Walk me through how you'd size the maximum batch size a server can handle for a given model, GPU, and context length, accounting for KV cache.",
+      "a": "```\navailable_for_kv  = total_HBM − weights_memory − overhead_reserve   (~10-20% headroom)\nper_sequence_bytes = 2 × num_layers × num_kv_heads × head_dim × seq_len × dtype_bytes\nmax_batch         ≈ available_for_kv / per_sequence_bytes\n```\nReal engines (vLLM, TensorRT-LLM) don't statically reserve per-sequence blocks for the worst case — they use continuous batching plus paged/block allocation to pack variable-length sequences dynamically, so achieved concurrency tracks this theoretical bound instead of a pessimistic static one."
+    },
+    {
+      "q": "You need to serve a 70B model at 128K context with high concurrency. What would you push for architecturally and operationally, and what does each choice cost?",
+      "a": "- GQA/MQA (or MLA) at training time — cuts KV heads (often 4-8×); small quality cost, and can't be retrofitted onto an already-shipped MHA checkpoint without uptraining.\n- INT8/FP8 KV cache quantization — roughly 2× reduction, cheap to add at serving time; needs calibration to avoid outlier-channel accuracy loss.\n- PagedAttention / continuous-batching serving engine — removes fragmentation waste, near-zero downside, minor pointer-indirection overhead.\n- Sliding-window / attention-sink eviction, only if the product doesn't need exact long-range recall — bounds memory regardless of conversation length, but loses exact retrieval of evicted context.\n- Default to the cheap, architecture-agnostic wins (quantization + paged allocation); reach for head-count or windowing changes only if that's still not enough."
+    },
+    {
+      "q": "A chatbot gets noticeably slower and eventually starts erroring after many turns in the same conversation. How does KV cache memory explain this, and what's your fix?",
+      "a": "Every turn appends to the cached context, so per-request KV cache grows every turn: (1) latency rises because decoding is memory-bandwidth-bound and must read a bigger cache each step, and (2) total memory pressure rises, eventually forcing the server to shed concurrent requests or hit OOM. Fixes: bound context length (sliding window, summarize/truncate older turns), lower the per-token cache cost via GQA/MQA plus quantization to push the ceiling further out, and serve on a paged engine so one long-running conversation doesn't fragment memory and starve other users' requests."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "kv-cache",
+    "kv-cache-eviction",
+    "kv-cache-tricks",
+    "mqa-and-gqa"
+  ],
+  "followUps": [
+    "kv-cache-eviction",
+    "kv-cache-tricks",
+    "mqa-and-gqa"
+  ],
+  "metadata": {
+    "inputHash": "0e78645d6b03c658",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T14:24:25Z"
+  }
+}

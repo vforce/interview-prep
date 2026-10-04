@@ -1,0 +1,97 @@
+{
+  "id": "roc-and-pr-curves",
+  "title": "ROC and PR Curves",
+  "definition": "An ROC curve plots True Positive Rate (Recall) against False Positive Rate, and a Precision-Recall (PR) curve plots Precision against Recall, both traced by sweeping a binary classifier's decision threshold across all its scored predictions to summarize ranking quality independent of any single cutoff.",
+  "summary": "Both curves come from the exact same sorted set of scored predictions — they just plot different axis pairs at each threshold. ROC-AUC estimates the probability a randomly chosen positive outranks a randomly chosen negative and is invariant to class balance; PR-AUC (average precision) is sensitive to imbalance because precision's denominator is the small set of predicted positives, not the whole negative pool. In production, picking the wrong one hides how usable your flagged/alerted queue actually is.",
+  "objectives": [
+    "Derive TPR, FPR, Precision, and Recall from a confusion matrix and place the point on each curve",
+    "Explain why ROC-AUC is invariant to class balance while PR-AUC is not",
+    "State the random-baseline value for each curve (0.5 for ROC, prevalence for PR)",
+    "Choose ROC-AUC vs PR-AUC/average precision given a stated imbalance and cost model",
+    "Recognize the imbalanced-ROC trap and the pitfall of naively interpolating/averaging PR curves"
+  ],
+  "lesson": "Both curves sweep the same knob — the classifier's decision threshold — and plot two rates against each other at every setting. ROC plots FPR on the x-axis against TPR (recall) on the y-axis; PR plots Recall on the x-axis against Precision on the y-axis. Same sweep, different denominators — and that difference is the whole story.\n\n```\nTPR (Recall) = TP / (TP + FN)\nFPR          = FP / (FP + TN)\nPrecision    = TP / (TP + FP)\n```\n\nWorked example: 10 scored examples, 3 positives, sorted by score descending: 0.95(P), 0.90(P), 0.85(N), 0.80(P), then six more negatives down to 0.10.\n\nPredict positive for the top 2 (threshold ≥ 0.90): TP=2, FP=0 → TPR=0.67, FPR=0, Precision=1.0. Both curves look perfect.\n\nLower the threshold to admit 0.85 (one false positive): TP=2, FP=1 → TPR is still 0.67, FPR moves to 1/7 ≈ 0.14, but Precision drops from 1.0 to 0.67. Same single false positive — FPR barely felt it (denominator is 7 negatives), Precision felt it immediately (denominator is only 2 predicted positives).\n\nThat asymmetry is the key gotcha. Under heavy imbalance (say 0.5% positive rate), the negative class is enormous, so FPR's denominator absorbs false positives without moving — ROC-AUC can sit at 0.95+ while most \"positive\" predictions are noise. Precision, and the PR curve, feels every false positive immediately because it divides by predicted positives, not the whole negative pool. This is why a fraud/anomaly/rare-disease model can report a gorgeous ROC-AUC and still be operationally unusable: whoever is drowning in false alarms is living in the PR curve's story, not ROC's.\n\nSecond thing worth knowing cold: the random baselines differ. A no-skill classifier gives ROC-AUC = 0.5 regardless of class balance — that invariance is exactly what makes ROC misleading under imbalance. A no-skill classifier's PR baseline equals the positive prevalence, so a PR-AUC of 0.2 on a 1%-positive problem is 20x better than chance, not \"bad.\"",
+  "examples": "**Example 1 — hand-computed curve from the lesson's data (3 positives, 7 negatives)**\n\n| k (top-k flagged) | TP | FP | FN | TN | Recall | FPR | Precision |\n|---|---|---|---|---|---|---|---|\n| 0 | 0 | 0 | 3 | 7 | 0.00 | 0.00 | — |\n| 1 | 1 | 0 | 2 | 7 | 0.33 | 0.00 | 1.00 |\n| 2 | 2 | 0 | 1 | 7 | 0.67 | 0.00 | 1.00 |\n| 3 | 2 | 1 | 1 | 6 | 0.67 | 0.14 | 0.67 |\n| 4 | 3 | 1 | 0 | 6 | 1.00 | 0.14 | 0.75 |\n| 5 | 3 | 2 | 0 | 5 | 1.00 | 0.29 | 0.60 |\n| 6 | 3 | 3 | 0 | 4 | 1.00 | 0.43 | 0.50 |\n| 7 | 3 | 4 | 0 | 3 | 1.00 | 0.57 | 0.43 |\n| 8 | 3 | 5 | 0 | 2 | 1.00 | 0.71 | 0.38 |\n| 9 | 3 | 6 | 0 | 1 | 1.00 | 0.86 | 0.33 |\n| 10 | 3 | 7 | 0 | 0 | 1.00 | 1.00 | 0.30 |\n\nTrapezoidal ROC-AUC over these points ≈ 0.95 — equivalently, of the 3×7=21 (positive, negative) pairs, the positive scores higher in 20 of them (20/21 ≈ 0.95), which is exactly the Mann-Whitney/rank interpretation of AUC. Average precision (PR-AUC) — precision at each rank where a positive is *found*, averaged over the 3 positives — is (1.00 + 1.00 + 0.75)/3 ≈ 0.92. Even at this mild ~30%-positive ratio, PR is already stricter than ROC; push the imbalance to 1% positive and the gap becomes dramatic, as below.\n\n**Example 2 — the gap widens under real imbalance**\n\n```python\nfrom sklearn.datasets import make_classification\nfrom sklearn.linear_model import LogisticRegression\nfrom sklearn.metrics import roc_auc_score, average_precision_score\n\nX, y = make_classification(\n    n_samples=20000, n_features=20,\n    weights=[0.99, 0.01],   # 1% positive rate\n    random_state=0,\n)\nmodel = LogisticRegression(max_iter=1000).fit(X, y)\nscores = model.predict_proba(X)[:, 1]\n\nprint(f\"prevalence: {y.mean():.3f}\")\nprint(f\"ROC-AUC:    {roc_auc_score(y, scores):.3f}\")\nprint(f\"PR-AUC:     {average_precision_score(y, scores):.3f}\")\n```\n\nIllustrative shape of the output (exact numbers vary by seed/model — not a claimed exact run): prevalence ≈ 0.01, ROC-AUC often lands high (≈0.9+), PR-AUC comes in much lower (e.g. ≈0.3–0.5). Same model, same scores, two very different verdicts on production readiness.",
+  "tradeoffs": "Use ROC-AUC when classes are roughly balanced or you care about both classes symmetrically — it's a clean, prevalence-invariant ranking metric, which also makes it the right choice for comparing ranking ability across differently-imbalanced test slices.\n\nUse PR-AUC / average precision (and the PR curve) when positives are rare and the precision of the flagged set is the operational cost — fraud, anomaly detection, search/retrieval, rare-disease screening. It's the harsher, more honest metric under imbalance precisely because it isn't invariant to it.\n\nBoth are threshold-independent summaries — good for offline model selection, not a deployable policy. Production needs one operating threshold picked off the curve against a stated constraint (target recall/precision, or expected-value under a cost matrix), and that threshold needs re-validating as the base rate or score distribution drifts.\n\nOne more senior-level nuance: unlike ROC space, points on a PR curve can't be linearly interpolated between two achieved thresholds — the achievable curve between them isn't a straight line — so don't eyeball-average raw PR curves across CV folds; average the precision values (or interpolate correctly) instead.",
+  "diagnosticQuiz": [
+    {
+      "q": "What do the two axes of an ROC curve represent?",
+      "choices": [
+        "Precision vs False Positive Rate",
+        "True Positive Rate vs Positive Predictive Value",
+        "Precision vs Recall",
+        "True Positive Rate (y-axis) vs False Positive Rate (x-axis)"
+      ],
+      "answer": 3,
+      "explanation": "ROC plots TPR (recall) against FPR, swept across thresholds. Choice A confuses positive predictive value (precision) with FPR — a common name mix-up. C is the definition of the PR curve, not ROC. D pairs two rates that aren't the axes of either standard curve."
+    },
+    {
+      "q": "A model at a given threshold yields TP=40, FP=10, FN=60, TN=890. What are its Precision and Recall?",
+      "choices": [
+        "Precision=0.8, Recall=0.4",
+        "Precision=0.8, Recall=0.8",
+        "Precision=0.4, Recall=0.8",
+        "Precision=0.98, Recall=0.4"
+      ],
+      "answer": 0,
+      "explanation": "Precision = TP/(TP+FP) = 40/50 = 0.8; Recall = TP/(TP+FN) = 40/100 = 0.4. Option B swaps the two formulas — a classic denominator mix-up between precision and recall. Option D computes specificity (TN/(TN+FP) = 890/900 ≈ 0.98) and mistakes it for precision."
+    },
+    {
+      "q": "Why can ROC-AUC look excellent on a highly imbalanced dataset even when precision is poor?",
+      "choices": [
+        "Because the ROC curve is computed using only the positive examples",
+        "Because ROC curves are computed without reference to any threshold",
+        "Because AUC always equals one minus the model's error rate",
+        "Because FPR's denominator is the large negative-class count, so false positives barely move FPR while they devastate precision"
+      ],
+      "answer": 3,
+      "explanation": "FPR = FP/(FP+TN); with a huge negative class, even a large raw count of false positives is a tiny fraction, so FPR — and hence ROC-AUC — barely moves. Precision = TP/(TP+FP) has the small predicted-positive count as its denominator, so the same false positives hit it hard. A is false (ROC uses both classes); C and D are not properties of AUC or ROC at all."
+    },
+    {
+      "q": "You're building a fraud-detection model where fraud is 0.3% of transactions, and the team's real concern is the precision of the queue analysts review. Which should drive model selection?",
+      "choices": [
+        "The ROC curve, because it's the industry-standard metric",
+        "A calibration (reliability) curve",
+        "The PR curve / PR-AUC (average precision), because it directly reflects the precision cost of flagging under rarity",
+        "A lift chart only — ROC and PR are both irrelevant under imbalance"
+      ],
+      "answer": 2,
+      "explanation": "With severe imbalance and \"precision of the flagged queue\" as the stated cost, PR-AUC is the metric that's actually sensitive to false-positive volume relative to the rare positive class. ROC-AUC would report a misleadingly strong number while hiding a queue full of false alarms. A calibration curve measures probability calibration, not ranking/flagging quality, and is a different concern entirely."
+    },
+    {
+      "q": "If positives make up 5% of the data, what is the correct random-classifier baseline for the PR curve?",
+      "choices": [
+        "0.05, equal to the positive class's prevalence",
+        "0.5, the same baseline as ROC",
+        "0.95, one minus the prevalence",
+        "0.0 — PR-AUC is always 0 for a random model"
+      ],
+      "answer": 0,
+      "explanation": "A no-skill classifier's precision at any recall equals the base rate of positives — ranking carries no signal, so the flagged set mirrors the overall label rate — giving a PR-AUC baseline equal to prevalence, here 0.05. People default to A because they're used to ROC's fixed 0.5 baseline, but PR's baseline moves with class balance, which is exactly what makes it informative."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Your model has ROC-AUC 0.97, but the fraud team says precision at the review queue is unusable in production. What's going on, and what do you do?",
+      "a": "Fraud is rare, so ROC-AUC's FPR denominator (the huge negative class) hides the false-positive volume that's swamping the analysts' queue — check PR-AUC / average precision and precision at the actual operating recall, not just AUC. Plot the PR curve and pick the threshold by a target precision (or expected-value under a cost matrix) instead of an arbitrary score cutoff. If PR-AUC itself is weak (not just the threshold), that's a modeling/feature problem, not a threshold-tuning problem — retrain rather than re-threshold. Going forward, report PR-AUC and precision-at-threshold to this team, since that matches the pain they actually feel."
+    },
+    {
+      "q": "How do you choose a production decision threshold instead of just reporting AUC?",
+      "a": "AUC — ROC or PR — is threshold-independent; it ranks the model, not a deployable policy. Sweep the relevant curve, fix the business constraint (e.g. \"recall ≥ 90%,\" \"precision ≥ 80%,\" or maximize expected value / F-beta with beta set by the FP/FN cost ratio), and pick the threshold that hits it on a held-out set matching production's class distribution. Re-validate that threshold periodically — it drifts if the base rate or score distribution shifts — so it should be monitored, not hardcoded once and forgotten."
+    },
+    {
+      "q": "Model A: ROC-AUC 0.90, PR-AUC 0.40. Model B: ROC-AUC 0.88, PR-AUC 0.55. You're shipping a rare-event alerting system — which do you pick, and why could AUC alone mislead you here?",
+      "a": "Ship Model B. The operational cost of a rare-event alerting system is analyst time per false alarm, which PR-AUC tracks directly and ROC-AUC does not — ROC's near-tie (0.90 vs 0.88) is compressed by the large negative class, while the real PR gap (0.40 vs 0.55) reflects a substantial difference in how many false alarms analysts will actually see. Before shipping on AUC alone, corroborate with precision/recall at the specific chosen operating threshold and factor in review capacity."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "precision-and-recall"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "c8987627c84cf39c",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T09:35:26Z"
+  }
+}

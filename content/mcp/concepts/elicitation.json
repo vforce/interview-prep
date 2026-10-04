@@ -1,0 +1,97 @@
+{
+  "id": "elicitation",
+  "title": "Elicitation",
+  "definition": "Elicitation is an MCP client capability (`elicitation/create`) that lets a server pause a request mid-flight and ask the client to collect one specific, schema-typed piece of information directly from the human user, then resume once the client returns it.",
+  "summary": "Where sampling lets a server borrow the client's LLM to generate text, elicitation lets a server borrow the client's human to supply a fact the server can't get any other way — a missing parameter, a disambiguation choice, or a yes/no confirmation before a risky action. The server sends a short message plus a flat JSON-schema describing the shape of the answer; the client renders a form, the human responds, and the client returns `accept`/`decline`/`cancel` plus the data. It's a negotiated, optional capability, gated by the same human-in-the-loop trust model as sampling.",
+  "objectives": [
+    "State what problem elicitation solves and how it differs from sampling (human input vs. model input).",
+    "Describe the request/response shape: `message`, `requestedSchema`, and the `accept`/`decline`/`cancel` actions.",
+    "Explain why `requestedSchema` is restricted to flat, primitive-typed fields.",
+    "Identify the security rule around eliciting sensitive data, and why it exists.",
+    "Recognize when elicitation is the right tool vs. when it will break a production/agentic workflow."
+  ],
+  "lesson": "Sampling answers \"I need more *reasoning*, so let me ask the client's model.\" Elicitation answers \"I need more *facts*, so let me ask the client's human.\" Both are server → client requests that pause the server's work and hand control back across the wire — but sampling's payoff is generated text, elicitation's payoff is a small, structured, human-provided value the server literally cannot invent or infer.\n\nMechanically: like sampling, the client declares support during `initialize` (`capabilities: { elicitation: {} }`). Mid-tool-call, the server sends `elicitation/create` with a `message` (what to ask) and a `requestedSchema` — a JSON Schema object whose properties may only be flat primitives (`string`, `number`, `integer`, `boolean`, enum) — no nested objects, no arrays. That restriction exists so any client can render the form generically (text box, number field, checkbox, dropdown) without a bespoke UI per server. The client shows the form, the user acts, and the client replies with `action: \"accept\" | \"decline\" | \"cancel\"` plus `content` matching the schema when accepted.\n\nWorked example: a `deploy` tool receives a request with no target environment specified. Instead of guessing or erroring, it elicits: message = \"Which environment?\", schema = `{ environment: enum[staging, production] }`. The human picks one, the tool resumes with a concrete value, and the deploy proceeds inside the *same* tool call — no separate round trip through the chat model, no re-prompting the whole conversation.\n\nThe key gotcha: elicitation looks like a generic \"ask the user anything\" hook, but it's constrained on both axes. Schema-wise, you cannot elicit nested/structured data — if you need an address, elicit street/city/zip as separate flat fields, not one nested object. Trust-wise, the spec is explicit that elicitation **must not** be used to collect sensitive information — passwords, API keys, tokens — because the client renders a trusted-looking form *on behalf of a third-party server*, and a malicious server could phish credentials through it exactly like sampling could be abused to exfiltrate a prompt.\n\nAlso remember `decline` and `cancel` are distinct from `accept` — a production server must handle both as \"no usable data,\" not crash or retry-loop assuming the user will eventually comply.",
+  "examples": "**1. Wire-level request/response:**\n\n```json\n// server -> client\n{\n  \"jsonrpc\": \"2.0\",\n  \"id\": 42,\n  \"method\": \"elicitation/create\",\n  \"params\": {\n    \"message\": \"No slot open on 2026-07-06. Try an alternative date?\",\n    \"requestedSchema\": {\n      \"type\": \"object\",\n      \"properties\": {\n        \"tryAlternative\": { \"type\": \"boolean\" },\n        \"alternativeDate\": { \"type\": \"string\", \"title\": \"YYYY-MM-DD\" }\n      },\n      \"required\": [\"tryAlternative\"]\n    }\n  }\n}\n\n// client -> server\n{\n  \"jsonrpc\": \"2.0\",\n  \"id\": 42,\n  \"result\": {\n    \"action\": \"accept\",\n    \"content\": { \"tryAlternative\": true, \"alternativeDate\": \"2026-07-09\" }\n  }\n}\n```\n\n**2. Python (FastMCP-style server), handling all three outcomes:**\n\n```python\nfrom pydantic import BaseModel\nfrom mcp.server.fastmcp import FastMCP, Context\n\nmcp = FastMCP(\"booking\")\n\nclass AlternativeDate(BaseModel):\n    tryAlternative: bool\n    alternativeDate: str = \"\"\n\n@mcp.tool()\nasync def book_table(date: str, ctx: Context) -> str:\n    if is_available(date):\n        return confirm_booking(date)\n\n    # ctx.elicit wraps the wire response: .action mirrors \"action\",\n    # .data mirrors \"content\" (parsed into the schema model) on accept.\n    result = await ctx.elicit(\n        message=f\"No slot on {date}. Try an alternative date?\",\n        schema=AlternativeDate,\n    )\n\n    if result.action == \"accept\" and result.data.tryAlternative:\n        return confirm_booking(result.data.alternativeDate)\n    if result.action == \"decline\":\n        return \"No booking made — user declined an alternative.\"\n    return \"Booking flow cancelled.\"\n```",
+  "tradeoffs": "Use elicitation for small, structured, occasional gaps mid-operation: a missing parameter, disambiguating between two matches, or a confirm/cancel gate before a destructive action (drop a table, force-push, tear down an environment) — it keeps the same tool call open and resumes with the answer, instead of a full round trip back through the conversation.\n\nAvoid it for anything the server could resolve itself, for sensitive data (use a real auth flow instead), and for unattended pipelines (CI, batch jobs, agent-to-agent chains) where there's no human to ask and the capability may not even be declared. And don't over-use it — each call is a blocking human round trip, so a tool that elicits repeatedly per invocation feels broken rather than helpful.",
+  "diagnosticQuiz": [
+    {
+      "q": "What does MCP elicitation fundamentally let a server do?",
+      "choices": [
+        "Cache a previous tool result for reuse across sessions",
+        "Request a list of available tools from another server",
+        "Request that the client's LLM generate additional reasoning or text",
+        "Request that the client collect a specific piece of structured data directly from the human user"
+      ],
+      "answer": 3,
+      "explanation": "Elicitation (`elicitation/create`) exists specifically to pull a small, schema-shaped fact from the human via the client's UI — it does not touch the client's model at all. Option A describes sampling, the concept elicitation is most often confused with because both are server→client, human-in-the-loop, negotiated capabilities."
+    },
+    {
+      "q": "An elicitation response comes back with `action: \"decline\"`. What must a correctly implemented server do?",
+      "choices": [
+        "Treat it as \"no usable data\" and follow whatever fallback/abort path the tool defines — the same as it would for `\"cancel\"`",
+        "Treat it identically to `\"accept\"` and proceed using empty/default values for the schema fields",
+        "Immediately retry the same `elicitation/create` request until the user accepts",
+        "Throw a protocol error, since `\"decline\"` is not a valid action value"
+      ],
+      "answer": 0,
+      "explanation": "`accept`, `decline`, and `cancel` are all valid, spec-defined outcomes; only `accept` carries usable `content`. A robust tool branches on `action` and treats decline/cancel as \"the human said no or walked away,\" not as a bug or as silent success — retry-looping or faking acceptance both produce incorrect or annoying behavior."
+    },
+    {
+      "q": "Why is elicitation a distinct primitive instead of just reusing sampling to \"ask the user through the model\"?",
+      "choices": [
+        "They aren't actually distinct — elicitation is implemented as a wrapper around sampling",
+        "Because sampling requests always fail on missing parameters, while elicitation requests never do",
+        "Because elicitation is faster over the network than sampling",
+        "Because sampling produces model-generated text, and there's no guarantee the model would ask the human at all or capture a structured answer — elicitation talks to the human directly and returns a typed value"
+      ],
+      "answer": 3,
+      "explanation": "Sampling's output is whatever the LLM generates — free text, not a guaranteed structured fact, and the model is the one being asked, not the human. Elicitation bypasses the model entirely and gets a schema-validated value straight from the person, which is what you need for something like \"confirm yes/no\" or \"pick an environment.\""
+    },
+    {
+      "q": "A tool call is missing a required parameter that only the human can supply (e.g., which of two same-named AWS accounts to act on). What's the appropriate MCP mechanism?",
+      "choices": [
+        "Guess based on the most recently used account and proceed silently",
+        "Use elicitation to ask a targeted, schema-typed question and resume the same tool call with the answer",
+        "Return a generic error and force the user to restate the entire request with more detail",
+        "Use sampling to have the client's LLM pick one on the server's behalf"
+      ],
+      "answer": 1,
+      "explanation": "This is exactly elicitation's use case: a small, specific, human-only fact needed mid-call. Guessing risks acting on the wrong account, a generic error throws away context the server already has, and sampling would have the *model* guess rather than the actual human confirm."
+    },
+    {
+      "q": "A server's `elicitation/create` request sets `message: \"Please enter your GitHub personal access token to verify permissions\"`. What's wrong with this?",
+      "choices": [
+        "This violates the spec's rule that elicitation must not be used to request sensitive information like tokens or passwords — it's a phishing-shaped request",
+        "The schema would need a nested `credentials` object, which isn't allowed, but the request itself is fine",
+        "It's invalid only because `message` is too long",
+        "Nothing — elicitation is designed exactly for collecting credentials on demand"
+      ],
+      "answer": 0,
+      "explanation": "The MCP spec explicitly prohibits using elicitation for sensitive data, because the client renders a trusted-looking form on behalf of a third-party server — exactly the shape of a phishing prompt. A well-behaved client should refuse or flag this; a well-behaved server should never send it and should use a real auth flow instead."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "You're adding a `terraform_apply` tool to an MCP server used by an on-call engineer. Applying to production should require a human confirmation step. How do you design that with elicitation, and what do you do with each possible response?",
+      "a": "Before executing `apply` against a production workspace, the tool sends an `elicitation/create` with a short message (\"About to apply N changes to production — proceed?\") and a flat schema like `{confirm: boolean}` (optionally plus `reason: string` for an audit trail). On `accept` with `confirm: true`, run the apply and return the result. On `accept` with `confirm: false`, `decline`, or `cancel`, abort with a clear \"not applied\" message — all three non-confirm outcomes get the same safe path, no partial or silent apply. I'd also check the client declared the `elicitation` capability at init; if not, fail closed rather than skip confirmation."
+    },
+    {
+      "q": "What security guardrails would you put around elicitation in a production MCP server?",
+      "a": "Never elicit secrets — passwords, API keys, tokens — the spec prohibits it because it's structurally a phishing vector: the client UI presents a third-party server's request as if trusted. Real credentials belong in a proper auth/secrets flow, not a form triggered by arbitrary server logic. Keep schemas minimal and specific to the immediate decision (flat, few fields) so what's being asked stays auditable. And treat the returned `content` as untrusted input back into the server too — validate it server-side against the schema rather than assuming the client enforced it."
+    },
+    {
+      "q": "Your MCP server runs both in an interactive chat client and as part of an unattended CI pipeline. A tool you wrote uses elicitation to ask about an ambiguous case. What breaks in the CI path, and how do you handle it?",
+      "a": "In CI there's no human to answer and possibly no declared `elicitation` capability — the call would hang or the client would report it unsupported. The fix is to check for the capability (or an explicit \"interactive\" flag) before calling it, and give the tool a non-interactive fallback: a strict default, or a fast, actionable error naming the ambiguity, instead of blocking indefinitely. Elicitation should enhance interactive sessions, never be the only path to a valid result."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "sampling"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "e4a03c9fbee6cb67",
+    "model": "sonnet",
+    "generatedAt": "2026-07-06T07:07:11Z"
+  }
+}

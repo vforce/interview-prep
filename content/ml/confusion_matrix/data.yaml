@@ -1,0 +1,23 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: confusion_matrix
+type: kata
+area: Classification Metrics
+order: 34
+title: Confusion matrix (pure Python)
+prompt: Return the binary confusion matrix as a tuple (tp, fp, fn, tn) for 0/1 labels.
+sig: 'def confusion_matrix(y_true, y_pred):'
+stub: "def confusion_matrix(y_true, y_pred):\n    \n    return tp, fp, fn, tn\n"
+reference: |-
+  def confusion_matrix(y_true, y_pred):
+      tp = fp = fn = tn = 0
+      for t, p in zip(y_true, y_pred):
+          if   t == 1 and p == 1: tp += 1
+          elif t == 0 and p == 1: fp += 1
+          elif t == 1 and p == 0: fn += 1
+          else:                   tn += 1
+      return tp, fp, fn, tn
+test: |
+  assert confusion_matrix([1,1,0,0], [1,0,0,1]) == (1,1,1,1), confusion_matrix([1,1,0,0], [1,0,0,1])
+  assert confusion_matrix([1,1,1], [1,1,1]) == (3,0,0,0), "all tp"
+  print("PASS - 2 cases")

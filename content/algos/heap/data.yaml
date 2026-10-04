@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: heap
+fam: stackheap
+label: Heap / Top-K
+order: 8
+trigger: kth largest/smallest, k closest, merge k lists
+insight: size-k heap (min-heap keeps k largest); k-way merge push (val,i,j); median = two heaps
+probs:
+- {n: Last Stone Weight, slug: last-stone-weight, d: E}
+- {n: Kth Largest Element, slug: kth-largest-element-in-an-array, d: M}
+- {n: Merge k Sorted Lists, slug: merge-k-sorted-lists, d: H}

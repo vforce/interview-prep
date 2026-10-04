@@ -1,0 +1,104 @@
+{
+  "id": "tokenization",
+  "title": "Tokenization",
+  "definition": "Tokenization is the deterministic process of converting raw text into a sequence of integer IDs drawn from a fixed, pretraining-time vocabulary — the discrete units an LLM's embedding layer maps to vectors.",
+  "summary": "Tokenization is the bridge between raw text and a model's embedding table, and virtually every production LLM uses a subword scheme (BPE, WordPiece, or Unigram) that balances vocabulary size against sequence length. Because the vocabulary is learned once during pretraining and is tightly coupled to the embedding and output matrices, it's effectively a permanent, load-bearing design decision, not something you casually swap later. Its effects show up directly in production: token-based API cost, context-window budget, multilingual fairness, and well-known failure modes like weak multi-digit arithmetic or letter-counting.",
+  "objectives": [
+    "Explain why LLMs use subword tokenization instead of word- or character-level schemes.",
+    "Trace how BPE builds a vocabulary via iterative, frequency-based merges.",
+    "Identify production impacts: token fertility/cost, multilingual inflation, context-window budget.",
+    "Diagnose tokenization-rooted failures — inconsistent digit chunking, letter-counting errors, whitespace-sensitive prompts.",
+    "Reason about vocabulary-size tradeoffs against embedding-table size and sequence length."
+  ],
+  "lesson": "Neural networks need fixed-size, discrete input units mapped to vectors, so before any modeling happens, raw text must become a sequence of integer IDs from a fixed vocabulary. The two naive options both fail in production. Word-level tokenization has unbounded vocabulary — any new word, typo, or product name is out-of-vocabulary — and ties vocabulary size directly to embedding-table size. Character-level tokenization has a tiny, closed vocabulary, but it multiplies sequence length several-fold, which is expensive under self-attention's O(n²) cost and forces the model to relearn word structure from scratch over long spans.\n\nSubword tokenization — Byte-Pair Encoding (BPE), WordPiece, or Unigram — is the practical middle ground almost every production LLM uses. BPE trains by starting from individual characters (or bytes), counting the frequency of every adjacent symbol pair in the corpus, and greedily merging the single most frequent pair into a new symbol. Repeating this for a fixed number of merges builds a vocabulary where common words collapse into one token (\"the\" → 1 token), while rare or unseen words decompose into frequent subword pieces (\"tokenization\" → \"token\" + \"ization\"). This keeps vocabulary size manageable (roughly 30K–200K) while keeping sequences compact, and it never hits an out-of-vocabulary wall — worst case, text falls back to raw bytes or characters.\n\nThe key production gotcha: tokenization decides what units the model can ever reason over, and the choice is effectively permanent once pretraining starts, since it's coupled to the embedding and output matrices. BPE merges numbers by frequency, not place value, so the same digit run can chunk differently depending on the surrounding number — this misalignment is a major reason LLMs are historically unreliable at multi-digit arithmetic, since carrying can't be learned as a clean positional pattern across inconsistent chunk boundaries. The same mechanism explains why models struggle to count letters in a word: they never see individual characters, only whatever opaque subword token(s) the tokenizer happened to produce. And because BPE vocabularies are trained on corpora skewed toward English and Latin scripts, other languages — especially non-whitespace-delimited scripts like Japanese or Thai — tokenize far less efficiently, silently inflating cost and eating context-window budget for identical meaning.",
+  "examples": "**Example 1 — BPE merges by hand (toy corpus, fully worked so the counts are verifiable):**\n\n```\ncorpus (word: frequency):     low_ : 5      lowest_ : 2      newer_ : 6\n(\"_\" marks end-of-word)\n\ninitial split into symbols:\n  low_      -> l o w _            (x5)\n  lowest_   -> l o w e s t _      (x2)\n  newer_    -> n e w e r _        (x6)\n\nstep 1: count every adjacent pair, merge the most frequent\n  (w,e) appears in lowest_ (x2) and newer_ (x6) = 8 total -> highest count\n  merge (w,e) -> \"we\"\n  low_      -> l o w _\n  lowest_   -> l o we s t _\n  newer_    -> n e we r _\n\nstep 2: recount, merge the most frequent\n  (l,o) appears in low_ (x5) and lowest_ (x2) = 7 total -> highest count\n  merge (l,o) -> \"lo\"\n  low_      -> lo w _\n  lowest_   -> lo we s t _\n  newer_    -> n e we r _   (unchanged)\n\n... repeat for a fixed number of merges (a hyperparameter fixed before training,\ntypically tens of thousands on a real corpus). Vocabulary = base symbols + every\nmerge produced. Encoding new text just applies the learned merges greedily.\n```\n\n**Example 2 — fertility and digit-chunking in a real tokenizer:**\n\n```python\nimport tiktoken\n\nenc = tiktoken.encoding_for_model(\"gpt-4o\")\n\nen = \"The invoice was paid on time.\"\nvi = \"Hóa đơn đã được thanh toán đúng hạn.\"  # same meaning, Vietnamese\n\nprint(len(enc.encode(en)))   # baseline token count\nprint(len(enc.encode(vi)))   # same meaning, noticeably more tokens\n\nprint(enc.encode(\"48293\"))   # digit run — chunked by frequency, not place value\nprint(enc.encode(\"17568\"))   # a different number often chunks with a different width\n```\n\nRun this and you'll consistently see the Vietnamese sentence cost meaningfully more tokens than the English one for identical meaning — diacritics and compound words don't line up with merges learned from an English-heavy corpus. The two digit runs frequently don't split into matching-width chunks either, which is part of why unmodified LLMs are unreliable at multi-digit arithmetic.",
+  "tradeoffs": "Vocabulary size is a direct trade between two costs: a larger vocab (100K+) shortens sequences per unit of text — cheaper attention, more content fits in the context window — but enlarges the embedding and output/softmax matrices, which are already among the largest parameter blocks in an LLM and matter for serving memory and logit-layer latency, not just training. A smaller vocab keeps those matrices small but lengthens sequences, spending more compute and context budget per unit of meaning. Byte-level BPE (GPT-2/3/4-style) guarantees zero OOV at the cost of occasionally awkward splits; SentencePiece/Unigram trained without whitespace pre-tokenization is usually preferred for multilingual or non-whitespace-delimited languages (Japanese, Thai, Chinese). In production, treat the tokenizer as a versioned, load-bearing artifact tied to the embedding table — don't swap or retrain it casually; validate fertility (tokens per word) and cost across your real traffic mix (every target language plus code) before locking it in, since changing it later is close to a full retrain.",
+  "diagnosticQuiz": [
+    {
+      "q": "What does a tokenizer fundamentally do in an LLM's input pipeline?",
+      "choices": [
+        "Translate the input text into English before embedding",
+        "Convert raw text into a sequence of integer IDs drawn from a fixed vocabulary",
+        "Convert model logits into a probability distribution over the vocabulary",
+        "Compress the model's trained weights to reduce memory footprint"
+      ],
+      "answer": 1,
+      "explanation": "Tokenization is the text-to-ID mapping step that happens before the embedding lookup — the model never sees raw characters, only these IDs. The best distractor (turning logits into a distribution) is actually the softmax/decoding step at the *output* end of the model, a common mix-up between the input and output ends of the pipeline."
+    },
+    {
+      "q": "During one training iteration of Byte-Pair Encoding, which adjacent symbol pair gets merged into a new token?",
+      "choices": [
+        "The pair that minimizes the final vocabulary size",
+        "The least frequent pair, so rare morphemes each get a dedicated token",
+        "A pair chosen uniformly at random, to avoid frequency bias",
+        "The pair that appears most frequently among all adjacent symbol pairs in the corpus"
+      ],
+      "answer": 3,
+      "explanation": "BPE is a greedy, frequency-driven compression algorithm: at every step it counts all adjacent symbol-pair frequencies and merges the single most frequent pair into a new symbol, repeating until a target vocabulary size or merge count is reached. The \"least frequent pair\" distractor inverts the actual rule — people often assume rare units get protected, but BPE optimizes for redundancy, not rarity."
+    },
+    {
+      "q": "Why do production LLMs use subword tokenization rather than pure character-level tokenization?",
+      "choices": [
+        "Character-level tokenization always produces out-of-vocabulary errors",
+        "Characters cannot be mapped to integer IDs",
+        "Character-level sequences are far longer for the same text, raising attention's O(n²) cost and making long-range structure harder to learn",
+        "Subword vocabularies are legally required for training data compliance"
+      ],
+      "answer": 2,
+      "explanation": "Character-level tokenization keeps the vocabulary tiny but multiplies sequence length several-fold, which is expensive under self-attention and forces the model to relearn word/morpheme structure from scratch over long spans — that length/compute cost is the real reason it's avoided at scale. The other options are false: characters map trivially to IDs, character-level tokenization is actually immune to OOV (the opposite of one distractor), and there's no such legal requirement."
+    },
+    {
+      "q": "You're training a multilingual model that must handle Japanese, Arabic, and source code with zero out-of-vocabulary tokens. Which tokenization approach is the standard production choice?",
+      "choices": [
+        "A hand-curated dictionary covering every word in every target language",
+        "Whitespace-based word tokenization with an UNK token for unseen words",
+        "Character-level tokenization restricted to the Latin alphabet",
+        "Byte-level BPE, or a SentencePiece/Unigram model trained without assuming whitespace word boundaries"
+      ],
+      "answer": 3,
+      "explanation": "Byte-level BPE (as in GPT-2/3/4) guarantees no OOV since any Unicode string decomposes into bytes, and SentencePiece's Unigram model treats input as a raw character stream rather than assuming whitespace-delimited words, so it handles languages like Japanese that don't space-separate words. Whitespace tokenization — the tempting \"simple\" answer — breaks immediately on unseen words and non-whitespace-delimited scripts, and a hand-built dictionary or Latin-only charset can't scale or represent the target languages at all."
+    },
+    {
+      "q": "A production chatbot inconsistently mishandles multi-digit arithmetic and burns roughly 3x more tokens on Vietnamese support tickets than equivalent English ones. What's the most likely root cause?",
+      "choices": [
+        "The API is silently rate-limiting non-English requests",
+        "The tokenizer's vocabulary was learned from a corpus skewed toward English/Latin script, so digit runs split inconsistently across token boundaries and non-English text fragments into more, smaller tokens",
+        "The model's attention heads are miscalibrated specifically for numeric reasoning",
+        "Vietnamese sentences are inherently longer in meaning than their English equivalents"
+      ],
+      "answer": 1,
+      "explanation": "Both symptoms trace to tokenizer vocabulary composition: BPE merges are frequency-driven rather than place-value-aligned, so the same digit run can chunk differently across different numbers, breaking the consistent positional pattern arithmetic needs; and because the merge vocabulary is learned from an English-dominant corpus, other scripts (especially diacritic-heavy or non-whitespace-delimited ones) compress far less efficiently, inflating token count and cost for identical meaning. The other options describe mechanisms that aren't actually happening."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Walk me through how you'd choose or validate a tokenizer for a new production multilingual LLM.",
+      "a": "- Measure **fertility** (tokens per word/char) across a representative sample of real traffic — every target language plus code and structured data, not just English benchmarks.\n- Compare candidates: reuse an existing well-tested tokenizer (e.g., a GPT/Llama-family BPE) vs. training a new SentencePiece/BPE model on a corpus matching your actual domain and language mix.\n- Check edge cases: digit/number handling, code indentation and symbols, leading-space sensitivity, zero-OOV guarantee (byte-level fallback).\n- Remember it's a one-way door: the vocabulary is baked into the embedding and output matrices at pretraining time — lock it in only after validating cost, latency, and quality on real traffic, not just intrinsic metrics."
+    },
+    {
+      "q": "Why do capable LLMs sometimes fail to count the letters in a word, or make mistakes on multi-digit multiplication?",
+      "a": "The model never sees characters or place-value digits directly — it sees tokens, opaque subword or digit-chunk IDs produced by the tokenizer. If \"strawberry\" is one or two tokens, there's no character index inside the model's input for it to count over; that information was discarded at the tokenization boundary. Multi-digit arithmetic has the same root cause: BPE splits numbers by frequency, not by place value, so the same digit run can chunk differently across different numbers, breaking the consistent positional structure needed to learn carrying. It's largely a tokenization-level limitation rather than a reasoning-capacity one — models trained with deliberately consistent digit tokenization measurably improve on arithmetic."
+    },
+    {
+      "q": "You need to add a new low-resource language to an existing production LLM. What tokenizer-related risks would you flag, and what are your options?",
+      "a": "- **Risk:** the current vocabulary likely has poor coverage of that language, so it decomposes into many small tokens (high fertility) — higher inference cost, less effective context, and capacity spent assembling subwords instead of reasoning.\n- **Option 1:** ship as-is if traffic volume for that language is low — accept the cost.\n- **Option 2:** extend the vocabulary with new merges/tokens, resize the embedding/output matrices, and fine-tune — cheaper than a full retrain, but needs careful init of the new rows and attention to tied input/output embeddings.\n- **Option 3:** full retrain with a rebalanced corpus and vocabulary if the language is a first-class target.\n- Flag that any vocabulary change alters model I/O shape — it requires coordinated serving/infra changes and can't be hot-swapped into a running production deployment."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "byte-pair-encoding",
+    "pretraining",
+    "token-embeddings",
+    "what-is-a-language-model"
+  ],
+  "followUps": [
+    "byte-pair-encoding",
+    "pretraining",
+    "token-embeddings"
+  ],
+  "metadata": {
+    "inputHash": "e9d71bd3c2c8c50e",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T13:10:02Z"
+  }
+}

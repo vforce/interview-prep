@@ -1,0 +1,97 @@
+{
+  "id": "notifications",
+  "title": "Notifications",
+  "definition": "An MCP notification is a JSON-RPC 2.0 message — sent by either client or server, carrying a `method` and optional `params` but no `id` — that pushes an event (progress, a log line, or a \"something changed\" signal) and by definition receives no response.",
+  "summary": "Notifications are the asynchronous, fire-and-forget half of MCP's messaging model, layered on top of the request/response mechanics from Lifecycle. They carry runtime events — `notifications/progress`, `notifications/message` (logs), and `*/list_changed` / `resources/updated` — whose availability was pre-agreed during capability negotiation (a server only sends `tools/list_changed` if it advertised `tools: {listChanged: true}`). Because they carry no `id` and get no acknowledgment, production systems must treat them as best-effort hints, not guaranteed events.",
+  "objectives": [
+    "Identify a notification vs. a request/response by the absence of the JSON-RPC `id` field.",
+    "Enumerate MCP's core notification types: progress, cancelled, logging (`message`), and `list_changed`/`updated` signals.",
+    "Trace how a request's `progressToken` (in `_meta`) correlates it to later `notifications/progress` messages.",
+    "Explain why notifications require no response, and what that means for delivery guarantees in production.",
+    "Connect capability negotiation (`listChanged`, `subscribe`) to which notifications a party is allowed to send."
+  ],
+  "lesson": "MCP layers a *push* channel on top of the request/response model from Lifecycle: a notification is a JSON-RPC 2.0 message with a `method` (and optional `params`) but **no `id`**. That missing `id` is the whole mechanism — it's what tells the receiver \"don't reply,\" and it's also why the sender never learns whether the message arrived. Either side can send them; MCP defines both client→server and server→client notification types.\n\nThe three families to know:\n- **Progress** — `notifications/progress`, correlated to a specific in-flight request via a `progressToken` the *caller* supplied in that request's `params._meta`. Zero or more of these can arrive before the real (id-matched) response.\n- **Logging** — `notifications/message`, structured log lines (`level`, `logger`, `data`) the server streams to the client.\n- **Change signals** — `*/list_changed` (tools/resources/prompts changed as a set) and `resources/updated` (one *subscribed* resource's content changed). These exist only if the corresponding party advertised support during capability negotiation: a server that didn't declare `tools: {listChanged: true}` in `initialize` shouldn't send `notifications/tools/list_changed`, and a client shouldn't expect one.\n\n**Worked example.** A server dynamically loads a new tool after a config reload. It doesn't describe *what* changed — the notification's payload is empty. It just fires `notifications/tools/list_changed`, and a well-behaved client responds by re-issuing a plain `tools/list` request to refresh its cache. The notification is a doorbell, not a delivery.\n\n**The key gotcha:** two things get conflated constantly. `resources/list_changed` (\"the *set* of resources changed — go re-list\") is gated by the `listChanged` capability. `resources/updated` (\"*this one* subscribed resource's content changed\") is gated by a separate `subscribe` capability and only fires for URIs the client explicitly subscribed to. A server can support one without the other, and mixing them up means either missing content updates or drowning in irrelevant list refreshes.\n\nThe production consequence of \"no `id`, no response\": notifications are best-effort. Nothing in the protocol retries them, and depending on transport (an SSE stream can drop mid-reconnect) delivery isn't guaranteed. Treat every notification as a hint to reconcile, never as the system of record.",
+  "examples": "**1. The message sequence for a progress-reporting tool call:**\n\n```python\n# Client's request — note the \"id\" and the progress token it's opting into\n{\n    \"jsonrpc\": \"2.0\",\n    \"id\": 42,\n    \"method\": \"tools/call\",\n    \"params\": {\n        \"name\": \"reindex_corpus\",\n        \"arguments\": {\"path\": \"/data\"},\n        \"_meta\": {\"progressToken\": \"reindex-42\"},\n    },\n}\n\n# Server streams these while the call is still pending — no \"id\",\n# so the client must not (and cannot) reply to them\n{\"jsonrpc\": \"2.0\", \"method\": \"notifications/progress\",\n \"params\": {\"progressToken\": \"reindex-42\", \"progress\": 30, \"total\": 120}}\n{\"jsonrpc\": \"2.0\", \"method\": \"notifications/progress\",\n \"params\": {\"progressToken\": \"reindex-42\", \"progress\": 120, \"total\": 120}}\n\n# Only then does the actual response to id=42 arrive\n{\"jsonrpc\": \"2.0\", \"id\": 42,\n \"result\": {\"content\": [{\"type\": \"text\", \"text\": \"reindexed 120 docs\"}]}}\n```\n\n**2. Producing that progress from a Python MCP server (FastMCP):**\n\n```python\nfrom mcp.server.fastmcp import FastMCP, Context\n\nmcp = FastMCP(\"indexer\")\n\n@mcp.tool()\nasync def reindex_corpus(path: str, ctx: Context) -> str:\n    docs = list_docs(path)\n    for i, doc in enumerate(docs, start=1):\n        embed_and_store(doc)\n        await ctx.report_progress(progress=i, total=len(docs))  # -> notifications/progress\n    return f\"reindexed {len(docs)} docs\"\n```\n\nIf the incoming call had no `progressToken`, there's nothing to correlate an update to — a well-behaved server just skips sending it.",
+  "tradeoffs": "Notifications trade guaranteed delivery for low overhead: no round trip, no blocking on a response, no risk of a slow receiver stalling the sender. Use them for advisory, streamable signals — progress, logs, \"something changed\" hints — where an occasional missed message is tolerable and the receiver can reconcile (re-list, re-fetch) when it matters. Avoid them for anything that must be reliably observed or drives control flow — tool results, approvals, errors — model those as requests instead. Also debounce high-churn `list_changed` firing rather than emitting one per tiny change, since each triggers a client-side re-list round trip, and remember transport shapes reliability: a single stdio pipe preserves ordering, but an HTTP/SSE transport can drop a notification across a reconnect.",
+  "diagnosticQuiz": [
+    {
+      "q": "What actually makes a JSON-RPC message in MCP a *notification* rather than a request?",
+      "choices": [
+        "Its `method` name starts with `notifications/`",
+        "It includes `\"type\": \"notification\"` in its params",
+        "It is sent over a dedicated notification-only connection",
+        "It omits the `id` field entirely"
+      ],
+      "answer": 3,
+      "explanation": "Per JSON-RPC 2.0, a message is a notification purely because it has no `id` — that's what tells the receiver not to send a response. The `notifications/` prefix is just MCP's naming convention for readability, not what any parser checks; there's no separate `\"type\"` field or transport-level channel distinguishing them."
+    },
+    {
+      "q": "A tool calls `ctx.report_progress(progress=i, total=250)` once per item inside a 250-item loop. When `i == 100`, what does that specific `notifications/progress` message contain?",
+      "choices": [
+        "`{\"progress\": 40, \"total\": 100}`",
+        "`{\"progress\": 100, \"total\": None}`",
+        "`{\"progress\": 0.4, \"total\": 1}`",
+        "`{\"progress\": 100, \"total\": 250}`"
+      ],
+      "answer": 3,
+      "explanation": "`progress` and `total` are passed through as raw numbers — the spec only requires `progress` to increase across successive notifications for the same token, not that the pair be normalized into a fraction or percentage. B and D assume the protocol enforces a 0–1 or 0–100 scale; it doesn't — the *receiver* computes a percentage from `progress/total` if it wants one."
+    },
+    {
+      "q": "Why is it risky for a production client to treat `notifications/tools/list_changed` as its only signal that a tool cache is stale?",
+      "choices": [
+        "Because the notification is rate-limited to once per minute",
+        "Because the method name is deprecated in favor of polling",
+        "Because `list_changed` only fires for resources, never for tools",
+        "Because notifications are best-effort with no delivery or ordering guarantee, so one can simply be lost"
+      ],
+      "answer": 3,
+      "explanation": "Notifications have no `id`, so there's no response, no ack, and nothing in the protocol retries a dropped one — a reconnecting SSE stream, for instance, can lose one sent while disconnected. A robust client treats the notification as a hint to refresh and backstops it with periodic or on-reconnect re-listing rather than trusting the event alone."
+    },
+    {
+      "q": "Which of these should be modeled as a notification rather than a request/response in an MCP implementation?",
+      "choices": [
+        "Listing the currently available resources",
+        "Reporting the 40%-complete mark of a long-running tool call",
+        "Asking the client to approve a sampling request",
+        "Returning the final result of a tool call"
+      ],
+      "answer": 1,
+      "explanation": "An intermediate progress update is inherently one-way and isn't meant to carry a reply, which is exactly what a notification is for. The other three all require a correlated response (a result, an approval/completion, or a list payload), so they must be modeled as requests."
+    },
+    {
+      "q": "During `initialize`, a server's capabilities declared `resources: {subscribe: true}` but omitted `listChanged`. At runtime it sends `notifications/resources/list_changed`. What's wrong?",
+      "choices": [
+        "The server is sending a notification type it never advertised, so a client following the negotiated contract may ignore it or have no handler for it",
+        "Servers are not allowed to send any notifications after initialize",
+        "The notification should have been `resources/updated` instead",
+        "Nothing — `subscribe` implies `listChanged` is also supported"
+      ],
+      "answer": 0,
+      "explanation": "`subscribe` and `listChanged` are independent capability flags — one governs per-resource `resources/updated` after an explicit subscription, the other governs whole-list `resources/list_changed`. Declaring only `subscribe` means the client has no obligation to listen for `list_changed`, so sending it breaks the contract capability negotiation exists to establish."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "In MCP, why can't a client detect that it missed a `tools/list_changed` notification, and how would you make a production integration robust to that?",
+      "a": "Notifications have no `id`, so there's no response defined — no ack, no retry channel — and depending on transport (e.g. an SSE reconnect) delivery isn't guaranteed. Production fix: treat the notification purely as a \"maybe stale, go check\" hint, not a guarantee of *when* things changed. Periodically re-call `tools/list` on a timer or on reconnect/session-resume, hash or version the list so a no-op refresh is cheap, and log/metric notification receipt so silent drift is observable."
+    },
+    {
+      "q": "Walk through the full message sequence for a long-running tool call that reports progress, and what has to be true beforehand.",
+      "a": "Client sends a `tools/call` request with an `id` and a `progressToken` in `params._meta`. While executing, the server emits zero or more `notifications/progress` messages (`{progressToken, progress, total?}`) — same token, monotonically increasing `progress`, no `id`. When done, the server sends the real response correlated by the original `id`. Precondition: the client must have supplied the token — a server has no business tracking progress nobody asked for. Note this is per-request opt-in, unlike `listChanged`, which is negotiated once, globally, at `initialize`."
+    },
+    {
+      "q": "A client hangs after calling a tool, and logs show a `notifications/progress` message with `id: null` explicitly present. What's the bug and where is it?",
+      "a": "The dispatcher is likely treating every inbound message as a request/response pair and trying to match it against a pending-call map by `id`. A real notification has no `id` key at all — a spec-compliant sender never includes one — so a literal `\"id\": null` on the wire points to a bug in the *sender* (probably a serializer that always emits the field). The fix is in the receiver's dispatcher: check for \"no `id` present\" (treating an explicit `null` the same way) and route to a fire-and-forget handler, not the pending-request map, or it'll wait forever for a response that's never coming."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "lifecycle-and-capability-negotiation"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "61bdc1e2d9bfa8ac",
+    "model": "sonnet",
+    "generatedAt": "2026-07-06T07:19:14Z"
+  }
+}

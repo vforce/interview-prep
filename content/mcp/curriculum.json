@@ -1,0 +1,212 @@
+{
+  "concepts": [
+    {
+      "id": "what-is-mcp",
+      "title": "What Is MCP",
+      "order": 1,
+      "difficulty": "Beginner",
+      "keyPoints": [
+        "Open standard: JSON-RPC 2.0 protocol linking AI hosts to external tools/data",
+        "Solves the M×N integration problem — turns it into M+N",
+        "Host embeds one client per server (stdio or HTTP transport)",
+        "Servers expose tools (model-picks), resources (app-picks), prompts (user-picks)",
+        "Gotcha: standardizes wiring, not tool quality — vague schemas still hurt accuracy"
+      ]
+    },
+    {
+      "id": "host-client-and-server",
+      "title": "Host, Client, and Server",
+      "order": 2,
+      "difficulty": "Intermediate",
+      "keyPoints": [
+        "Host = LLM-facing app (Claude Desktop/Code); owns conversation, UX, consent",
+        "Client = per-Server protocol object, not the LLM; 1:1 stateful JSON-RPC session",
+        "Server = isolated process (stdio local / HTTP remote) exposing tools/resources/prompts",
+        "Call flow: LLM picks tool → Host routes to owning Client → Client→Server via private transport → back up",
+        "Gotcha: only the Host sees across servers — isolation prevents one compromised server from touching another's credentials"
+      ]
+    },
+    {
+      "id": "data-and-transport-layers",
+      "title": "Data and Transport Layers",
+      "order": 3,
+      "difficulty": "Intermediate",
+      "keyPoints": [
+        "Data layer: JSON-RPC 2.0 contract — requests, responses, notifications",
+        "Transport layer: stdio or Streamable HTTP — how bytes physically move",
+        "Same tool/resource/prompt code; transport is just a deploy-time switch",
+        "stdio gotcha: stdout is the wire — stray prints corrupt the stream",
+        "HTTP gotcha: pin sessions via Mcp-Session-Id or lose state on scale-out"
+      ]
+    },
+    {
+      "id": "json-rpc-2-0-messaging",
+      "title": "JSON-RPC 2.0 Messaging",
+      "order": 4,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "JSON-RPC 2.0 is MCP's wire format for every client↔server exchange",
+        "Three envelope types share \"jsonrpc\":\"2.0\" — request, response, notification",
+        "Notifications omit `id` and expect no reply (progress, cancelled, list_changed)",
+        "Each request `id` gets exactly one response: `result` or `error`, never both",
+        "Tool failures aren't JSON-RPC errors — return success with `isError:true` in result"
+      ]
+    },
+    {
+      "id": "transports-stdio-vs-streamable-http",
+      "title": "Transports: stdio vs Streamable HTTP",
+      "order": 5,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Same JSON-RPC 2.0 data layer, different physical transport",
+        "stdio: client spawns server subprocess, pipes over stdin/stdout",
+        "stdio is 1:1 same-machine, no network/auth needed",
+        "Streamable HTTP: POST endpoint, optional SSE upgrade for streaming, session IDs via Mcp-Session-Id",
+        "Gotcha: stdio server must log to stderr, never stdout"
+      ]
+    },
+    {
+      "id": "lifecycle-and-capability-negotiation",
+      "title": "Lifecycle and Capability Negotiation",
+      "order": 6,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Handshake: independently-versioned MCP client & server agree on version + capabilities",
+        "Phase 1: `initialize` request/response, then client sends `initialized` notification",
+        "Version negotiation = one round trip: client proposes newest, server counters",
+        "Capabilities nested: missing key = unsupported; empty object = base-only, no sub-features",
+        "Gotcha: don't call methods pre-`initialized` or via undeclared sub-capabilities"
+      ]
+    },
+    {
+      "id": "security-and-authorization",
+      "title": "Security and Authorization",
+      "order": 7,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "HTTP transport = OAuth 2.1 resource server; stdio = OS process boundary, no handshake",
+        "401 + WWW-Authenticate points client to Protected Resource Metadata (RFC 9728)",
+        "Client then runs Authorization Code + PKCE, token audienced to this MCP server (RFC 8707)",
+        "Server must validate `aud` claim on every request, not just signature/expiry",
+        "Token passthrough (forwarding an unaudienced bearer token) = confused-deputy vulnerability"
+      ]
+    },
+    {
+      "id": "notifications",
+      "title": "Notifications",
+      "order": 8,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "JSON-RPC message with `method`, no `id`, no response",
+        "Either client or server can send a notification",
+        "Types: progress, logging (`notifications/message`), `list_changed`, `resources/updated`",
+        "Change/log notifications require prior capability negotiation (e.g. `listChanged`)",
+        "Best-effort only — no ack, no retries, delivery not guaranteed"
+      ]
+    },
+    {
+      "id": "prompts",
+      "title": "Prompts",
+      "order": 9,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Named server-defined message template, selected explicitly by the user, not the model",
+        "Discovered via prompts/list, rendered to chat messages via prompts/get",
+        "Server returns finished role/content messages, spliced straight into the conversation",
+        "Can seed multi-turn scaffolds — one call returns several messages (e.g. user + canned assistant reply)",
+        "Gotcha: arguments are untyped strings (no inputSchema) and the model can never auto-invoke prompts/get"
+      ]
+    },
+    {
+      "id": "resources",
+      "title": "Resources",
+      "order": 10,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Read-only, URI-addressable data (file/record/log/schema) via resources/read",
+        "Application-controlled — host decides what to attach, not the model",
+        "Static via resources/list; parameterized via resources/templates/list (RFC 6570)",
+        "Read returns text OR blob (base64, ~33% size tax), never both",
+        "Model can't pull resources itself — needs a Tool wrapping the fetch"
+      ]
+    },
+    {
+      "id": "roots-and-logging",
+      "title": "Roots and Logging",
+      "order": 11,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Roots: client-advertised file:// URIs marking directories a server may operate in",
+        "Server calls roots/list; re-lists on notifications/roots/list_changed as workspace changes",
+        "Logging: client sets minimum severity via logging/setLevel (RFC 5424: debug→emergency)",
+        "Server emits notifications/message at/above that level instead of stdout prints",
+        "Gotcha: roots are advisory only — server must independently validate/prefix-check every path"
+      ]
+    },
+    {
+      "id": "tools",
+      "title": "Tools",
+      "order": 12,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Named, JSON-Schema-typed function: listed via tools/list, executed via tools/call",
+        "Model-controlled — LLM itself decides when to call it, picks arguments",
+        "Round trip: tools/list → model emits args → tools/call → {content, isError?}",
+        "Domain failure → isError:true (retryable); malformed call → JSON-RPC protocol error",
+        "Tool text is untrusted — enables poisoning/rug-pulls; confirm destructive actions with humans"
+      ]
+    },
+    {
+      "id": "building-an-mcp-server",
+      "title": "Building an MCP Server",
+      "order": 13,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Thin JSON-RPC 2.0 shim exposing tools/resources/prompts — not a web app with routes",
+        "Initialize handshake: client/server exchange capabilities before any tool/resource call",
+        "FastMCP decorators infer JSON Schema from type hints; low-level Server API builds responses by hand",
+        "stdio gotcha: stdout is the wire — a stray print() breaks the client's parser",
+        "Tool failure ≠ protocol error: raise → FastMCP converts to CallToolResult{isError:true}, not a JSON-RPC error"
+      ]
+    },
+    {
+      "id": "mcp-vs-alternatives",
+      "title": "MCP vs Alternatives",
+      "order": 14,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "M×N tool integrations → M+N via one standard protocol (like LSP)",
+        "Client-server pair: JSON-RPC over stdio (local) or HTTP/SSE (remote)",
+        "Server exposes tools (actions), resources (read context), prompts (templates)",
+        "Still bottoms out in the same function-calling primitive underneath",
+        "Worth it once ≥2 consumers share a capability; else pure overhead"
+      ]
+    },
+    {
+      "id": "sampling",
+      "title": "Sampling",
+      "order": 15,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Server-to-client request (`sampling/createMessage`) asking client to run an LLM completion",
+        "Reverses normal MCP direction — every other primitive is client-initiated",
+        "Client picks the model and holds credentials; server never sees an API key",
+        "Per spec, human reviews both the outgoing request and the returned completion",
+        "Optional capability negotiated at `initialize` — server must check and have a fallback"
+      ]
+    },
+    {
+      "id": "elicitation",
+      "title": "Elicitation",
+      "order": 16,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Server pauses mid-request, asks client's human for one fact via elicitation/create",
+        "Server sends message + flat JSON-schema; client renders a form",
+        "Client replies accept/decline/cancel plus data matching schema",
+        "Schema must be flat primitives only — no nested objects or arrays",
+        "Never elicit sensitive data (passwords, keys) — server could phish via trusted-looking form"
+      ]
+    }
+  ]
+}

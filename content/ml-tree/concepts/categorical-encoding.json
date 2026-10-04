@@ -1,0 +1,97 @@
+{
+  "id": "categorical-encoding",
+  "title": "Categorical Encoding",
+  "definition": "Categorical encoding is the process of converting non-numeric categorical variables into numeric representations that a model can consume, chosen to preserve task-relevant signal without introducing false structure or leaking the target.",
+  "summary": "Most models — linear, neural, and (less obviously) tree-based — require numeric input, so categorical features like `city` or `browser` must be transformed before training. The right choice depends on cardinality, model family, and production constraints like unseen categories at serving time. Getting it wrong is a frequent real-world source of leakage, train/serve skew, and memory blowup.",
+  "objectives": [
+    "Explain why raw categorical strings can't feed most models, and what \"cardinality\" means for encoding choice.",
+    "Compare one-hot, ordinal, target/mean, and hashing encodings on dimensionality, leakage risk, and unseen-category handling.",
+    "Implement target encoding with out-of-fold cross-fitting to avoid leakage.",
+    "Choose an encoding strategy suited to the model family (linear/NN vs. tree ensembles) and production constraints (streaming IDs, cold-start categories).",
+    "Diagnose leakage and train/serve skew caused by encoding."
+  ],
+  "lesson": "Most models — linear/logistic regression, SVMs, neural nets, and even tree ensembles under the hood — need numeric input. A column like `browser = {\"Chrome\", \"Safari\", \"Firefox\"}` has no numeric meaning until encoded. The two failure modes to avoid: (1) implying an order/distance that doesn't exist, and (2) blowing up dimensionality.\n\n**Ordinal encoding** (Chrome=0, Safari=1, Firefox=2) is compact but tells a linear model \"Firefox is 2x Safari\" — nonsense for nominal categories. Tree models tolerate it better (they only compare thresholds), but an arbitrary order can still force extra, less-efficient splits to isolate one category.\n\n**One-hot encoding** removes the false order — each category gets its own 0/1 column — and is the safe default for low cardinality (roughly <20–50 levels). It doesn't generalize: a 100K-level `user_id` column produces 100K sparse columns, which most models handle poorly and which force trees to waste splits isolating single rare levels.\n\n**Target (mean) encoding** solves high cardinality by replacing each category with a statistic of the target for that category, giving one dense, informative column regardless of cardinality. This is the standard high-cardinality choice for GBMs.\n\nWorked example: predicting click-through by `city`. `\"Springfield\"` has n=4 rows, mean y=0.75, vs. a global mean of 0.20, smoothed with strength m=6:\n\n```\nencoded = (n * mean_city + m * global_mean) / (n + m)\n        = (4*0.75 + 6*0.20) / (4+6) = 0.42\n```\n\nSmoothing pulls rare categories toward the global mean instead of trusting a noisy small sample.\n\n**The key gotcha: leakage.** If a category's mean target is computed from the same rows you're about to encode (including the row itself), the label leaks into the feature — a singleton category's \"encoding\" is just its own label, so the model cheats during training but can't reproduce that at serving time or on held-out data. Fix: compute encodings on out-of-fold data only (K-fold or leave-one-out), never in one pass over the full training set — and always define a fallback (global mean) for categories unseen at inference, since production traffic will have them.",
+  "examples": "**1. One-hot with an explicit unseen-category fallback:**\n\n```python\nfrom sklearn.preprocessing import OneHotEncoder\n\nenc = OneHotEncoder(handle_unknown=\"ignore\")  # unseen category -> all-zero row, no crash\nX_train = enc.fit_transform(train[[\"browser\"]])\nX_test = enc.transform(test[[\"browser\"]])\n```\n\n**2. Leakage-safe target encoding via K-fold cross-fitting:**\n\n```python\nimport numpy as np\nfrom sklearn.model_selection import KFold\n\ndef kfold_target_encode(train, col, target, n_splits=5, smoothing=10):\n    global_mean = train[target].mean()\n    oof = np.zeros(len(train))\n    kf = KFold(n_splits=n_splits, shuffle=True, random_state=0)\n    for tr_idx, val_idx in kf.split(train):\n        stats = train.iloc[tr_idx].groupby(col)[target].agg([\"mean\", \"count\"])\n        smooth = (stats[\"count\"] * stats[\"mean\"] + smoothing * global_mean) / (stats[\"count\"] + smoothing)\n        oof[val_idx] = train.iloc[val_idx][col].map(smooth).fillna(global_mean)\n    return oof, global_mean\n\n# At inference: re-fit `smooth` on the FULL train set, map test categories through it,\n# and fall back to global_mean for any category never seen in training.\n```",
+  "tradeoffs": "One-hot is safe and leak-free but only scales to low/medium cardinality. Ordinal is compact but implies false order — acceptable mainly for genuinely ordinal features (e.g., education level), not nominal ones. Target/mean encoding scales to arbitrary cardinality and is the GBM default, but requires disciplined out-of-fold cross-fitting or it silently overfits, and it's sensitive to target drift over time. Hashing gives bounded memory and handles unseen/streaming categories natively, at the cost of collisions and losing interpretability. Frequency/count encoding is cheap and leak-free but only useful if frequency itself correlates with the target. For deep nets, learned embeddings beat one-hot at high cardinality but need enough data per category and a defined cold-start vector. In practice: low cardinality → one-hot; high-cardinality nominal for GBMs → native categorical support (CatBoost/LightGBM) or CV'd target encoding; high-cardinality for NNs → embeddings; unbounded/streaming IDs → hashing.",
+  "diagnosticQuiz": [
+    {
+      "q": "Which best defines categorical encoding?",
+      "choices": [
+        "Removing categorical features before training",
+        "Converting categorical variables into numeric representations a model can use",
+        "Normalizing numeric features to zero mean and unit variance",
+        "Converting numeric features into binned categories"
+      ],
+      "answer": 1,
+      "explanation": "Encoding is specifically the categorical→numeric direction. The best distractor (binning numeric into categories) is the reverse transformation (discretization), a common source of terminology mix-ups; standardization and feature-dropping are unrelated preprocessing steps."
+    },
+    {
+      "q": "A category has n=4 rows with mean target 0.75. The global mean target is 0.20 and the smoothing strength is m=6. Using `encoded = (n*mean_c + m*global_mean) / (n+m)`, what is the encoded value?",
+      "choices": [
+        "0.475",
+        "0.75",
+        "0.42",
+        "0.30"
+      ],
+      "answer": 2,
+      "explanation": "(4×0.75 + 6×0.20) / (4+6) = (3.0+1.2)/10 = 0.42. The 0.475 distractor comes from naively averaging mean_c and global_mean without weighting by count; 0.30 comes from weighting mean_c by n/(n+m) but forgetting to add the global-mean term; 0.75 is just the raw, unsmoothed category mean."
+    },
+    {
+      "q": "Why can plain ordinal encoding of a nominal (unordered) categorical feature hurt a linear or distance-based model?",
+      "choices": [
+        "It creates a sparse matrix that wastes memory",
+        "It leaks target information into the feature",
+        "It cannot represent more than two categories",
+        "It imposes an arbitrary numeric order/distance between categories that the model treats as meaningful"
+      ],
+      "answer": 3,
+      "explanation": "A linear model's weight scales with numeric magnitude, and distance-based models compute literal distances, so coding \"red=1, green=2, blue=3\" implies blue is 3× red — meaningless for nominal data. The sparse-memory distractor actually describes one-hot's downside, not ordinal's, and target-leakage describes a target-encoding failure mode instead."
+    },
+    {
+      "q": "You're training a LightGBM/CatBoost model on a nominal feature with ~50,000 unique values (e.g., `merchant_id`). What's generally the best first approach?",
+      "choices": [
+        "Ordinal-encode alphabetically and treat it as continuous",
+        "One-hot encode all 50,000 levels",
+        "Drop the feature since cardinality is too high",
+        "Use the library's native categorical handling or a leakage-safe target encoding"
+      ],
+      "answer": 3,
+      "explanation": "CatBoost and LightGBM have native categorical support (ordered target statistics / optimal category partitioning) built for exactly this case; CV'd target encoding is the manual equivalent. One-hot would produce 50K sparse columns and degrade split quality and memory; dropping discards real signal; alphabetical ordinal encoding is an arbitrary order mistaken for harmless — a very common real-world mistake at scale."
+    },
+    {
+      "q": "What is the most common mistake when implementing target/mean encoding that causes data leakage?",
+      "choices": [
+        "Computing a row's encoded value from statistics that include that row's own label, instead of out-of-fold/held-out statistics",
+        "Fitting the encoder on train and test data combined, before splitting",
+        "Combining target encoding with one-hot encoding for the same column",
+        "Using too small a smoothing weight, m"
+      ],
+      "answer": 0,
+      "explanation": "The defining leakage mechanism in target encoding is that a category's own label(s) feed into its own encoded value, so the feature partially memorizes the training label — something the model can't reproduce at inference. The fix is K-fold or leave-one-out cross-fitting within training. Option D is a real but more general leakage bug (mixing train/test before any preprocessing) that applies to all features, not something unique to target encoding, which is what makes it a tempting but distinct distractor."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "You need to encode a high-cardinality categorical feature (e.g., 200K user IDs) for a production gradient-boosted model serving real-time predictions. Walk through your approach and the production risks you'd address.",
+      "a": "Avoid one-hot — 200K sparse columns hurt memory, latency, and split quality. Use out-of-fold target/frequency encoding during training, or lean on CatBoost/LightGBM's native categorical handling. At serving time, persist the encoding map in the feature store or model artifact, with an explicit fallback (global mean / \"unknown\" bucket) for IDs unseen in training. Monitor for encoding-map staleness (new users appear constantly), feature drift, and train/serve skew if the online encoding path diverges from the offline training pipeline. If cardinality is effectively unbounded and the map can't be refreshed cheaply, consider hashing instead."
+    },
+    {
+      "q": "Explain target leakage in target encoding and how you'd prevent it in a training pipeline.",
+      "a": "Leakage happens when a category's encoded value is computed using the same row(s) it's then used to predict — the row's own label bleeds into its feature, so the model fits noise that won't generalize, especially for low-count categories. Prevent it with K-fold or leave-one-out cross-fitting: compute each fold's encoding from the *other* folds only, and apply smoothing toward the global mean for low-count categories. As a sanity check, verify the encoded feature alone doesn't achieve suspiciously high standalone AUC, and confirm CV and holdout performance track each other without a large gap."
+    },
+    {
+      "q": "One-hot vs. learned embeddings for categorical features in a deep learning production model — how do you decide, and what's the operational cost of each?",
+      "a": "One-hot is fine for low cardinality (roughly <20–50 levels): no extra training, fully interpretable, but it can't share structure across categories and is unusable at high cardinality. Embeddings scale to high-cardinality IDs (users, items), learn similarity structure jointly with the task, and are effectively required for large-vocabulary features. The cost is operational: categories need enough examples to learn a good vector, cold-start requires a default embedding row for unseen IDs, and the embedding table itself needs versioning and periodic retraining as the vocabulary grows — more moving parts than a static one-hot scheme."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "supervised-learning-basics"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "310d28f82a0d2cf0",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T09:59:16Z"
+  }
+}

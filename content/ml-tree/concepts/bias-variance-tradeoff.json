@@ -1,0 +1,103 @@
+{
+  "id": "bias-variance-tradeoff",
+  "title": "Bias-Variance Tradeoff",
+  "definition": "The bias–variance tradeoff is the decomposition of a model's expected squared prediction error into bias² (systematic error from a model class too simple for the true function), variance (how much predictions swing with the particular training sample), and irreducible noise — where increasing model complexity generally trades one for the other.",
+  "summary": "For squared-error regression, expected test error at a point decomposes exactly as Bias² + Variance + irreducible noise (σ²): simple models underfit (high bias, low variance), complex models overfit (low bias, high variance). The practical goal is choosing capacity — and levers like regularization, ensembling, and data volume — to minimize the *sum*, not to drive either term to zero.",
+  "objectives": [
+    "State and apply the bias/variance/noise decomposition of expected squared error.",
+    "Diagnose underfitting vs. overfitting from train/validation error curves, not from a single number.",
+    "Pick the right lever (regularization, more data, ensembling, added capacity) for the regime you're actually in.",
+    "Know why more data fixes variance but not bias, and why the decomposition doesn't cleanly transfer to 0/1 loss."
+  ],
+  "lesson": "**Intuition.** Imagine shooting arrows at a target across many independent training runs. Bias is how far the *average* arrow lands from the bullseye — a systematic miss caused by a model class that's structurally too simple (e.g., a line fit to a curve). Variance is how spread out the arrows are around wherever they average to — sensitivity to exactly which training sample you happened to draw. A high-bias model is consistently wrong the same way; a high-variance model is right on average but wildly inconsistent run to run.\n\n**Formal decomposition.** For squared-error loss, at a fixed test point x with true value y = f(x) + ε (noise variance σ²), over the randomness of the training set:\n\n```\nE[(y - f̂(x))²] = (E[f̂(x)] - f(x))²  +  Var[f̂(x)]  +  σ²\n                =        Bias²        +   Variance   + irreducible noise\n```\n\nA degree-1 polynomial on curved data: every resample gives nearly the same (wrong) line → high bias², tiny variance. A degree-15 polynomial on 30 noisy points: each resample threads a wildly different curve through the noise → low bias² near the data, large variance (worst near the edges, where support is thin).\n\n**The key gotcha.** More training data shrinks variance (roughly toward Var/n) but does *nothing* for bias — a linear model fit on a billion rows of quadratic data is still a line. This is the most common production misdiagnosis: a team sees a plateaued, underfitting model and responds by collecting more data, then is confused when nothing moves. The fix there is capacity, features, or less regularization — not rows. The mirror-image mistake is adding capacity to a model that's already overfitting, which only makes variance worse. You can't tell which regime you're in from one error number; you need the train/validation gap or a learning curve.\n\n**Caveat.** This exact additive form holds for squared-error/regression. For 0/1 loss (classification), bias and variance interact non-additively, and variance can occasionally *help* near a decision boundary — but the qualitative story (simple → systematic error, complex → sample sensitivity) still transfers and is what interviewers expect you to reason with.",
+  "examples": "**1. Observing the decomposition via resampling** (bias/variance require multiple training sets, so you simulate them):\n\n```python\nimport numpy as np\nfrom sklearn.linear_model import LinearRegression\nfrom sklearn.pipeline import make_pipeline\nfrom sklearn.preprocessing import PolynomialFeatures\n\nrng = np.random.default_rng(0)\nx_grid = np.linspace(-3, 3, 200)\nf_true = 0.5 * x_grid**2\n\ndef draw_sample(n=30):\n    x = rng.uniform(-3, 3, n)\n    y = 0.5 * x**2 + rng.normal(0, 1, n)\n    return x.reshape(-1, 1), y\n\npreds = {\"deg1\": [], \"deg15\": []}\nfor _ in range(200):\n    X, y = draw_sample()\n    preds[\"deg1\"].append(LinearRegression().fit(X, y).predict(x_grid.reshape(-1, 1)))\n    m15 = make_pipeline(PolynomialFeatures(15), LinearRegression()).fit(X, y)\n    preds[\"deg15\"].append(m15.predict(x_grid.reshape(-1, 1)))\n\nfor name, arr in preds.items():\n    arr = np.array(arr)\n    bias_sq = (arr.mean(axis=0) - f_true) ** 2\n    var = arr.var(axis=0)\n    print(name, \"bias^2≈\", round(bias_sq.mean(), 2), \"var≈\", round(var.mean(), 2))\n\n# illustrative pattern (exact numbers depend on seed/noise):\n# deg1   bias^2≈1.8   var≈0.03   -> underfits: consistent, barely moves across resamples\n# deg15  bias^2≈0.06  var≈1.6    -> overfits: ~unbiased near data, unstable across resamples\n```\n\n**2. Production lever — bagging reduces variance, not bias.** A single unpruned tree has ~0 bias but high variance. Averaging B trees trained on bootstrap resamples:\n\n```\nVar(mean of B trees) = ρ·σ²  +  (1 − ρ)/B · σ²\n```\n\nwhere σ² is one tree's variance and ρ is the pairwise correlation between trees. As B → ∞, variance floors at ρ·σ² — which is why random forests also randomly subsample features per split (to lower ρ) rather than just adding more trees.",
+  "tradeoffs": "Reduce **variance** when train error is low but validation error is high (big gap): regularize (L1/L2, dropout, early stopping), bag/ensemble, prune, or collect more data — variance shrinks with n, bias doesn't. Reduce **bias** when train and validation error are both high and close together: add capacity (depth/width/degree), add features, cut regularization, or move to a stronger model family (e.g., boosting). In production, don't chase lower bias for free — a bigger/lower-bias model usually costs more at serving time, so you sometimes deliberately trade a little bias back in via distillation or pruning for latency; that's still bias-variance reasoning, just against a cost-adjusted objective. Don't over-trust the exact additive formula outside squared-error regression — for classification/ranking, diagnose with learning curves and train/val gaps rather than assuming the decomposition holds exactly.",
+  "diagnosticQuiz": [
+    {
+      "q": "What does the \"bias\" term in the bias-variance decomposition actually measure?",
+      "choices": [
+        "The variance of the training labels around their mean",
+        "The difference between the model's average prediction (over many training sets) and the true function",
+        "How much predictions change when the model is retrained on a different sample",
+        "The irreducible noise in the data-generating process"
+      ],
+      "answer": 1,
+      "explanation": "Bias = E[f̂(x)] − f(x): the systematic error of the *average* prediction from the truth. Option C describes variance, and option D describes irreducible noise — both are commonly confused with bias but capture sample-to-sample instability or label noise, not systematic miss."
+    },
+    {
+      "q": "A model's predictions, over many retrainings at one test point, have mean 12 and variance 4. The true value is 10, and irreducible noise variance is 1. What is the expected squared test error there?",
+      "choices": [
+        "7",
+        "9",
+        "8",
+        "5"
+      ],
+      "answer": 1,
+      "explanation": "Expected squared error = Bias² + Variance + noise = (12−10)² + 4 + 1 = 9. Forgetting the noise floor gives 8, and forgetting to square the bias (using 2 instead of 4) gives 7 — both slips silently discard error that's structurally unavoidable given this model and this label noise."
+    },
+    {
+      "q": "Which scenario is the clearest example of high variance, low bias?",
+      "choices": [
+        "A linear model fit to clearly nonlinear data gives similarly-wrong predictions no matter which sample it's trained on",
+        "A deep, unpruned decision tree trained on different bootstrap samples of the same data gives very different predictions at the same test point, even though each tree fits its own training data almost perfectly",
+        "A model's error stays exactly the same as the training set size grows without bound",
+        "A model's training error and validation error are both high and nearly equal"
+      ],
+      "answer": 1,
+      "explanation": "Different predictions across resamples despite each fit being locally accurate is exactly variance-with-low-bias. Option B is the textbook high-bias/low-variance case (consistently wrong the same way); C and D are both underfitting signatures — the opposite pattern."
+    },
+    {
+      "q": "In production, your model shows 2% training error and 24% validation error on the same metric. What should you try first?",
+      "choices": [
+        "Conclude the task has high irreducible noise and stop tuning",
+        "Add regularization (or gather more data / use bagging) to reduce variance",
+        "Increase model capacity — e.g., add layers or a higher-degree feature expansion",
+        "Train longer with regularization turned off"
+      ],
+      "answer": 1,
+      "explanation": "A large train/val gap with very low training error is the signature of overfitting (high variance), so the fix is regularization, more/better data, or ensembling. B and C add capacity and remove constraints — both widen the gap further; D blames noise for a diagnostic pattern noise alone can't produce."
+    },
+    {
+      "q": "A linear regression model has training and validation error that are both high and nearly identical, and 10x-ing the training set size moves neither. What's the right response?",
+      "choices": [
+        "This is irreducible noise; no modeling work can improve it",
+        "This is high bias — the model class is too simple for the signal; add features/capacity or relax regularization, since more data alone won't help",
+        "This is high variance; add regularization or gather even more data",
+        "This is overfitting, evidenced by train and validation error being close together"
+      ],
+      "answer": 1,
+      "explanation": "Bias doesn't shrink with sample size — only variance does — so a plateau that survives a 10x data increase is the underfitting/high-bias signature. The trap in option A is assuming \"more data\" always helps; it only helps variance. Close train/val errors (D) indicate low variance, which rules out overfitting rather than confirming it."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Your model has low training error but high validation error. Walk me through your diagnosis and production fix.",
+      "a": "Big train/val gap + low train error = high variance (overfitting), not a noise or data-quality issue. Fix roughly in order of cost: stronger regularization (L2/dropout/early stopping) → more or better training data → reduced capacity/features → bagging/ensembling to average down variance. Before touching the model, rule out train/val leakage or distribution shift, since those masquerade as variance problems. Confirm the diagnosis with a learning curve before committing to a full retrain."
+    },
+    {
+      "q": "How do you decide whether to spend budget on more data collection vs. a bigger model?",
+      "a": "Plot train and validation error vs. training set size. If validation error is still falling and the train/val gap is shrinking as n grows, you're variance-limited — more data will help. If both curves have plateaued at a high, similar error, you're bias-limited — more data won't move the needle, and the spend should go into features, capacity, or architecture instead. This one chart prevents the classic wasted spend of collecting more data for a model that's actually underfitting."
+    },
+    {
+      "q": "Why does bagging (e.g., random forests) reduce variance without increasing bias much — and what's the catch?",
+      "a": "Averaging B models trained on independent bootstrap samples leaves the expected prediction (bias) roughly unchanged, while `Var(mean) = ρσ² + (1−ρ)σ²/B`, where σ² is one tree's variance and ρ is the pairwise correlation between trees. More trees only help up to the ρσ² floor, which is why random forests also randomly subsample features per split — to lower ρ, not just to add more B. Catch: this assumes low-bias base learners (e.g., deep/unpruned trees); bagging high-bias learners just averages the same systematic error and barely helps."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "cross-validation",
+    "decision-trees",
+    "l1-and-l2-regularization",
+    "supervised-learning-basics"
+  ],
+  "followUps": [
+    "cross-validation",
+    "decision-trees",
+    "l1-and-l2-regularization"
+  ],
+  "metadata": {
+    "inputHash": "9fff3b87f28555f9",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T09:50:34Z"
+  }
+}

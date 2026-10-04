@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: trie
+fam: triebits
+label: Trie
+order: 19
+trigger: prefix queries, autocomplete, word dictionary
+insight: children dict + is_end flag; '.' wildcard recurses into all children
+probs:
+- {n: Implement Trie, slug: implement-trie-prefix-tree, d: M}
+- {n: Add and Search Words, slug: design-add-and-search-words-data-structure, d: M}
+- {n: Concatenated Words, slug: concatenated-words, d: H}

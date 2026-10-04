@@ -1,0 +1,34 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: pd_top_n
+type: kata
+area: Pandas
+order: 45
+title: Top-N rows per group (Pandas)
+prompt: Given a DataFrame with a 'group' column and a numeric 'score' column, return the top-n rows of each group by score (highest first), keeping all original columns.
+sig: 'def top_n(df, n):'
+stub: "import pandas as pd\n\ndef top_n(df, n):\n    \n    return out\n"
+reference: |
+  import pandas as pd
+
+  def top_n(df, n):
+      # Top-n per group = sort the WHOLE frame once, then take each group's first n rows.
+      #
+      # The key insight: .head(n) on a GroupBy is a FILTER, not an aggregation. It hands back
+      # the ORIGINAL rows — every column, original index intact — where .mean() would collapse
+      # each group to a single number. That's why this keeps 'item' along for the ride.
+      return (df.sort_values("score", ascending=False)   # DataFrame -> DataFrame, best score first
+                .groupby("group", sort=False)            # -> DataFrameGroupBy. sort=False: don't
+                                                         #    re-sort by group key; keep our order
+                .head(n))                                # -> DataFrame: first n rows OF EACH GROUP
+      # nlargest(n, "score") does top-n on a whole frame, but per group you want this pattern.
+test: |
+  import pandas as pd
+  df = pd.DataFrame({"group": ["a", "a", "a", "b", "b"],
+                     "score": [3, 1, 2, 5, 4],
+                     "item": list("vwxyz")})
+  out = top_n(df, 2)
+  assert len(out) == 4, len(out)                     # 2 per group
+  assert out[out.group == "a"].score.tolist() == [3, 2], out
+  assert out[out.group == "b"].score.tolist() == [5, 4], out
+  print("PASS - 3 checks")

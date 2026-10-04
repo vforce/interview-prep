@@ -1,0 +1,98 @@
+{
+  "id": "mqa-and-gqa",
+  "title": "MQA and GQA",
+  "definition": "Multi-Query Attention (MQA) has all query heads share a single key/value head, and Grouped-Query Attention (GQA) generalizes this by splitting query heads into groups that each share one key/value head — both shrink the KV cache (and its memory-bandwidth cost during decoding) relative to standard multi-head attention, at some cost in quality.",
+  "summary": "MQA and GQA reduce the size of the KV cache — the actual bottleneck in autoregressive LLM decoding — by having multiple query heads share fewer key/value heads. MQA collapses K/V to one shared head across all queries (max savings, more quality risk); GQA shares one K/V head per *group* of query heads, interpolating between MQA and full MHA. Both are memory/bandwidth optimizations, not big FLOPs savings, and are now standard in production models (Llama 2/3, Mistral, Gemma).",
+  "objectives": [
+    "Explain why MQA/GQA exist: KV-cache size and memory bandwidth bottleneck decoding, not attention FLOPs.",
+    "Compute KV-cache memory and its reduction factor from query-head count H to KV-head count H_kv.",
+    "Implement MHA, MQA, and GQA as one parameterized attention function.",
+    "Explain how GQA generalizes MHA (g=h) and MQA (g=1), and how to \"uptrain\" an MHA checkpoint into GQA.",
+    "Reason about the quality/memory tradeoff to justify a design choice in a serving context."
+  ],
+  "lesson": "In standard multi-head attention (MHA), each of the h heads has its own K and V projections. During autoregressive decoding you cache K/V for every past token, every head, every layer — and at each step you must load that entire cache from HBM just to generate one new token. Since you produce one token at a time, arithmetic intensity is low: decoding is memory-bandwidth bound, not compute bound. The KV cache, not the matmuls, is what's slow and what limits how many requests you can batch concurrently.\n\nMQA (Shazeer, 2019) attacks this directly: keep h query heads (representational capacity for \"what to attend to\" stays high) but collapse K and V down to a single shared head. Every query head attends against the same K/V. That's an h× reduction in KV-cache size and memory traffic — but forcing all heads through one K/V projection is a real capacity bottleneck, and on larger models it can cost noticeable quality.\n\nGQA (Ainslie et al., 2023) is the practical middle ground: split the h query heads into g groups (1 < g < h), each group sharing its own K/V head. g=1 recovers MQA; g=h recovers MHA. Llama 2 34B/70B, Llama 3, and Mistral 7B all use GQA with g=8 — enough KV-cache reduction (4-8x) to matter for serving, with quality close to full MHA.\n\nThink of g as a dial: turn it down and the cache shrinks (faster decode, more headroom for batch/context); turn it up toward h and quality recovers. You don't have to train GQA from scratch — \"uptrain\" an existing MHA checkpoint by mean-pooling each group's K/V weights into one shared head, then continue pretraining for a small fraction (~5%) of the original compute to let the model re-adapt.\n\n**Key gotcha:** the FLOPs of QK^T and softmax·V barely change — every query head still computes attention against a (broadcast) K/V, at full h. The savings are almost entirely in (a) KV-cache memory/bandwidth, and (b) the size of the Wk/Wv projection matrices. If your bottleneck is prefill compute rather than decode bandwidth, GQA won't help much.",
+  "examples": "**1. One function, three variants** (MHA when `num_kv_heads == num_heads`, MQA when `== 1`, GQA between):\n\n```python\nimport torch\nimport torch.nn.functional as F\n\ndef attention(x, Wq, Wk, Wv, Wo, num_heads, num_kv_heads, head_dim, causal=True):\n    B, T, _ = x.shape\n    q = (x @ Wq).view(B, T, num_heads,    head_dim).transpose(1, 2)  # (B, Hq,  T, Dh)\n    k = (x @ Wk).view(B, T, num_kv_heads, head_dim).transpose(1, 2)  # (B, Hkv, T, Dh)\n    v = (x @ Wv).view(B, T, num_kv_heads, head_dim).transpose(1, 2)  # (B, Hkv, T, Dh)\n\n    group = num_heads // num_kv_heads        # queries sharing each K/V head\n    k = k.repeat_interleave(group, dim=1)    # broadcast the cached K/V, don't recompute\n    v = v.repeat_interleave(group, dim=1)\n\n    out = F.scaled_dot_product_attention(q, k, v, is_causal=causal)\n    out = out.transpose(1, 2).reshape(B, T, num_heads * head_dim)\n    return out @ Wo\n```\n\n**2. KV-cache memory, Llama-2-70B-style config** (L=80 layers, H=64 heads, Dh=128, fp16 = 2 bytes):\n\n```\nPer token, per layer, per (K or V) tensor = H_kv * Dh * 2 bytes\n  MHA (H_kv=64): 64*128*2 =  16 KB\n  GQA (H_kv=8):   8*128*2 =   2 KB   (8x smaller)\n  MQA (H_kv=1):   1*128*2 = 0.25 KB  (64x smaller)\n\nBoth K+V, all 80 layers, per token:\n  MHA: 2 * 80 * 16 KB   = 2.5 MB/token  ->  4096-token ctx ≈ 10 GB\n  GQA: 2 * 80 *  2 KB   = 0.3125 MB/token -> 4096-token ctx ≈ 1.25 GB\n```",
+  "tradeoffs": "MQA gives the largest KV-cache/bandwidth win (h×) and is simplest, but the shared K/V is a real capacity bottleneck — safe mainly if trained from scratch that way (e.g. PaLM, Falcon) or accepted with a quality hit. GQA is the standard production choice: tune g to trade cache size for quality, and it can be obtained cheaply by uptraining an existing MHA checkpoint rather than retraining. Full MHA keeps the best quality ceiling but its KV cache scales with h, which caps max batch size/context length under fixed GPU memory — costly at 30B+ scale or long context. Avoid MQA/GQA when decode-time KV-cache bandwidth isn't your bottleneck (e.g., prefill-only or encoder workloads), or when you can't afford even a short uptraining pass and quality is non-negotiable.",
+  "diagnosticQuiz": [
+    {
+      "q": "Which statement best defines Grouped-Query Attention (GQA)?",
+      "choices": [
+        "All query heads share exactly one key/value head, with no grouping",
+        "Key and value projections are removed entirely and replaced by a fixed positional bias",
+        "Every query head has its own dedicated key/value head, computed and cached independently",
+        "Query heads are split into groups, and each group shares one key/value head"
+      ],
+      "answer": 3,
+      "explanation": "GQA partitions the h query heads into g groups (1 < g < h), giving each group its own shared K/V head — it reduces to MHA when g=h and to MQA when g=1. The first option describes MHA and the second describes MQA, not GQA; the fourth isn't a real attention variant."
+    },
+    {
+      "q": "A model has 32 query heads and uses GQA with 4 key/value heads (8 query heads per group). What is the KV-cache memory per token relative to full multi-head attention?",
+      "choices": [
+        "1/8 the size",
+        "1/32 the size",
+        "1/4 the size",
+        "4x the size"
+      ],
+      "answer": 0,
+      "explanation": "KV-cache size scales with the number of KV heads, so the reduction factor is H / H_kv = 32 / 4 = 8, giving 1/8 the memory. 1/4 wrongly uses the group size (8 queries/group) as the ratio; 1/32 would only hold for MQA (H_kv=1)."
+    },
+    {
+      "q": "QK^T and softmax·V use almost the same FLOPs in GQA as in MHA (every query head still attends over a broadcast K/V). So why does GQA speed up decoding?",
+      "choices": [
+        "Because autoregressive decoding is memory-bandwidth bound, and a smaller KV cache means fewer bytes moved per generated token",
+        "Because it reduces the number of transformer layers needed for the same accuracy",
+        "Because smaller tensors are always faster on a GPU regardless of data movement",
+        "Because it lowers the vocabulary size used during sampling"
+      ],
+      "answer": 0,
+      "explanation": "Generating one token at a time has very low arithmetic intensity, so loading weights and the KV cache from HBM dominates latency, not the matmuls themselves. Shrinking the KV cache shrinks that memory traffic directly — layer count and vocabulary size are unrelated to GQA."
+    },
+    {
+      "q": "You're serving a 70B decoder-only model for high-throughput chat, GPU HBM caps your batch size, and you can afford a short fine-tune. What's the best move?",
+      "choices": [
+        "Keep full multi-head attention and just reduce the max context length",
+        "Switch to MQA trained from scratch to maximize KV-cache savings",
+        "Uptrain the existing MHA checkpoint into GQA (mean-pool K/V heads per group, then briefly continue pretraining)",
+        "Switch to encoder-only attention to avoid needing a KV cache"
+      ],
+      "answer": 2,
+      "explanation": "Uptraining into GQA recovers quality close to the original MHA checkpoint using only a small fraction of full pretraining compute — this is what Llama 2 34B/70B and similar models actually do. Training MQA from scratch risks a larger quality hit, and the other options either sacrifice context length or don't apply to decoder-only autoregressive serving."
+    },
+    {
+      "q": "A team swaps a model's MHA layers for MQA purely to shrink the KV cache, with no retraining or uptraining, expecting unchanged output quality. What's the mistake?",
+      "choices": [
+        "GQA and MQA both require doubling the number of layers to compensate",
+        "MQA only affects training speed, never inference speed",
+        "MQA cannot be implemented without changing the tokenizer",
+        "Forcing all query heads through one shared K/V head is a real capacity bottleneck, and skipping retraining/uptraining typically causes a measurable quality drop"
+      ],
+      "answer": 3,
+      "explanation": "MQA is a structural change to the model, not a free mathematical equivalence — a checkpoint trained with per-head K/V projections has learned representations that break when those heads are collapsed post hoc. The other options misstate what MQA touches (tokenizer, layer count) or its actual effect on inference speed."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Why do most modern production LLMs (Llama 2/3, Mistral, Gemma) use GQA instead of full multi-head attention?",
+      "a": "Autoregressive decoding is memory-bandwidth bound — each step reloads the whole KV cache from HBM to produce one token. GQA cuts KV-cache size by H/H_kv (typically 4-8x), which cuts per-token latency and lets you fit larger batches or longer contexts in the same GPU memory. It keeps quality close to MHA because query-head diversity is preserved, unlike MQA which collapses all heads to one shared K/V and risks a bigger quality hit."
+    },
+    {
+      "q": "How would you convert an existing MHA checkpoint into GQA without training from scratch?",
+      "a": "\"Uptrain\" it: partition the existing per-head K/V projection weights into g groups and mean-pool each group into a single shared K/V head, initializing the smaller Wk/Wv matrices. Then continue pretraining for a small fraction of the original compute budget (the GQA paper used ~5%) so the model adapts to the shared representations — this recovers most of the quality of the original MHA model at GQA's memory cost."
+    },
+    {
+      "q": "Walk through the KV-cache math for MHA vs. GQA on a 70B-style model (80 layers, 64 heads, head_dim 128, fp16), and say where the savings actually come from.",
+      "a": "Per token per layer per K-or-V tensor: `H_kv * head_dim * 2 bytes`. MHA (H_kv=64): 16 KB; GQA (H_kv=8): 2 KB — an 8x reduction. Across 80 layers and both K+V, that's 2.5 MB/token (MHA) vs 0.3125 MB/token (GQA), so a 4096-token context costs ~10 GB vs ~1.25 GB. The saving is memory footprint and bandwidth, not attention FLOPs — QK^T/softmax·V still run at the full query-head count against a broadcast K/V, so GQA mainly helps decode-time latency and achievable batch size, not raw compute."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "kv-cache-memory",
+    "multi-head-attention"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "4fd613ac1b04d3e1",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T14:27:52Z"
+  }
+}

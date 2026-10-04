@@ -1,0 +1,100 @@
+{
+  "id": "chunking",
+  "title": "Chunking",
+  "definition": "Chunking is the process of splitting source documents into smaller text segments before embedding and indexing, so each retrieved unit is small enough for precise vector similarity matching yet large enough to preserve the context needed to answer from it.",
+  "summary": "Chunking sets the granularity at which a RAG system retrieves and reasons over text, trading off embedding precision (small chunks) against contextual completeness (large chunks). Get it wrong and the system fails silently — either retrieving noisy, unfocused matches or fragments that can't stand alone — with no error thrown, just worse answers. Production teams pick chunk size and boundary strategy empirically, per content type, and validate with retrieval metrics rather than a single default.",
+  "objectives": [
+    "Explain why chunk size affects both retrieval precision and generation quality in a RAG pipeline.",
+    "Implement fixed-size token chunking with overlap and structure-aware (header/code-block) chunking in Python.",
+    "Diagnose retrieval failures caused by poor chunking: semantic dilution, boundary-split facts, lost cross-references.",
+    "Choose and justify a chunk size/overlap strategy for a given corpus, and know when to add contextual augmentation.",
+    "Articulate tradeoffs between fixed-size, recursive, semantic, and contextual chunking in a production interview setting."
+  ],
+  "lesson": "RAG retrieves chunks, not whole documents, because an embedding model compresses arbitrary-length text into one fixed-size vector. Cram too much unrelated content into that vector and it becomes a blurry average — similar to everything a little, distinctive to nothing. Chunking is the lever that sets retrieval's \"grain size\": too coarse and precision collapses; too fine and you lose the context needed to actually answer the question.\n\n**Worked example**: a support KB page has three paragraphs — Returns, Shipping, Warranty. Chunked as one ~60-token paragraph per topic, the query \"what's the return window?\" embeds close to the Returns chunk alone, and retrieval is clean. Merge all three into one 700-token chunk, and its embedding now blends three topics; its similarity to the Returns query drops, and a differently-worded Shipping-only chunk from another page can outrank it in top-k — even though the correct answer is sitting right there, buried in the oversized chunk.\n\n**The key gotcha**: naive fixed-size (character or token count) splitting is context-blind. It will slice a sentence mid-clause, separate a table from its header row, or cut a code function's signature from its body — corrupting the retrieved unit itself. Worse, it silently breaks references: a chunk that says \"the fee is $10\" is useless if \"which fee\" was defined two paragraphs earlier, now stranded in a different chunk. This doesn't throw an error — it produces a confident, wrong-sounding answer, which is the failure mode hardest to catch in production.\n\nOverlap (repeating the tail of chunk N as the head of chunk N+1) is a cheap partial mitigation for facts straddling a boundary, but it doesn't fix lost document-level context, and it bloats the index. That's why mature pipelines pair chunking with structure awareness (split on headers/paragraphs/code blocks first, fall back to fixed-size only within an oversized section) or contextual augmentation (prepend a short, chunk-specific summary before embedding) rather than trusting one fixed-size window for an entire corpus.",
+  "examples": "**Example 1 — fixed-size token chunking with overlap:**\n\n```python\nimport tiktoken\n\nenc = tiktoken.get_encoding(\"cl100k_base\")\n\ndef chunk_text(text: str, size: int = 300, overlap: int = 50) -> list[str]:\n    tokens = enc.encode(text)\n    step = size - overlap\n    chunks = []\n    for start in range(0, len(tokens), step):\n        chunks.append(enc.decode(tokens[start:start + size]))\n        if start + size >= len(tokens):\n            break\n    return chunks\n```\n\nTrace for a 700-token doc, `size=300, overlap=50` (`step=250`):\n\n```\nstart=0    -> tokens[0:300]    chunk 1\nstart=250  -> tokens[250:550]  chunk 2  (tokens 250-300 repeated from chunk 1)\nstart=500  -> tokens[500:700]  chunk 3  (tokens 500-550 repeated from chunk 2)\n```\n\n3 chunks; each boundary shares 50 tokens with its neighbor, so a fact split at token 300 still appears whole in chunk 2.\n\n**Example 2 — structure-aware chunking with fixed-size fallback:**\n\n```python\nimport re\n\ndef split_by_headers(md: str) -> list[str]:\n    parts = re.split(r\"(?=^#{1,3} )\", md, flags=re.MULTILINE)\n    return [p.strip() for p in parts if p.strip()]\n\ndef chunk_markdown(md: str, max_tokens: int = 300) -> list[str]:\n    chunks = []\n    for section in split_by_headers(md):\n        if len(enc.encode(section)) <= max_tokens:\n            chunks.append(section)\n        else:\n            chunks.extend(chunk_text(section, size=max_tokens, overlap=40))\n    return chunks\n```\n\nA 3,000-token doc with six `##` sections yields six chunks that keep their heading attached; one oversized section (900 tokens) further splits into three fixed-size sub-chunks. Retrieval now returns whole, header-labeled sections instead of arbitrary character windows.",
+  "tradeoffs": "Fixed-size chunking is cheap, deterministic, and fast to index, but context-blind. Overlap reduces boundary loss but grows the index and creates near-duplicate content roughly linearly with the overlap ratio. Structure-aware chunking (headers, paragraphs, code blocks, tables) yields higher-quality units at the cost of a parser per content type. Semantic chunking (split where adjacent-sentence embedding similarity drops) is highest fidelity but adds embedding calls at index time — usually overkill for uniform content like FAQs. Contextual augmentation (Anthropic's Contextual Retrieval: prepend LLM-written context per chunk before embedding) measurably improves recall on corpora with heavy cross-referencing, but adds an LLM call per chunk at ingest time — real cost on large, frequently-updated corpora. For a small or single-topic corpus, skip all of it: one chunk per document is simpler and won't hurt retrieval.",
+  "diagnosticQuiz": [
+    {
+      "q": "An embedding model compresses text of any length into one fixed-size vector. Per the lesson, why does this make chunking necessary before indexing for RAG?",
+      "choices": [
+        "Smaller inputs let the embedding model run in a lower-precision inference mode, cutting compute cost",
+        "Vector databases enforce a hard 512-token limit on any single entry",
+        "Chunking lowers the dimensionality of the resulting embedding, which speeds up nearest-neighbor search",
+        "Cramming multiple unrelated topics into one vector makes it a \"blurry average\" — similar to everything a little, distinctive to nothing — which weakens precise similarity matching"
+      ],
+      "answer": 3,
+      "explanation": "The lesson's core mechanism is that compressing unrelated content into one vector produces a non-distinctive average; chunking sets the \"grain size\" so each vector stays a faithful, matchable representation of one topic. Option A invents a fixed DB constraint — chunk size is a pipeline design choice, not an inherent limit. C and D misattribute the benefit to embedding dimensionality or inference precision, neither of which chunking touches — the embedding dimension is fixed by the model regardless of input length."
+    },
+    {
+      "q": "A document has 1,000 tokens. Using `chunk_text(text, size=300, overlap=100)` from Example 1, what is the step size between chunk starts, and how many chunks are produced?",
+      "choices": [
+        "step=200; 5 chunks",
+        "step=200; 4 chunks",
+        "step=100; 10 chunks",
+        "step=400; 3 chunks"
+      ],
+      "answer": 0,
+      "explanation": "`step = size - overlap = 300 - 100 = 200`, giving starts 0, 200, 400, 600, 800. Each is appended before the break check (`start + size >= len(tokens)`), and that check only fires true at start=800 (`1100 >= 1000`), so all 5 chunks — including the final partial one covering tokens 800–1000 — get appended. B wrongly treats `overlap` itself as the step; C wrongly computes step as `size + overlap`; D gets the step right but drops the last chunk by assuming the break happens *before* appending, when the code appends first and checks after."
+    },
+    {
+      "q": "In the lesson's KB worked example, merging Returns/Shipping/Warranty into one 700-token chunk causes the query \"what's the return window?\" to sometimes lose to a differently-worded Shipping-only chunk from another page — even though the correct answer is present. What causes this?",
+      "choices": [
+        "The overlap window strips the Returns paragraph out of the merged chunk during indexing",
+        "Cosine similarity always penalizes longer chunks by length, regardless of content",
+        "The 700-token chunk exceeds the LLM's context window and gets truncated before the model reads the Returns text",
+        "The merged chunk's single embedding blends three topics, lowering its similarity to the Returns-specific query enough that a more topically focused (if wrong) chunk scores higher"
+      ],
+      "answer": 3,
+      "explanation": "One embedding now represents three topics at once, so it's a diluted match for any single-topic query — letting a focused-but-wrong chunk outrank it in top-k. D reflects a common misconception that vector similarity inherently penalizes length; the real cause is topical dilution, not length itself (a long chunk about *one* topic doesn't have this problem). A and C confuse this retrieval-ranking issue with unrelated mechanisms — generation-time context limits and overlap logic — that don't apply at the embedding-similarity stage."
+    },
+    {
+      "q": "A team's internal knowledge base is large, updated daily, and heavily cross-referenced — a fee is defined by name on one page and referenced by that name on many others. Which technique directly targets this \"stranded reference\" gotcha, and what cost does the lesson attach to it?",
+      "choices": [
+        "Semantic chunking on sentence-similarity drops; it's free since it reuses embeddings already computed for retrieval",
+        "Overlap between adjacent chunks; it fully restores cross-page references at no extra indexing cost",
+        "Contextual augmentation (prepending an LLM-written summary per chunk before embedding); it improves recall on cross-referencing corpora but adds a per-chunk LLM call at ingest — real cost here given the corpus is large and frequently updated",
+        "Structure-aware chunking on headers; splitting on section headers alone resolves references across pages"
+      ],
+      "answer": 2,
+      "explanation": "The lesson names contextual augmentation as the fix for heavy cross-referencing, explicitly flagging that it \"adds an LLM call per chunk at ingest time — real cost on large, frequently-updated corpora,\" which is exactly this scenario. Overlap (A) only rescues facts straddling one boundary *within* a document, not references scattered across different pages, and it isn't free — it bloats the index. Semantic chunking (B) also isn't free (it \"adds embedding calls at index time\") and targets topic boundaries, not references; structure-aware chunking (D) improves unit quality but doesn't reconnect information split across separate chunks or pages."
+    },
+    {
+      "q": "A fixed-size chunker splits a KB article purely by token count. One resulting chunk reads \"...the fee is $10, payable within 30 days,\" while the sentence naming *which* fee this is sat two paragraphs earlier and is now stranded in a different chunk. What does the lesson say actually happens at query time?",
+      "choices": [
+        "The embedding pipeline automatically detects the low-context chunk and excludes it from the index",
+        "The LLM detects the missing antecedent and refuses to answer, citing insufficient context",
+        "Indexing throws an error because the chunk lacks a required \"referent\" field",
+        "The chunk retrieves normally and the LLM confidently answers using \"the fee\" as if self-explanatory — no error is thrown, so a wrong or misleading answer looks as clean as a correct one"
+      ],
+      "answer": 3,
+      "explanation": "The lesson is explicit: this \"doesn't throw an error — it produces a confident, wrong-sounding answer, which is the failure mode hardest to catch in production.\" Nothing fails loudly, so a bad answer looks identical to a good one in logs and dashboards. A, B, and D all invent a detection or rejection mechanism — naive fixed-size chunking is purely mechanical and content-blind, with no such validation step."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Retrieval quality is poor even though the answer clearly exists in the corpus — the correct passage never shows up in the top-k retrieved chunks. How would you determine whether chunking is the cause?",
+      "a": "Localize first: pull the source passage for a few failing queries and see which chunk(s) it landed in.\n- Check whether the chunk contains the full answer, or the answer straddles two chunks with no overlap covering the split.\n- Check topic purity — is the chunk mixed with unrelated content (semantic dilution)?\n- Check for stranded references (`\"the fee\"`, `\"as shown above\"`) whose antecedent is in a different chunk.\n- Run a chunk-size/overlap sweep against a small labeled retrieval eval set (recall@k, MRR) instead of guessing.\n- If size and boundaries look fine, suspect the embedding model or query phrasing next, not chunking."
+    },
+    {
+      "q": "How would you pick chunk size and overlap for a production RAG system indexing a mix of prose docs and code, and what would make you revisit that choice?",
+      "a": "Start from structure, not a fixed number — split on natural boundaries first (headers/paragraphs for prose, function/class boundaries for code), and only fall back to fixed-size splitting (with ~10-20% overlap) inside sections still too large to embed well. Keep chunk sizes well under the embedding model's hard token limit, since embedding quality degrades on very long inputs even when technically accepted. Treat code and prose with separate splitters — a code-aware splitter behaves very differently from a paragraph splitter. Validate against a retrieval eval set (recall@k, MRR), and revisit when eval regresses after a content-type change, latency/cost budgets shift, or error analysis shows systematic misses on cross-referencing content — the last one signals you need contextual augmentation, not just a size tweak."
+    },
+    {
+      "q": "What is Anthropic's Contextual Retrieval / \"late chunking,\" and when would you add it to a chunking pipeline?",
+      "a": "Contextual Retrieval (Anthropic, 2024) prepends a short, LLM-generated summary of how a chunk relates to the whole document — e.g. \"this chunk is from Q3 2023's revenue section for company X\" — before embedding and keyword indexing, so the chunk stops looking like an orphaned fragment; Anthropic reported roughly 35-49% fewer retrieval failures alone, ~67% combined with reranking. Late chunking (Jina AI) gets a similar effect differently: embed the whole document with a long-context model first, then pool token embeddings within each chunk's span, so each chunk's vector carries full-document context without adding text. Reach for either once plain structure-aware chunking plateaus and eval shows lost referential context as the dominant failure mode — both add real cost (an LLM call per chunk, or a long-context embedding model), so they're a second move, not a first one."
+    }
+  ],
+  "version": 2,
+  "relatedConcepts": [
+    "graphrag"
+  ],
+  "followUps": [
+    "graphrag"
+  ],
+  "metadata": {
+    "inputHash": "e6f6ef58a7f87c7b",
+    "model": "sonnet",
+    "generatedAt": "2026-07-03T10:34:01Z",
+    "quizUpdatedAt": "2026-07-04T05:41:10Z"
+  }
+}

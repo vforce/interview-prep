@@ -1,0 +1,99 @@
+{
+  "id": "what-is-mcp",
+  "title": "What Is MCP",
+  "definition": "MCP (Model Context Protocol) is an open, JSON-RPC 2.0–based standard that lets an AI application (a \"host\") connect to external tools, data, and prompt templates through a uniform client-server interface, so an integration is built once per server instead of once per model/app pair.",
+  "summary": "MCP separates \"the model\" from \"the systems it needs to act on\" by defining a standard wire protocol, a discovery mechanism, and three capability types — tools, resources, prompts — that any compliant host can find and invoke at runtime. Released by Anthropic in late 2024 and since adopted by other model providers and IDEs, it replaces bespoke per-app plugin systems with one integration surface. It solves an M×N integration problem (M apps, N tools) by turning it into M+N.",
+  "objectives": [
+    "Explain the integration problem MCP solves and how it differs from calling a model's native function-calling API directly.",
+    "Describe the host / client / server architecture and the three capability types: tools, resources, prompts.",
+    "Trace a tool call end-to-end: handshake → discovery → invocation → result → model continuation.",
+    "Identify the transport options (stdio vs. Streamable HTTP) and when each applies.",
+    "Recognize the production gotcha that protocol compliance doesn't guarantee good tool selection, and the security implications of untrusted servers."
+  ],
+  "lesson": "Before MCP, every AI application that wanted to use external tools or data wrote custom glue code for every (app, tool) pair — N apps and M tools meant N×M integrations. MCP fixes this by standardizing the interface: a data/tool provider implements one MCP **server**, and any MCP-compliant **host** can talk to it with zero bespoke code — M+N instead of M×N.\n\nArchitecture: the **host** is the user-facing application (an IDE, a chat client, your own agent runtime). It embeds one **client** per server connection — a stateful, 1:1 connector. The client talks to a **server**, which runs as a local subprocess (transport: stdio) or a remote service (transport: Streamable HTTP), exchanging JSON-RPC 2.0 messages.\n\nA server exposes up to three capability types, distinguished by *who decides* when to use them:\n\n- **Tools** — model-controlled. The model sees a name, description, and JSON schema, and decides to call it (functionally like OpenAI/Anthropic function calling, but server-hosted and portable across hosts).\n- **Resources** — application-controlled. Structured or unstructured data (files, DB rows, API responses) the host can read and inject into context, independent of any model decision.\n- **Prompts** — user-controlled. Reusable prompt templates a user explicitly selects (e.g., a slash command).\n\nOn connect, client and server run an `initialize` handshake negotiating protocol version and capabilities; the client then calls `tools/list` / `resources/list` to discover what's available, and `tools/call` to invoke.\n\nWorked intuition: a GitHub MCP server exposes a `create_issue` tool. A host spawns the server as a subprocess, lists its tools, and when the user says \"file a bug for this,\" the model emits a tool-use request for `create_issue`; the client forwards it, the server hits the GitHub API, and the result returns as a tool result the model reads and summarizes.\n\n**Key gotcha:** MCP standardizes wire format and discovery, not tool-selection quality. Two servers can be equally spec-compliant while one has a vague description (\"do stuff with files\") and the other precise ones with tight schemas — the model's success rate depends on the description/schema quality, exactly as with plain function calling. Compliance ≠ usability.",
+  "examples": "**Example 1 — minimal Python MCP server (FastMCP SDK):**\n```python\n# server.py\nfrom mcp.server.fastmcp import FastMCP\n\nmcp = FastMCP(\"kb-search\")\n\n@mcp.tool()\ndef search_docs(query: str, top_k: int = 3) -> list[str]:\n    \"\"\"Search the internal knowledge base and return top_k matching snippets.\"\"\"\n    return _vector_search(query, top_k)  # your existing retrieval code\n\nif __name__ == \"__main__\":\n    mcp.run(transport=\"stdio\")  # host spawns this as a subprocess\n```\nHost config (e.g. a desktop client's `mcpServers` block) points at it:\n```json\n{ \"mcpServers\": { \"kb-search\": { \"command\": \"python3\", \"args\": [\"server.py\"] } } }\n```\nAt runtime: host spawns the process → `initialize` handshake → `tools/list` returns `search_docs` with its schema → model emits a tool call with `{\"query\": \"...\", \"top_k\": 3}` → client sends `tools/call` → server runs the function → the result flows back as a tool result the model reads to compose its answer.\n\n**Example 2 — the raw JSON-RPC underneath:**\n```\n--> {\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\n     \"params\":{\"name\":\"search_docs\",\"arguments\":{\"query\":\"MCP transports\",\"top_k\":2}}}\n<-- {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\n     {\"content\":[{\"type\":\"text\",\"text\":\"1) stdio ... 2) Streamable HTTP ...\"}]}}\n```",
+  "tradeoffs": "Adopt MCP when the same tool/data needs to reach multiple hosts or agents (an internal agent platform, several IDE integrations, a growing tool catalog contributed to by different teams) — you build and secure the server once. It's overkill for a single app with one or two static tools and no reuse story: calling the model provider's function-calling API directly is fewer moving parts (no subprocess, transport, or handshake to manage). Be cautious with third-party or untrusted servers in production — a compromised server can return adversarial content in a tool result (indirect prompt injection) or misdeclare what a tool does — so gate side-effecting tools behind human approval, scope credentials per server, and treat every tool result as untrusted input.",
+  "diagnosticQuiz": [
+    {
+      "q": "What is MCP, precisely?",
+      "choices": [
+        "A model architecture for extending context window length",
+        "An open protocol standardizing how AI applications connect to external tools, data, and prompts via a client-server interface",
+        "Anthropic's proprietary function-calling syntax, usable only with Claude",
+        "A fine-tuning technique that teaches models to use tools"
+      ],
+      "answer": 1,
+      "explanation": "MCP is a wire-level integration protocol (JSON-RPC 2.0), not a model architecture, training method, or vendor-locked format — it's explicitly model- and vendor-agnostic, which is why other providers and IDEs have adopted it. The best distractor reflects the common misconception that MCP \"is\" Anthropic's function-calling format, conflating a transport-level standard with the model-level tool-use payload it carries."
+    },
+    {
+      "q": "With 4 host applications and 6 external tools/services, how many integrations does a shared protocol like MCP require versus custom point-to-point wiring?",
+      "choices": [
+        "Both approaches need 24",
+        "MCP needs 24, custom needs 10",
+        "MCP needs 6, custom needs 4",
+        "MCP needs 10 (4+6), custom needs 24 (4×6)"
+      ],
+      "answer": 3,
+      "explanation": "This is the M×N vs. M+N argument for MCP: without a shared protocol, every app-tool pair needs its own glue code (4×6=24); with a common standard, each app builds one client and each tool builds one server (4+6=10). The first option inverts which side benefits from standardization and is the classic mix-up."
+    },
+    {
+      "q": "In the host/client/server model, what best describes the \"client\"?",
+      "choices": [
+        "The end user's browser tab",
+        "A stateful, 1:1 connector living inside the host that talks to exactly one server",
+        "A load balancer sitting in front of multiple servers",
+        "The LLM itself"
+      ],
+      "answer": 1,
+      "explanation": "MCP defines a host application that manages one client per server connection, maintaining that session's JSON-RPC exchange. The LLM-as-client answer is the common confusion — the model isn't a protocol participant; it only sees the tool definitions and results the host feeds into its context."
+    },
+    {
+      "q": "You're building one internal chatbot with a single hardcoded calculator tool that will never be reused elsewhere. What's the pragmatic choice?",
+      "choices": [
+        "Refuse to ship tool support until an MCP server is available",
+        "Write a bespoke REST API and a custom client, bypassing both options",
+        "Build an MCP server for it — always use MCP for any tool",
+        "Use the model provider's native function-calling directly; MCP's subprocess/transport/handshake overhead has no reuse payoff here"
+      ],
+      "answer": 3,
+      "explanation": "MCP's value is standardized reuse across multiple hosts or a growing tool catalog; for one static tool in one app, native function calling gets the same outcome with fewer moving parts — a straightforward YAGNI call. Treating MCP as mandatory for every tool call, regardless of reuse, is the trap the first option represents."
+    },
+    {
+      "q": "A team ships a fully spec-compliant MCP server, but the model keeps calling the wrong tool or passing malformed arguments. What's the most likely cause?",
+      "choices": [
+        "The wrong transport was chosen (stdio vs. HTTP)",
+        "A protocol version mismatch between client and server",
+        "Vague tool names/descriptions or a loose JSON schema — the model reasons over these, not the wire protocol",
+        "The host doesn't support JSON-RPC 2.0"
+      ],
+      "answer": 2,
+      "explanation": "Protocol compliance only guarantees messages parse correctly; it says nothing about whether the model can decide when and how to call a tool — that depends entirely on the natural-language description and schema the server publishes, same as with plain function calling. Transport or version mismatches would typically cause hard connection failures, not subtly wrong tool choices, which is why they're the tempting-but-wrong picks."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Why would you choose MCP over wiring up function calling directly against a model's API?",
+      "a": "It comes down to M×N vs. M+N. For one app with one or two static tools, direct function calling is simpler — no subprocess, transport, or handshake to run. MCP earns its cost once multiple hosts (an internal agent, an IDE plugin, a chatbot) need the same tools/data, or I want a tool catalog other teams can contribute to independently — then a standard server interface with discovery (tools/resources/prompts) means I build and secure the integration once, and every compliant host can use it instead of bespoke glue per pair."
+    },
+    {
+      "q": "What security considerations does MCP introduce in production, and how do you mitigate them?",
+      "a": "The core issue is trust boundary: an MCP server is often a separate process or third-party service, and its tool results land directly in the model's context — so a compromised or malicious server can smuggle instructions into a \"tool result\" (indirect prompt injection) or misdeclare what a tool does. Mitigations: treat every tool result as untrusted input, require human approval for side-effecting tools (writes, payments, deletes), scope credentials per server with least privilege, pin/verify server versions, log every call for audit, and use the spec's OAuth2.1-based auth for remote HTTP servers rather than rolling custom auth."
+    },
+    {
+      "q": "Walk through what happens end-to-end when a user's request causes the model to call an MCP tool.",
+      "a": "The host already ran an `initialize` handshake with the server and cached its `tools/list` (name, description, JSON schema). On the user's turn, those tool definitions are in the model's context; the model decides to invoke one and emits a tool-use block with schema-matching arguments. The client sends a `tools/call` JSON-RPC request; the server executes (hits an internal API, queries a DB, etc.) and returns a result. The host appends that result to the conversation as a tool result, and the model reads it to produce its final response — the same server works unchanged whether the host is Claude, GPT, or an internal agent runtime."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "host-client-and-server"
+  ],
+  "followUps": [
+    "host-client-and-server"
+  ],
+  "metadata": {
+    "inputHash": "5aaa43de4c6e787f",
+    "model": "sonnet",
+    "generatedAt": "2026-07-06T06:26:36Z"
+  }
+}

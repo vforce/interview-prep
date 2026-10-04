@@ -1,0 +1,100 @@
+{
+  "id": "kv-cache",
+  "title": "KV Cache",
+  "definition": "KV cache is the per-layer, per-token storage of previously computed key and value projections during autoregressive decoding, so generating each new token only requires computing that token's own K/V and attending over the cached history instead of recomputing K/V for the entire prefix.",
+  "summary": "Because causal self-attention makes a token's key/value vectors depend only on itself and earlier tokens, those vectors never change once computed — so instead of recomputing them every decoding step, you compute each token's K/V once, cache it, and reuse it for the rest of generation. This keeps decode from redundantly re-deriving the whole prefix each step, but the cache itself grows with sequence length × batch size × layers × heads, and in production serving it's often the actual GPU-memory bottleneck — not the model weights.",
+  "objectives": [
+    "Explain why causal masking — not just \"it's an optimization\" — is what makes reusing cached K/V mathematically correct.",
+    "Trace the cache through prefill (parallel, whole prompt) and decode (one token, append, attend over all).",
+    "Compute a KV cache's memory footprint from layers, kv_heads, head_dim, seq_len, batch, and dtype.",
+    "Name production mitigations for KV-cache memory pressure: GQA/MQA, cache quantization, PagedAttention, prefix caching, sliding-window caches."
+  ],
+  "lesson": "Self-attention at position `t` needs the query at `t` plus the keys/values at every position ≤ `t`. In a causally-masked decoder, a token's key and value vectors at a given layer are a pure function of that token and everything before it — they never depend on tokens generated later. That invariant is what makes caching *correct*, not just convenient: once `K_i, V_i` are computed for layer `l`, they stay correct forever, no matter how many more tokens follow.\n\nPrefill exploits this by running the whole prompt through the model in one parallel pass, computing K/V for every prompt position at once and populating the cache. Decode then repeats a tiny loop: push only the newest token through the model, compute its own Q/K/V, append the new K/V onto each layer's cache, and attend the new Q against the entire cached history (old + new). Without a cache you'd instead re-run the whole growing prefix through every layer at every step just to reproduce K/V you already had a moment ago — pure waste that compounds every token.\n\nKey gotcha: the cache is a first-class memory cost, not merely a compute trick, and in production it's frequently the real bottleneck — not the model weights. Its size scales as `2 × layers × kv_heads × head_dim × seq_len × batch_size × bytes_per_element`; sequence length and batch size are both multiplicative, so long conversations at real serving batch sizes can dwarf the weights themselves. That's exactly why grouped/multi-query attention (fewer KV heads), int8/fp8 cache quantization, and vLLM-style PagedAttention (paging the cache like OS virtual memory to kill fragmentation) all exist — they're KV-cache memory optimizations, not modeling tricks. If raising batch size tanks throughput while GPU compute utilization looks low, suspect KV-cache memory pressure before the compute path.\n\nOne more subtlety: caching doesn't make attention itself cheaper. The `Q·Kᵀ → softmax → ·V` lookup at step `t` is still `O(t)` work against the growing cache, and summed over a full generation that's still `O(n²)` overall. What caching removes is the redundant re-projection and re-FFN of tokens already processed once — the part that would otherwise turn every decode step into reprocessing the entire conversation from scratch.",
+  "examples": "**1. A decode step, with the cache (PyTorch-style pseudocode)**\n\n```python\nclass LayerKVCache:\n    \"\"\"Holds K/V for every token processed so far, for one layer.\"\"\"\n    def __init__(self):\n        self.k = None   # [batch, n_kv_heads, seen_so_far, head_dim]\n        self.v = None\n\n    def append(self, k_new, v_new):\n        # k_new, v_new: [batch, n_kv_heads, 1, head_dim] -- just the new token\n        if self.k is None:\n            self.k, self.v = k_new, v_new\n        else:\n            self.k = torch.cat([self.k, k_new], dim=2)\n            self.v = torch.cat([self.v, v_new], dim=2)\n        return self.k, self.v\n\ndef decode_step(x_t, layer, cache):\n    q     = layer.wq(x_t)          # [batch, n_heads,    1, head_dim] -- 1 new token\n    k_new = layer.wk(x_t)          # [batch, n_kv_heads, 1, head_dim]\n    v_new = layer.wv(x_t)\n    k, v  = cache.append(k_new, v_new)          # now covers ALL tokens so far\n    scores = q @ k.transpose(-1, -2) / head_dim ** 0.5\n    attn   = scores.softmax(dim=-1) @ v\n    return layer.wo(attn)                       # only this line touches full history\n```\n\n`x_t` is a single new token's hidden state (seq_len = 1) — `wq/wk/wv` and the FFN only ever run on 1 token per decode step. Prefill is the same code with `x_t` = all prompt tokens at once and an empty cache.\n\n**2. Memory footprint — Llama-2-7B**\n\n```\nper-token, per-layer:  2 (K,V) × 32 heads × 128 head_dim × 2 bytes  = 16,384 B\nall 32 layers:         16,384 B × 32                                ≈ 512 KiB / token\n\ncontext 4096, batch 1: 512 KiB × 4096                                ≈ 2.0 GiB\ncontext 4096, batch 8: 2.0 GiB × 8                                   ≈ 16 GiB\nfp16 model weights (7B × 2 B):                                       ≈ 14 GB\n```\n\nAt batch 8, the cache alone exceeds the weights. Llama-2-70B avoids this with GQA — 8 KV heads instead of 64 query heads, an 8× smaller cache per token than a same-shaped MHA model.",
+  "tradeoffs": "KV caching isn't really optional in production autoregressive serving — skip it and every decode step re-projects and re-runs the FFN over the entire growing prefix, impractically slow past a few dozen tokens. The cost is memory: cache size scales linearly with `layers × kv_heads × head_dim × seq_len × batch_size`, competing directly with model weights and other concurrent requests for GPU HBM. Use plain dense caching for typical chat/completion serving at moderate context; reach for GQA/MQA, int8/fp8 cache quantization, or vLLM-style paged allocation once context length or batch size pushes memory past budget; use bounded/sliding-window caches (attention-sink style) for very long or effectively-infinite streaming chats where exact long-range recall matters less than O(1) memory. Skip caching entirely for non-autoregressive work — training (teacher-forced, one parallel pass over known targets) and single-pass scoring/classification — since there's no sequential decode loop to amortize it over.",
+  "diagnosticQuiz": [
+    {
+      "q": "What exactly does the KV cache store?",
+      "choices": [
+        "The full hidden state (residual stream) for every previous token, at every layer",
+        "The learned key and value projection weight matrices, so they can be reused across requests",
+        "The computed key and value vectors for every previously processed token, at every layer",
+        "The post-softmax attention output (the weighted sum over values) for every previous token"
+      ],
+      "answer": 2,
+      "explanation": "The cache holds activations — the K and V vectors already produced for each past token at each layer — not the (static, always-resident) projection weights, and not more than K/V. The tempting wrong answer caches the full hidden state/residual stream for every past token: that data exists too, but no future token's attention ever reads a past token's hidden state or FFN output again — only its K and V — so caching more than that just burns memory for nothing."
+    },
+    {
+      "q": "A model uses 40 layers, hidden size 5120, 40 attention heads (head_dim 128), no GQA (kv_heads = heads), and caches K/V in fp16 (2 bytes/value) — this is Llama-2-13B's actual shape. For one sequence of 2000 tokens at batch = 1, roughly how much GPU memory does the KV cache use?",
+      "choices": [
+        "~100 MB",
+        "~800 MB",
+        "~1.6 GB",
+        "~6.4 GB"
+      ],
+      "answer": 2,
+      "explanation": "The arithmetic is `2 (K & V) × 40 layers × 5120 hidden × 2 bytes/elem × 2000 tokens ≈ 1.64 GB`. The tempting wrong answer, ~800 MB, comes from dropping the factor of 2 for storing both K *and* V — a very common off-by-2× mistake when sizing a KV cache by hand."
+    },
+    {
+      "q": "Why is it mathematically valid to compute a token's key/value vectors once and reuse them, unchanged, for every later decoding step?",
+      "choices": [
+        "Because the key/value projection weight matrices are frozen after training and never change",
+        "Because the softmax normalization constant is recomputed at every decoding step anyway",
+        "Because attention is permutation-invariant, so token order doesn't affect the result",
+        "Because causal masking means a token's hidden state — and thus its K/V — depends only on itself and earlier tokens, never on tokens generated later"
+      ],
+      "answer": 3,
+      "explanation": "Caching is valid because of the input-dependency of a position's representation, not because of the weights: causal masking means layer-`l`'s hidden state (and hence K/V) at position `i` is a function of tokens `0..i` only, so later tokens can never perturb it. The tempting wrong answer conflates this with \"the weights are frozen\" — true, but that alone doesn't explain caching, since a bidirectional model (e.g. BERT) also has frozen inference-time weights yet a token's representation *does* change as more of the sequence becomes visible."
+    },
+    {
+      "q": "In which scenario would you most likely NOT need a KV cache at all?",
+      "choices": [
+        "Computing the log-likelihood (perplexity) of one complete, fixed sequence in a single forward pass",
+        "A multi-turn conversation where each turn appends to a growing context",
+        "Batch-generating long completions for many prompts concurrently",
+        "Serving an autoregressive chatbot that streams a response token-by-token"
+      ],
+      "answer": 0,
+      "explanation": "KV caching only pays for itself across multiple sequential forward passes over a growing sequence, to avoid redoing steps `1..t-1` when generating step `t`. A single forward pass over one complete, fixed sequence — scoring, perplexity, a classification head — has no later step to reuse anything for. The tempting wrong answer is multi-turn chat: it's easy to assume each turn restarts from scratch, but decode within a turn always needs the cache, and well-built serving systems reuse or prefix-cache across turns too."
+    },
+    {
+      "q": "Batch size goes up on an 8k-context serving workload; throughput collapses even though GPU SM/compute utilization looks low. Most likely cause?",
+      "choices": [
+        "The attention weight matrices no longer fit in GPU memory",
+        "The tokenizer has become the bottleneck at long context lengths",
+        "GPU memory is saturated by the KV cache, which scales with batch_size × seq_len, leaving no room for more concurrent sequences",
+        "Python's GIL is serializing the batched GPU matrix multiplications"
+      ],
+      "answer": 2,
+      "explanation": "Low compute (SM) utilization plus a throughput cliff exactly as batch size or context grows is the classic signature of being memory-bound on the KV cache, whose size scales directly with `batch_size × seq_len` (times layers/heads/dtype) — once that saturates HBM, no amount of idle compute lets more sequences fit. The tempting wrong answer blames the weight matrices, but weights are a fixed, constant-size cost independent of batch size or context length, so they can't explain a scaling-triggered collapse."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Walk through what happens to the KV cache during prefill vs. decode for one request.",
+      "a": "**Prefill:** the whole prompt (`n` tokens) goes through the model in a single parallel forward pass; each layer computes K/V for all `n` positions at once and writes them into that layer's cache (shape `[batch, kv_heads, n, head_dim]`). This is compute-bound — big matmuls, high GPU utilization.\n**Decode:** one new token at a time. Each step computes Q/K/V for just that one token, appends the new K/V to the cache, then attends the new Q against the entire cache (old + new). This is typically memory-bandwidth-bound — the matmuls are tiny, but reading the whole KV cache from HBM dominates the step."
+    },
+    {
+      "q": "Your KV cache is exceeding GPU memory before you hit the model's context-length limit. What are your levers, and what does each cost?",
+      "a": "- **GQA/MQA** — fewer KV heads shared across query heads; cuts cache size proportionally, small quality cost (only available if the model was trained/chosen with it).\n- **Quantize the cache** (fp16 → int8/fp8) — roughly 2–4× smaller, small accuracy risk, needs kernel/runtime support.\n- **PagedAttention (vLLM)** — doesn't shrink total bytes needed, but kills fragmentation/over-reservation so more concurrent sequences fit in the same memory.\n- **Prefix caching** — share cache across requests with a common prefix (e.g. system prompt), amortized across the batch.\n- **Sliding-window / attention-sink caches** (StreamingLLM-style) — bound the cache to the last N tokens + a few sink tokens; trades exact long-range recall for O(1) memory.\n- **Cut batch size or max context** — always available, directly costs throughput or capability."
+    },
+    {
+      "q": "Why does KV caching help at inference but not during training?",
+      "a": "Training uses teacher forcing: the full target sequence is already known, so the whole sequence is run through the model in one parallel forward pass to compute all positions' losses at once — there's no sequential, one-token-at-a-time loop generating output. KV caching only pays off when you make many sequential forward calls over a growing sequence and want to avoid redoing steps `1..t-1` at step `t`; that situation only exists at autoregressive generation time."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "kv-cache-memory",
+    "prefill-vs-decode",
+    "self-attention"
+  ],
+  "followUps": [
+    "kv-cache-memory"
+  ],
+  "metadata": {
+    "inputHash": "3f6ecf6f4a483632",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T14:18:59Z"
+  }
+}

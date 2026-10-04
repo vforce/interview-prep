@@ -1,0 +1,106 @@
+{
+  "id": "gradient-descent",
+  "title": "Gradient Descent",
+  "definition": "Gradient descent is an iterative optimization algorithm that minimizes a differentiable loss function by repeatedly updating parameters in the direction of the negative gradient, scaled by a learning rate.",
+  "summary": "Gradient descent is the general-purpose optimizer behind almost every trained ML model — linear/logistic regression, deep nets, LLMs — because it scales to problems with no closed-form solution, high dimensionality, or data too large to fit in memory. It trades the exactness of methods like the normal equation for cheap, iterative approximation. Its behavior is governed by three levers: learning rate, batch size, and the curvature of the loss surface.",
+  "objectives": [
+    "Write the update rule θ := θ − α∇J(θ) and explain the role of each term.",
+    "Compare batch, stochastic, and mini-batch gradient descent on convergence noise, memory, and throughput.",
+    "Diagnose divergence/oscillation vs. slow convergence from learning-rate and feature-scale symptoms.",
+    "Justify choosing gradient descent over the closed-form solution for linear regression as n/d scale up.",
+    "Relate gradient descent to production optimizers (momentum, Adam) as fixes for its core weaknesses."
+  ],
+  "lesson": "You already know linear regression has a closed-form solution: θ = (XᵀX)⁻¹Xᵀy. Gradient descent solves the same minimization — minimize MSE loss J(θ) — but iteratively, by repeatedly nudging θ in the direction that decreases J(θ) fastest.\n\nPicture J(θ) as a bowl (convex, for linear regression's MSE). At any point, the gradient ∇J(θ) points toward steepest *increase*. Stepping in the *negative* gradient direction is the locally greedy way downhill:\n\n```\nθ := θ − α∇J(θ)\n```\n\nα (the learning rate) sets the step size. Too small and you crawl toward the minimum, wasting compute; too large and you overshoot the bowl's walls, oscillating or diverging — the single most common production failure mode.\n\nWorked intuition: for f(w) = (w−3)², the gradient is f'(w) = 2(w−3) — proportional to distance from the minimum. Far from w=3, steps are big; near w=3, the gradient shrinks and so does the step, giving the classic fast-then-slow convergence curve. For a well-conditioned convex bowl and small-enough α, this provably converges to the global minimum.\n\nThe key gotcha in one sentence: **feature scale determines the shape of the bowl.** If one feature ranges over [0, 1] and another over [0, 100000], the loss surface becomes a long narrow ellipse instead of a circle, and gradient descent zig-zags across the narrow axis instead of heading straight at the minimum. The fix is standardizing features before training — not shrinking the learning rate, which only slows the zig-zag without removing it. This is why production pipelines standardize inputs by default, and part of why momentum/Adam exist: they correct for exactly this curvature imbalance automatically.",
+  "examples": "**1. Manual trace on a 1D quadratic** — `f(w) = (w−3)²`, `f'(w) = 2(w−3)`, `α = 0.1`, `w₀ = 5`:\n\n```\niter | w     | grad = 2(w-3) | w_new = w - 0.1*grad\n0    | 5.000 | 4.000         | 4.600\n1    | 4.600 | 3.200         | 4.280\n2    | 4.280 | 2.560         | 4.024\n3    | 4.024 | 2.048         | 3.819\n```\n\nStep size shrinks geometrically as w approaches the minimum at 3 — no oscillation because α is small enough for this curvature.\n\n**2. Batch gradient descent for linear regression** (MSE gradient = (1/n)·Xᵀ(Xθ − y)):\n\n```python\nimport numpy as np\n\ndef gradient_descent(X, y, lr=0.01, n_iter=1000):\n    n, d = X.shape\n    theta = np.zeros(d)\n    for _ in range(n_iter):\n        error = X @ theta - y      # shape (n,)\n        grad = (X.T @ error) / n   # shape (d,)\n        theta -= lr * grad\n    return theta\n\n# sanity check against the closed form in tests/CI:\n# theta_exact = np.linalg.lstsq(X, y, rcond=None)[0]\n```\n\nIn production, that `lstsq` comparison is a cheap regression test — if GD's `theta` doesn't converge near the closed-form solution on a small synthetic dataset, something in the training loop is broken.",
+  "tradeoffs": "Use gradient descent (or a variant) whenever there's no closed-form solution — logistic regression, neural nets, essentially all of deep learning — or when n/d are too large for closed-form methods to be feasible: the normal equation costs O(nd² + d³) and needs the full data matrix in memory, while GD/SGD costs O(nd) per epoch and streams data. Avoid full-batch gradient descent when data doesn't fit in memory or fast iteration matters; mini-batch/SGD trades a noisier gradient for far more frequent updates and usually converges faster in wall-clock time. Its guarantees are also weaker outside convexity — on non-convex losses it only reaches a local stationary point — and it introduces hyperparameters (learning rate, schedule, batch size) that need tuning and monitoring, a cost the normal equation never has for small-scale linear regression.",
+  "diagnosticQuiz": [
+    {
+      "q": "What is the core parameter update rule of gradient descent for minimizing loss J(θ)?",
+      "choices": [
+        "θ := θ − α∇J(θ)",
+        "θ := θ + α∇J(θ)",
+        "θ := ∇J(θ) − αθ",
+        "θ := θ − α·J(θ)"
+      ],
+      "answer": 0,
+      "explanation": "Gradient descent moves opposite the gradient because ∇J(θ) points toward locally steepest increase; subtracting it is what decreases the loss. The \"+\" variant is gradient *ascent* — used for maximizing an objective (e.g., policy gradients in RL), not minimizing a loss — and is the misconception this question targets."
+    },
+    {
+      "q": "For f(w) = (w − 3)², starting at w = 5 with learning rate α = 0.1, what is w after one gradient descent step?",
+      "choices": [
+        "5.4",
+        "3.0",
+        "4.6",
+        "1.0"
+      ],
+      "answer": 2,
+      "explanation": "f'(w) = 2(w−3), so at w=5 the gradient is 4; one step gives w ← 5 − 0.1×4 = 4.6. The best wrong answer, 5.4, comes from adding the gradient instead of subtracting it — the classic sign error that turns descent into ascent."
+    },
+    {
+      "q": "Intuitively, why does gradient descent step in the direction of the *negative* gradient?",
+      "choices": [
+        "The negative gradient points toward the global minimum of any loss function",
+        "The negative gradient guarantees the loss reaches zero in one step",
+        "The negative gradient is orthogonal to the loss surface, preventing overshoot",
+        "The negative gradient is the direction of steepest local decrease in the loss"
+      ],
+      "answer": 3,
+      "explanation": "The gradient is defined as the direction of steepest local increase, so its negative is the best *local* descent direction — \"local\" is key, since it says nothing about global structure. The wrong answer overgeneralizes this to \"the global minimum,\" which fails on non-convex losses (e.g., deep nets) where gradient descent can get stuck at local minima or saddle points."
+    },
+    {
+      "q": "You're training on 500M rows that don't fit in memory, on commodity hardware. Which gradient descent variant is most practical, and why?",
+      "choices": [
+        "Mini-batch/stochastic gradient descent, because it updates from small subsets that fit in memory and gives frequent updates",
+        "Batch gradient descent, because it computes the most accurate gradient every step",
+        "Newton's method, because it converges in one step regardless of dataset size",
+        "Batch gradient descent, because it eliminates noisy updates entirely"
+      ],
+      "answer": 0,
+      "explanation": "Batch gradient descent requires a full pass over the entire dataset per update — infeasible at this scale; mini-batch/SGD computes updates from small chunks, fits in memory, and in practice converges faster in wall-clock time despite noisier gradients. \"Most accurate gradient\" is true in isolation but ignores the memory/compute constraint that makes it operationally impossible here."
+    },
+    {
+      "q": "A model trained with gradient descent oscillates wildly and never converges, even though the loss function is convex. What's the most likely cause and fix?",
+      "choices": [
+        "The loss function is non-differentiable; switch to a genetic algorithm",
+        "The learning rate is too large; reduce it or use a schedule/adaptive optimizer",
+        "The model has too many parameters; remove features",
+        "Gradient descent cannot converge on convex functions; use grid search instead"
+      ],
+      "answer": 1,
+      "explanation": "Oscillation or divergence on a convex loss is the textbook signature of a learning rate that's too large, causing each step to overshoot the minimum; the fix is shrinking α, adding decay, or switching to an adaptive optimizer like Adam. Gradient descent provably converges on convex losses given a small-enough learning rate, so \"never converges on convex functions\" is simply false."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Why would you use gradient descent instead of the closed-form normal equation for linear regression in production?",
+      "a": "The normal equation, `θ = (XᵀX)⁻¹Xᵀy`, is exact and hyperparameter-free but costs `O(nd² + d³)` and needs the full `n×d` matrix in memory — infeasible once `d` reaches the thousands or `n` doesn't fit in RAM. Gradient descent costs `O(nd)` per epoch (or `O(d)` per mini-batch step), streams data, and generalizes to models with no closed form at all (logistic regression, neural nets). Rule of thumb: normal equation for small `d`; GD/SGD once you scale up or leave the convex-linear world."
+    },
+    {
+      "q": "How do you pick and tune the learning rate in a production training pipeline?",
+      "a": "Start with a range test — sweep α on a log scale, plot loss vs. α, pick just below where it blows up — or borrow a known-good default for the optimizer (e.g., `3e-4` is a common Adam starting point). In production, use a schedule (warmup + decay) rather than one fixed value, watch loss curves for divergence (too high) vs. a plateau (too low), and prefer adaptive optimizers (Adam/AdamW) that rescale per-parameter and are less sensitive to the initial pick. Always validate on held-out data — an aggressive LR can lower training loss while hurting generalization."
+    },
+    {
+      "q": "Training loss is decreasing but very slowly. Walk me through how you'd debug it.",
+      "a": "First rule out a scale/conditioning issue: confirm features are standardized (unscaled features elongate the loss contours and force zig-zagging), then try a higher LR or an adaptive optimizer. Next check gradient magnitudes for vanishing gradients in deep/saturating layers — that points to an architecture fix, not an optimizer tweak. Also check batch size (too large → fewer, slower updates; too small → noisy gradients needing a smaller LR), and confirm the loss/gradient computation itself isn't silently bugged (e.g., a masked-out term). Finally, compare against a known-good baseline run to isolate data-specific issues from a pipeline regression."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "backpropagation",
+    "gradient-boosting",
+    "linear-regression",
+    "logistic-regression",
+    "optimizers-sgd-momentum-adam"
+  ],
+  "followUps": [
+    "backpropagation",
+    "gradient-boosting",
+    "logistic-regression",
+    "optimizers-sgd-momentum-adam"
+  ],
+  "metadata": {
+    "inputHash": "a20ce8bc0f3e0b88",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T10:03:47Z"
+  }
+}

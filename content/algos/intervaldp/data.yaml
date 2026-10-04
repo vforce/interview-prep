@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: intervaldp
+fam: hard
+label: Interval DP
+order: 33
+trigger: dp over a subrange, answer built from a split inside it
+insight: dp[i][j] iterates the LAST element / the split point inside (i,j); fill by increasing length
+probs:
+- {n: Guess Number Higher or Lower II, slug: guess-number-higher-or-lower-ii, d: M}
+- {n: Burst Balloons, slug: burst-balloons, d: H}
+- {n: Minimum Cost to Cut a Stick, slug: minimum-cost-to-cut-a-stick, d: H}

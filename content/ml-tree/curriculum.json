@@ -1,0 +1,446 @@
+{
+  "concepts": [
+    {
+      "id": "supervised-learning-basics",
+      "title": "Supervised Learning Basics",
+      "order": 1,
+      "difficulty": "Beginner",
+      "keyPoints": [
+        "Fit f(x) → y from labeled (input, output) pairs",
+        "Regression = continuous y (squared error); classification = categorical y (cross-entropy)",
+        "Training = ERM: minimize (1/n) Σ L(f(x_i), y_i) on training data",
+        "Overfitting: H too flexible for n — regularize, simplify, or add data",
+        "Leakage/train-serve skew is the real production killer, not model choice"
+      ]
+    },
+    {
+      "id": "bias-variance-tradeoff",
+      "title": "Bias-Variance Tradeoff",
+      "order": 2,
+      "difficulty": "Intermediate",
+      "keyPoints": [
+        "Test error = Bias² + Variance + irreducible noise (σ²)",
+        "Bias = systematic error from a too-simple model class (underfit)",
+        "Variance = sensitivity of predictions to the training sample (overfit)",
+        "More data shrinks variance only — bias needs more capacity/features",
+        "Diagnose which regime via train/validation gap, not one error number"
+      ]
+    },
+    {
+      "id": "categorical-encoding",
+      "title": "Categorical Encoding",
+      "order": 3,
+      "difficulty": "Intermediate",
+      "keyPoints": [
+        "Converts categorical variables into numeric form models can consume",
+        "Ordinal encoding: compact but implies false order/distance for nominal data",
+        "One-hot encoding: safe default under ~20–50 categories; else sparse blowup",
+        "Target (mean) encoding: smoothed per-category target stat, standard for high-cardinality GBMs",
+        "Leakage gotcha: encode out-of-fold only, fallback to global mean for unseen categories"
+      ]
+    },
+    {
+      "id": "confusion-matrix",
+      "title": "Confusion Matrix",
+      "order": 4,
+      "difficulty": "Intermediate",
+      "keyPoints": [
+        "Cross-tabulates predicted vs true labels: TP, FP, FN, TN counts",
+        "Every metric (accuracy, precision, recall, F1) is arithmetic on these four cells",
+        "Multi-class: N×N grid, diagonal = correct, cell [i,j] = predicted j when truth i",
+        "Exposes failures accuracy hides — e.g. 99.9% accuracy but recall = 0 on rare fraud class",
+        "Gotcha: recall normalizes over rows, precision over columns — check label order, don't assume [0,0] is TP"
+      ]
+    },
+    {
+      "id": "feature-scaling",
+      "title": "Feature Scaling",
+      "order": 5,
+      "difficulty": "Intermediate",
+      "keyPoints": [
+        "Puts numeric features on a shared scale before distance/gradient/regularization steps",
+        "Standardization: z = (x − μ) / σ — zero mean, unit variance",
+        "Min-max: x' = (x − min) / (max − min) — compresses to [0, 1]",
+        "Unscaled features stretch the loss surface, causing gradient descent to zig-zag",
+        "Fit scaler on train fold only, then transform val/test — avoids data leakage"
+      ]
+    },
+    {
+      "id": "linear-regression",
+      "title": "Linear Regression",
+      "order": 6,
+      "difficulty": "Intermediate",
+      "keyPoints": [
+        "Fits y ≈ Xw + b by minimizing sum of squared errors",
+        "Normal equation: w = (XᵀX)⁻¹Xᵀy — exact but O(p³), fails if singular",
+        "Gradient descent scales to large n/p and is required for L1 (Lasso)",
+        "Weights are directly interpretable (e.g. '$150 per sqft')",
+        "Check residual plots — curve = nonlinearity, funnel = heteroscedasticity, not caught by R²"
+      ]
+    },
+    {
+      "id": "naive-bayes",
+      "title": "Naive Bayes",
+      "order": 7,
+      "difficulty": "Intermediate",
+      "keyPoints": [
+        "Generative classifier: Bayes' rule + conditional independence given class",
+        "P(x|y) = ∏ᵢ P(xᵢ|y) — turns 1 hard n-D problem into n easy 1-D ones",
+        "Fit in one pass: counts (Multinomial), presence (Bernoulli), or mean/var (Gaussian)",
+        "Predict via argmax of log P(y) + Σ log P(xᵢ|y), to avoid underflow",
+        "Zero-frequency gotcha: unseen feature zeroes whole product — fix with Laplace smoothing"
+      ]
+    },
+    {
+      "id": "accuracy-and-class-imbalance",
+      "title": "Accuracy and Class Imbalance",
+      "order": 8,
+      "difficulty": "Intermediate",
+      "keyPoints": [
+        "Accuracy = (TP+TN)/(TP+TN+FP+FN) — misleading under class imbalance",
+        "Trivial 'always predict majority class' model scores high accuracy, 0% recall",
+        "Accuracy paradox: 1% fraud rate → predicting 'no fraud' always = 99% accuracy",
+        "Gotcha: catching more of the rare class often lowers accuracy (more false positives)",
+        "Fix: use per-class recall/precision/F1, PR-AUC, or balanced accuracy instead"
+      ]
+    },
+    {
+      "id": "cross-validation",
+      "title": "Cross-Validation",
+      "order": 9,
+      "difficulty": "Intermediate",
+      "keyPoints": [
+        "Resampling procedure estimating generalization error via repeated splits",
+        "K-fold: train on k−1 folds, validate on held-out, rotate, average",
+        "k=5/10 standard: balances bias (small k) vs variance/cost (LOOCV)",
+        "Leakage gotcha: fit scalers/encoders only on training fold, via Pipeline",
+        "Grouped or time-ordered data: use GroupKFold/TimeSeriesSplit, not random folds"
+      ]
+    },
+    {
+      "id": "decision-trees",
+      "title": "Decision Trees",
+      "order": 10,
+      "difficulty": "Intermediate",
+      "keyPoints": [
+        "Recursively partitions feature space via axis-aligned if/else splits",
+        "Each split greedily minimizes Gini/entropy (classification) or variance (regression)",
+        "Recurses until max depth, min leaf size, or no impurity gain",
+        "Greedy, no lookahead — locally best split can block a better tree",
+        "Unconstrained trees overfit (high variance) — prune or ensemble via bagging/boosting"
+      ]
+    },
+    {
+      "id": "gradient-descent",
+      "title": "Gradient Descent",
+      "order": 11,
+      "difficulty": "Intermediate",
+      "keyPoints": [
+        "Iteratively updates θ := θ − α∇J(θ) to minimize a loss function",
+        "Trades closed-form exactness for cheap iteration on hard/huge problems",
+        "Learning rate α too large → oscillate/diverge; too small → crawl",
+        "Unscaled features stretch the loss bowl into an ellipse → zig-zag",
+        "Fix is standardizing features, not shrinking α — Adam/momentum also compensate"
+      ]
+    },
+    {
+      "id": "k-means-clustering",
+      "title": "K-Means Clustering",
+      "order": 12,
+      "difficulty": "Intermediate",
+      "keyPoints": [
+        "Unsupervised: partitions n points into k clusters via nearest centroid",
+        "Lloyd's algorithm: assign to nearest centroid, update centroid = mean, repeat",
+        "Each iteration never increases inertia, so it's guaranteed to converge",
+        "Only reaches a local optimum — bad init can permanently strand centroids",
+        "Fix: k-means++ distance-weighted seeding, plus always standardize features first"
+      ]
+    },
+    {
+      "id": "k-nearest-neighbors",
+      "title": "k-Nearest Neighbors",
+      "order": 13,
+      "difficulty": "Intermediate",
+      "keyPoints": [
+        "Lazy learning: no training, just stores data",
+        "Predict = majority vote (or mean) of k closest points",
+        "k controls bias-variance: k=1 low bias/high variance, large k smooths",
+        "Must standardize features — unscaled distance is dominated by large-range features",
+        "High dimensions: distances concentrate, hurting raw k-NN over many features"
+      ]
+    },
+    {
+      "id": "l1-and-l2-regularization",
+      "title": "L1 and L2 Regularization",
+      "order": 14,
+      "difficulty": "Intermediate",
+      "keyPoints": [
+        "Adds penalty term to loss: L1 = Σ|w|, L2 = Σw²",
+        "L2 shrinks all weights smoothly (closed form: (XᵀX+λI)⁻¹Xᵀy)",
+        "L1's corner-shaped constraint region drives weights to exactly zero",
+        "L1 → sparse/interpretable models; L2 → correlated features, stability",
+        "Must standardize features first — penalty is scale-sensitive"
+      ]
+    },
+    {
+      "id": "precision-and-recall",
+      "title": "Precision and Recall",
+      "order": 15,
+      "difficulty": "Intermediate",
+      "keyPoints": [
+        "Precision = TP/(TP+FP): of predicted positives, how many are right",
+        "Recall = TP/(TP+FN): of actual positives, how many were caught",
+        "Both read the same confusion matrix, different row/column",
+        "Sliding the classification threshold trades one for the other",
+        "Report both at a named threshold — either alone can be gamed"
+      ]
+    },
+    {
+      "id": "principal-component-analysis",
+      "title": "Principal Component Analysis",
+      "order": 16,
+      "difficulty": "Intermediate",
+      "keyPoints": [
+        "Projects data onto orthogonal directions of max variance (covariance eigenvectors)",
+        "Rank components by eigenvalue = variance explained, keep top-k",
+        "Computed via SVD of centered X (avoids forming covariance matrix directly)",
+        "Requires standardized features — PCA isn't scale-invariant, large-range features dominate",
+        "Trades interpretability for compression; only captures linear structure"
+      ]
+    },
+    {
+      "id": "data-leakage",
+      "title": "Data Leakage",
+      "order": 17,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Info unavailable at inference time leaks into training",
+        "Corrupts the validation signal itself, not just the model",
+        "Preprocessing leakage: fit scaler/PCA on full data before split",
+        "Fix: wrap transforms in a Pipeline, refit per CV fold",
+        "Target leakage: feature is causally downstream of the label"
+      ]
+    },
+    {
+      "id": "decision-threshold",
+      "title": "Decision Threshold",
+      "order": 18,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Cutoff t: predict positive when score s(x) ≥ t",
+        "Chosen after training — tunable with zero retraining",
+        "Sweeping t from 0→1 traces the model's ROC/PR curve",
+        "Raising t buys precision, costs recall (fewer, surer positives)",
+        "Gotcha: fixed-t precision drifts if serving-time class balance shifts"
+      ]
+    },
+    {
+      "id": "f1-score",
+      "title": "F1 Score",
+      "order": 19,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "F1 = 2·precision·recall / (precision + recall), the harmonic mean",
+        "Harmonic mean punishes imbalance: P=1.0, R=0 gives F1=0, not 0.5",
+        "Default single-metric summary for imbalanced binary classification",
+        "Assumes FP and FN cost the same — rarely true in production",
+        "Use F-beta instead: beta>1 weights recall, beta<1 weights precision"
+      ]
+    },
+    {
+      "id": "gradient-boosting",
+      "title": "Gradient Boosting",
+      "order": 20,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Sequentially fits trees to the negative gradient of the loss",
+        "Functional gradient descent — adds a shrunk tree each round: F += lr·h_m(X)",
+        "Reduces bias (vs. bagging/Random Forest, which reduces variance via parallel averaging)",
+        "'Residual fitting' is just the squared-error special case, not the general rule",
+        "Sequential dependency (F_m needs F_{m-1}) blocks cross-tree parallelism, unlike Random Forest"
+      ]
+    },
+    {
+      "id": "logistic-regression",
+      "title": "Logistic Regression",
+      "order": 21,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Models log-odds as w·x+b; sigmoid converts it to a probability",
+        "Sigmoid isn't arbitrary — it's forced by the log-odds linearity assumption",
+        "Trained by minimizing cross-entropy loss instead of squared error",
+        "Gradient reduces to (p−y)·x — same form as linear regression's",
+        "Separable data → unregularized MLE diverges; production models always regularize"
+      ]
+    },
+    {
+      "id": "random-forests",
+      "title": "Random Forests",
+      "order": 22,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Ensemble of trees on bootstrapped rows + random feature subsets, then vote/average",
+        "Each split considers only a random feature subset (√p classification, p/3 regression)",
+        "Goal is decorrelating trees — variance floor is ρσ², not zero",
+        "~36.8% out-of-bag rows per tree give free validation, no holdout needed",
+        "Default impurity feature importance is biased; prefer permutation importance or SHAP"
+      ]
+    },
+    {
+      "id": "roc-and-pr-curves",
+      "title": "ROC and PR Curves",
+      "order": 23,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Sweep the classifier's decision threshold over scored predictions",
+        "ROC: FPR (x) vs TPR/Recall (y); PR: Recall (x) vs Precision (y)",
+        "Precision's denominator (predicted positives) is tiny vs FPR's (all negatives)",
+        "Under imbalance, ROC-AUC can look great while PR-AUC exposes noise",
+        "No-skill baseline: ROC-AUC=0.5 always; PR-AUC = positive prevalence"
+      ]
+    },
+    {
+      "id": "calibration",
+      "title": "Calibration",
+      "order": 24,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Predicted probabilities match true empirical frequency of outcome",
+        "Orthogonal to discrimination — AUC=1 possible while probabilities are garbage",
+        "Single trees overconfident (pure leaves); bagged forests underconfident (averaging shrinks to 0.5)",
+        "Fix post-hoc: Platt scaling or isotonic regression on held-out data",
+        "Both are monotonic — fix values, not ranking; never fit on training data"
+      ]
+    },
+    {
+      "id": "cross-entropy-loss",
+      "title": "Cross-Entropy Loss",
+      "order": 25,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Negative log-likelihood of the true class: L = -Σ y_k·log(ŷ_k)",
+        "One-hot y ⇒ collapses to L = -log(ŷ_correct)",
+        "Loss explodes toward ∞ as predicted p→0 for the true class",
+        "Paired with softmax, gradient w.r.t. logits simplifies to ŷ - y",
+        "MSE+sigmoid reintroduces σ'(z)≈0 when confidently wrong — vanishing gradient"
+      ]
+    },
+    {
+      "id": "neural-networks-mlp",
+      "title": "Neural Networks (MLP)",
+      "order": 26,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Stacks affine layers (Wx+b) each followed by a nonlinearity",
+        "Nonlinearity between layers lets it bend space into non-linear boundaries",
+        "Trained via backpropagation: chain rule propagates gradients through every layer",
+        "Without nonlinearity, layers collapse algebraically into one linear model (can't solve XOR)",
+        "Deep sigmoid/tanh stacks vanish gradients — fix with ReLU, He/Xavier init, normalization"
+      ]
+    },
+    {
+      "id": "support-vector-machines",
+      "title": "Support Vector Machines",
+      "order": 27,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Max-margin linear classifier: widest separating hyperplane, margin = 2/‖w‖",
+        "Soft margin adds slack ξᵢ + penalty C for non-separable data",
+        "Sparse solution: only support vectors (on/inside margin) set the boundary",
+        "Kernel trick: swap dot products for K(x,z) (e.g., RBF) for nonlinear boundaries",
+        "Must feature-scale first — margin/RBF distance is scale-sensitive"
+      ]
+    },
+    {
+      "id": "activation-functions",
+      "title": "Activation Functions",
+      "order": 28,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Nonlinear elementwise transform on Wx+b after each layer",
+        "Without it, stacked linear layers collapse to one linear map",
+        "Sigmoid/tanh saturate → derivative ≤0.25, vanishes geometrically with depth",
+        "ReLU derivative=1 for positive inputs → enables deep training",
+        "Gotcha: dead ReLUs (stuck negative) or Xavier init mismatched with ReLU"
+      ]
+    },
+    {
+      "id": "backpropagation",
+      "title": "Backpropagation",
+      "order": 29,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Reverse-mode autodiff: chain rule backward through the computational graph",
+        "Forward pass caches activations; backward pass reuses them for dL/dθ",
+        "Per layer: δ_prev = Wᵀ(δ ⊙ g'(z)) — only needs local cache + incoming δ",
+        "Cost ≈ one extra forward pass total, not per parameter — this is the whole point",
+        "Gotchas: vanishing/exploding gradients (depth compounding); memory (not compute) binds, hence checkpointing"
+      ]
+    },
+    {
+      "id": "neural-network-regularization",
+      "title": "Neural Network Regularization",
+      "order": 30,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Nets are overparameterized — weight penalties alone don't stop memorization",
+        "Dropout: zero fraction p of activations, scale survivors by 1/(1-p)",
+        "BatchNorm/LayerNorm smooth the loss landscape, incidentally regularizing",
+        "Early stopping caps gradient steps; augmentation enlarges effective data",
+        "AdamW decouples weight decay from grad scaling — Adam's L2 doesn't"
+      ]
+    },
+    {
+      "id": "normalization-batch-and-layer",
+      "title": "Normalization (Batch and Layer)",
+      "order": 31,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Standardize pre-activations to zero mean/unit variance, then learned affine y = γx̂ + β",
+        "BatchNorm reduces over the batch (+ spatial dims), per feature",
+        "LayerNorm reduces over the feature dim, per individual example",
+        "BatchNorm needs frozen running mean/var at inference (train/eval mode); LayerNorm has none",
+        "CNNs default to BatchNorm; Transformers/LLMs default to LayerNorm/RMSNorm (variable length, batch-size-1 decoding)"
+      ]
+    },
+    {
+      "id": "optimizers-sgd-momentum-adam",
+      "title": "Optimizers (SGD, Momentum, Adam)",
+      "order": 32,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Optimizer turns a loss gradient into a parameter update each step",
+        "SGD steps directly opposite the mini-batch gradient, scaled by a fixed LR",
+        "Momentum: EMA of past gradients (velocity) cancels oscillation, speeds consistent progress",
+        "Adam: bias-corrected 1st & 2nd moment give each parameter its own adaptive step size",
+        "Gotcha: momentum's effective step ≈ lr/(1−β); Adam needs LR warmup + gradient clipping"
+      ]
+    },
+    {
+      "id": "self-attention",
+      "title": "Self-Attention",
+      "order": 33,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Each token: weighted average of all tokens' value vectors",
+        "Weights = softmax(QK^T) — content-based, not fixed by position",
+        "Q=what I seek, K=what I offer, V=what I give if attended",
+        "Divide by sqrt(d_k): keeps dot-product variance at 1, avoids softmax saturation",
+        "Causal mask: set future scores to -inf before softmax, not after"
+      ]
+    },
+    {
+      "id": "vanishing-and-exploding-gradients",
+      "title": "Vanishing and Exploding Gradients",
+      "order": 34,
+      "difficulty": "Advanced",
+      "keyPoints": [
+        "Backprop gradient = chain-rule product of per-layer Jacobians",
+        "Factors consistently <1 vanish exponentially; >1 explode exponentially with depth",
+        "Sigmoid derivative maxes at 0.25 → 20 layers ≈ dead gradient; ReLU (deriv=1) fixes this",
+        "RNNs: gradient scales as W_hh^T — spectral radius <1 vanishes, >1 explodes over timesteps",
+        "Same mechanism both directions — fix via normalization, residual connections, gradient clipping, not just bigger init"
+      ]
+    }
+  ]
+}

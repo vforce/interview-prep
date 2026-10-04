@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: bits
+fam: triebits
+label: Bit Manipulation
+order: 20
+trigger: count bits, single number, subset via mask, missing number
+insight: x & (x−1) clears the lowest set bit; XOR cancels pairs; dp[i] = dp[i>>1] + (i&1)
+probs:
+- {n: Number of 1 Bits, slug: number-of-1-bits, d: E}
+- {n: Single Number II, slug: single-number-ii, d: M}
+- {n: Min One-Bit Ops to Make Integer Zero, slug: minimum-one-bit-operations-to-make-integers-zero, d: H}

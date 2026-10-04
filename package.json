@@ -1,0 +1,11 @@
+{
+  "name": "interview-prep",
+  "private": true,
+  "description": "dev-only: jsdom-based tests for the vanilla-JS frontend (study.js). The app itself ships no npm deps.",
+  "scripts": {
+    "test": "node --test tests/*.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "^27.0.1"
+  }
+}

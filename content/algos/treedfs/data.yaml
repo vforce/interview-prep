@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: treedfs
+fam: trees
+label: Tree DFS
+order: 11
+trigger: depth, diameter, path sum, validate, lowest common ancestor
+insight: recurse, combine children's returns, return one value up while updating a global
+probs:
+- {n: Maximum Depth of Binary Tree, slug: maximum-depth-of-binary-tree, d: E}
+- {n: LCA of a Binary Tree, slug: lowest-common-ancestor-of-a-binary-tree, d: M}
+- {n: Binary Tree Maximum Path Sum, slug: binary-tree-maximum-path-sum, d: H}

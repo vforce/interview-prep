@@ -1,0 +1,11 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: triedfs
+fam: hard
+label: Trie + DFS
+order: 32
+trigger: search many words in a grid at once
+insight: build a trie of all the words, then DFS the grid walking the trie in lockstep
+probs:
+- {n: Maximum XOR of Two Numbers, slug: maximum-xor-of-two-numbers-in-an-array, d: M}
+- {n: Word Search II, slug: word-search-ii, d: H}

@@ -1,0 +1,103 @@
+{
+  "id": "decision-trees",
+  "title": "Decision Trees",
+  "definition": "A decision tree is a supervised model that recursively partitions the feature space with axis-aligned if/else splits chosen to greedily maximize impurity reduction at each node, predicting the majority class (classification) or mean target (regression) of the training examples that reach a given leaf.",
+  "summary": "Decision trees (CART) build a hierarchy of threshold splits by greedily minimizing Gini/entropy (classification) or variance/MSE (regression) at every node. They need no feature scaling and handle mixed data types natively, but an unconstrained tree memorizes training noise — high variance, low bias — which is exactly why production systems almost always use them as the base learner inside bagged or boosted ensembles rather than standalone.",
+  "objectives": [
+    "Explain the CART split-selection rule (Gini/entropy/information gain, variance reduction) and why it's greedy rather than globally optimal",
+    "Compute Gini impurity and information gain for a split by hand",
+    "Tie tree depth/leaf-size hyperparameters directly to the bias-variance tradeoff and diagnose over/underfitting from train/val gaps",
+    "Decide when a standalone interpretable tree is the right production choice vs. an ensemble",
+    "Spot the classic gotchas: instability to data perturbation, high-cardinality categorical bias, and failure to extrapolate in regression"
+  ],
+  "lesson": "A decision tree learns via recursive binary splitting. At each node, CART scans every feature and threshold and picks the split that minimizes the weighted impurity of the two children: Gini impurity or entropy for classification, variance (MSE) for regression. It recurses on each child until a stopping rule fires — max depth, a minimum leaf size, or no split improves impurity enough — then predicts using the majority class (or mean) of training points in the leaf a query lands in.\n\nThe key thing to internalize: this is greedy, local search. The globally optimal tree is NP-hard to find, so CART never looks ahead — a locally-best split can block a much better tree two levels down. Combined with the model's unconstrained flexibility, this produces its signature failure mode: grown deep enough, a tree partitions down to individual training points — 0 training error, terrible generalization. This *is* the bias-variance tradeoff made concrete: a shallow tree underfits (high bias, too few regions); a deep, unpruned tree has near-zero bias but very high variance, because changing one early split rearranges every split beneath it — small perturbations in the training data can produce a structurally different tree.\n\nWorked intuition: say the true decision boundary is diagonal (a linear combination of income and debt-ratio). A tree can only approximate a diagonal with a staircase of axis-aligned splits (`income > x`, then `debt_ratio > y`, …), needing many splits and much more data than a single linear boundary would. The same limitation shows up in regression as an extrapolation failure: a leaf predicts a constant (a training-set mean), so a query far outside the training range just returns the nearest boundary leaf's value instead of a projected trend — trees don't extrapolate.\n\nProduction takeaway: you almost never ship one deep, unconstrained tree. Either constrain it (`max_depth`, `min_samples_leaf`, cost-complexity pruning) and accept some bias for interpretability, or deliberately exploit its low-bias/high-variance nature by averaging many of them (Random Forest) or boosting shallow ones (GBM/XGBoost) — the standard production pattern for trading single-tree interpretability for accuracy.",
+  "examples": "**Example 1 — Gini impurity and information gain by hand**\n\n```\nParent node: 10 examples, 6 positive / 4 negative\nParent Gini = 1 - (0.6² + 0.4²) = 1 - (0.36 + 0.16) = 0.48\n\nSplit on \"income > 50k\":\n  Left  (5 ex: 4 pos, 1 neg): Gini = 1 - (0.8² + 0.2²) = 0.32\n  Right (5 ex: 2 pos, 3 neg): Gini = 1 - (0.4² + 0.6²) = 0.48\n\nWeighted child Gini = (5/10)(0.32) + (5/10)(0.48) = 0.40\nInformation gain    = 0.48 - 0.40 = 0.08\n```\nCART computes this gain for every candidate (feature, threshold) pair and keeps the split with the largest gain.\n\n**Example 2 — cost-complexity pruning instead of hand-tuning `max_depth`**\n\n```python\nfrom sklearn.tree import DecisionTreeClassifier\nfrom sklearn.model_selection import cross_val_score\n\n# get the pruning path from a fully-grown tree\npath = DecisionTreeClassifier(random_state=0).cost_complexity_pruning_path(X_train, y_train)\n\nbest_alpha, best_score = 0.0, -1.0\nfor alpha in path.ccp_alphas:\n    clf = DecisionTreeClassifier(ccp_alpha=alpha, random_state=0)\n    score = cross_val_score(clf, X_train, y_train, cv=5).mean()\n    if score > best_score:\n        best_alpha, best_score = alpha, score\n\ntree = DecisionTreeClassifier(ccp_alpha=best_alpha, random_state=0).fit(X_train, y_train)\n```\n`ccp_alpha` penalizes leaf count directly — sweeping it and selecting by CV is the standard production way to trade tree complexity for generalization.",
+  "tradeoffs": "Use a standalone tree when you need auditable, human-readable rules (regulated decisions like credit or medical triage), fast low-latency inference, or a zero-preprocessing baseline on mixed numeric/categorical data. Avoid it when accuracy is the priority — bagged/boosted ensembles beat a single tree on almost all tabular tasks; when the true boundary is smooth or linear — trees need many splits (staircase effect) and more data than a linear model; when you need stable feature importances across retrains — single trees are high-variance and restructure with small data changes; or in regression where queries may fall outside the training range, since trees can't extrapolate a trend. Also watch information-gain criteria overweighting high-cardinality categorical features.",
+  "diagnosticQuiz": [
+    {
+      "q": "What best defines how a (CART) decision tree makes a prediction?",
+      "choices": [
+        "It routes the input through a learned sequence of axis-aligned feature-threshold splits and outputs the majority class or mean of the training points in the resulting leaf",
+        "It computes a weighted sum of all input features and applies a threshold",
+        "It finds the k most similar training examples and averages their labels",
+        "It projects inputs into a higher-dimensional space and finds a separating hyperplane"
+      ],
+      "answer": 0,
+      "explanation": "This is the CART prediction mechanism — recursive axis-aligned partitioning followed by a leaf statistic. Option A describes a linear/logistic model, B describes k-NN, and D describes a kernel SVM; all are tempting because they're also supervised methods, but each relies on a fundamentally different mechanism (weighted combination, instance similarity, margin) instead of partitioning."
+    },
+    {
+      "q": "A node has 10 examples: 8 of class A, 2 of class B. What is its Gini impurity?",
+      "choices": [
+        "0.68",
+        "0.32",
+        "0.50",
+        "0.16"
+      ],
+      "answer": 1,
+      "explanation": "Gini = 1 − (0.8² + 0.2²) = 1 − (0.64 + 0.04) = 0.32. 0.68 is the common slip of stopping at Σp² and forgetting the \"1 −\" step; 0.5 wrongly assumes a balanced node; 0.16 comes from squaring only the minority fraction instead of summing both squared class fractions."
+    },
+    {
+      "q": "Why does CART use a greedy, node-by-node split search instead of searching for the single best overall tree?",
+      "choices": [
+        "Because impurity measures like Gini are only mathematically valid when applied greedily",
+        "Because greedy search is proven to always find the globally optimal tree",
+        "Because a globally optimal tree would always overfit, so greedy search is a deliberate regularizer",
+        "Because finding the globally optimal decision tree is NP-hard, so greedy local search is the only tractable approximation"
+      ],
+      "answer": 3,
+      "explanation": "Exhaustively searching all possible tree structures is NP-hard, so CART approximates by picking the locally-best split at each node and never revisiting it. The tempting wrong answer treats greediness as a regularizer (D) — it isn't; it's a computational necessity, and by itself it constrains nothing about tree size, so it can just as easily overfit as underfit."
+    },
+    {
+      "q": "In a production system, when should you prefer a single, shallow decision tree over a Random Forest or gradient-boosted ensemble?",
+      "choices": [
+        "When the true decision boundary is highly non-linear and complex",
+        "When the training set is very large and you want to minimize variance",
+        "When you need a human-auditable rule set for a regulated decision (e.g., credit approval) and can accept some accuracy loss",
+        "When maximum predictive accuracy on tabular data is the only objective"
+      ],
+      "answer": 2,
+      "explanation": "A single tree's main production advantage is that a human can read and audit the exact decision path — valuable when a decision must be explainable or contestable. The other options describe exactly where ensembles win: averaging/boosting many trees virtually always beats one tree on accuracy and variance, regardless of boundary complexity or data size."
+    },
+    {
+      "q": "A decision tree regressor is trained on house prices for homes between 500 and 3,000 sq ft. What happens when you query it with a 10,000 sq ft house?",
+      "choices": [
+        "It returns the mean target value of whichever training leaf's boundary is closest to 10,000 sq ft — no extrapolation",
+        "It returns the global average price across the entire training set",
+        "It linearly extrapolates the price trend beyond the training range",
+        "It raises an out-of-range error"
+      ],
+      "answer": 0,
+      "explanation": "A leaf's prediction is a constant — the mean of the training points that landed there — so any input beyond the last split threshold falls into the extreme leaf and gets that leaf's constant, with no notion of trend. The tempting wrong answer (A) assumes linear-regression-style extrapolation, which trees can't do since they have no slope term."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Why do Random Forests use deep, low-bias trees while boosting methods like XGBoost use shallow ones?",
+      "a": "They target opposite halves of the bias-variance tradeoff. **Random Forest fights variance**: it bags many independent, deep/low-bias trees and decorrelates them further with feature subsampling, then averages — averaging N decorrelated high-variance estimators drives variance down while bias stays low, so each tree should be as unbiased (deep) as possible. **Boosting fights bias**: it fits trees sequentially, each correcting the current ensemble's residual/gradient. A deep, low-bias base learner would fit noise and overfit within a few rounds, so boosting deliberately uses shallow, high-bias \"weak learners\" and reduces bias gradually via many small, learning-rate-scaled steps."
+    },
+    {
+      "q": "A single decision tree hits 99% train accuracy and 68% test accuracy on a fraud model. Walk through diagnosing and fixing it in production.",
+      "a": "This is textbook overfitting — near-zero training bias, huge variance gap. First check the tree's actual depth/leaf count; it's almost certainly unconstrained. Fix by constraining `max_depth`/`min_samples_leaf`/`min_samples_split`, or better, sweep `ccp_alpha` with cross-validated cost-complexity pruning. Since fraud is rare/imbalanced, also verify stratified CV splits and `class_weight` — a few rare-class leaves can inflate apparent train accuracy. The durable production fix is usually to stop shipping a standalone tree at all and move to an ensemble (Random Forest or gradient boosting), which gets far better bias-variance behavior on this kind of tabular, imbalanced problem."
+    },
+    {
+      "q": "How does a decision tree handle a categorical feature with ~1000 levels (e.g., zip code), and what's the risk?",
+      "a": "Standard CART/sklearn needs numeric-encoded input — one-hot explodes dimensionality and makes each single-category split weak, while label/ordinal encoding imposes a fake order. Libraries with native categorical support (LightGBM, CatBoost) instead search efficient subset partitions directly. The risk is statistical: a high-cardinality feature offers exponentially many candidate splits, so the tree is likely to find one that looks great on the training set purely by chance (a multiple-comparisons effect), inflating that feature's apparent importance and hurting generalization. Mitigate with cross-validated target/frequency encoding, grouping rare categories, or a library with proper categorical-aware splitting."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "bias-variance-tradeoff",
+    "gradient-boosting",
+    "random-forests",
+    "supervised-learning-basics"
+  ],
+  "followUps": [
+    "gradient-boosting",
+    "random-forests"
+  ],
+  "metadata": {
+    "inputHash": "5406137187dd4c3f",
+    "model": "sonnet",
+    "generatedAt": "2026-07-05T10:27:23Z"
+  }
+}

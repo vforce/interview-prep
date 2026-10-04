@@ -1,0 +1,11 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: twoheaps
+fam: hard
+label: Two Heaps (Median)
+order: 31
+trigger: running median of a stream or window
+insight: max-heap for the low half + min-heap for the high half; rebalance the sizes to within 1
+probs:
+- {n: Find Median from Data Stream, slug: find-median-from-data-stream, d: H}
+- {n: Sliding Window Median, slug: sliding-window-median, d: H}

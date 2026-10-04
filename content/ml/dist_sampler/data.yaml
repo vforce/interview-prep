@@ -1,0 +1,89 @@
+# One study card. `id` is stable — it keys spaced-repetition progress. Don't rename it.
+
+id: dist_sampler
+type: kata
+area: PyTorch
+order: 48
+title: DistributedSampler from scratch (PyTorch)
+prompt: >-
+  Rung 3 — "now make it distributed". Reimplement `DistributedSampler`: return the dataset indices
+  rank `rank` of `world_size` should see in epoch `epoch`. Three things are load-bearing. (1) Derive
+  the permutation from `seed + epoch` alone, so every rank computes the *same* order without talking
+  to the others. (2) `drop_last=False` must pad the permutation by wrapping around, so every rank
+  gets an identical count — a rank that runs out of batches early never reaches the gradient
+  all-reduce, and DDP hangs forever. That deadlock is the reason the padding exists, and it's the
+  answer they're listening for. Its price: the padded samples are *duplicated* across ranks, which
+  is harmless when training but double-counts eval metrics, so you dedupe before scoring. (3)
+  Without `epoch` in the seed, `set_epoch()` is a no-op and every epoch replays the same order.
+  Taking rank/epoch as plain args (instead of `dist.get_rank()`) is what lets you test the partition
+  in one process — no collectives needed.
+sig: 'def dist_indices(n, world_size, rank, epoch=0, seed=0, shuffle=True, drop_last=False):'
+stub: "import torch\n\ndef dist_indices(n, world_size, rank, epoch=0, seed=0, shuffle=True, drop_last=False):\n    # permute from (seed + epoch) → pad or truncate to a multiple of world_size → strided slice\n    \n"
+reference: |
+  import torch
+
+  def dist_indices(n, world_size, rank, epoch=0, seed=0, shuffle=True, drop_last=False):
+      # Every rank runs this exact function, on its own machine, and they never talk to each
+      # other. Yet they must agree on one permutation and then each take a different slice of it.
+      if shuffle:
+          # seed + epoch, NOT seed. Same (seed, epoch) on every rank -> same permutation, derived
+          # independently, zero communication. THAT is the whole design.
+          # Drop the "+ epoch" and set_epoch() becomes a no-op: every epoch replays the identical
+          # order, and your model sees the same batch composition forever. Classic silent bug.
+          g = torch.Generator().manual_seed(seed + epoch)
+          idx = torch.randperm(n, generator=g).tolist()     # the full dataset, permuted
+      else:
+          idx = list(range(n))
+
+      if drop_last:
+          total = (n // world_size) * world_size            # round DOWN to a multiple of world_size
+          idx = idx[:total]                                 # ...and discard the remainder
+      else:
+          total = -(-n // world_size) * world_size          # round UP. -(-a // b) is ceiling division
+          pad = total - n
+          if pad:
+              # Wrap around to the front and repeat until every rank has an EQUAL count.
+              # This is not tidiness. DDP averages gradients with an all-reduce, a collective that
+              # every rank must enter. A rank that runs out of batches one step early never enters
+              # it — so the others block on it, forever. Equal counts are what prevent the hang.
+              # The price: `pad` samples now appear TWICE, on different ranks. Fine for training
+              # (a couple of extra gradients), fatal for eval — dedupe before you compute metrics.
+              idx += (idx * (pad // n + 1))[:pad]
+
+      # Deal the cards round-robin: rank 0 takes 0, W, 2W...; rank 1 takes 1, W+1, ... Disjoint by
+      # construction, equal-sized because we padded, and no rank needed to be told what the others got.
+      return idx[rank::world_size]                          # (total,) -> (total // world_size,)
+test: |
+  n, W = 10, 3                                 # 10 is not divisible by 3, so the padding kicks in
+  parts = [dist_indices(n, W, r, epoch=0, seed=7) for r in range(W)]
+
+  # 1. every rank gets the same count — a short rank never reaches the all-reduce and DDP hangs.
+  #    That deadlock is the entire reason the padding exists.
+  assert {len(p) for p in parts} == {4}, [len(p) for p in parts]      # ceil(10 / 3) = 4
+
+  # 2. every sample is seen at least once
+  flat = [i for p in parts for i in p]
+  assert set(flat) == set(range(n)), set(range(n)) - set(flat)
+
+  # 3. ...and the price of that padding is duplicates: 12 slots for 10 samples repeats 2 of them,
+  #    on different ranks. Harmless when training, but it double-counts eval — dedupe before metrics.
+  assert len(flat) == 12 and len(flat) - len(set(flat)) == 2, flat
+
+  # 4. when world_size divides the dataset there is no padding, and the shards ARE strictly disjoint
+  ev = [dist_indices(12, W, r, seed=7) for r in range(W)]
+  ev_flat = [i for p in ev for i in p]
+  assert len(ev_flat) == len(set(ev_flat)) == 12, ev
+
+  # 5. deterministic per (seed, epoch) — this is what lets ranks agree without communicating
+  assert parts[1] == dist_indices(n, W, 1, epoch=0, seed=7)
+
+  # 6. set_epoch must actually reshuffle; forget the epoch and every epoch replays the same order
+  assert parts[0] != dist_indices(n, W, 0, epoch=1, seed=7), "set_epoch(e) had no effect"
+
+  # 7. drop_last truncates instead of padding: exact division, no duplicates, 1 sample dropped
+  dl = [dist_indices(n, W, r, seed=7, drop_last=True) for r in range(W)]
+  dl_flat = [i for p in dl for i in p]
+  assert {len(p) for p in dl} == {3}, [len(p) for p in dl]
+  assert len(dl_flat) == len(set(dl_flat)) == 9, dl_flat
+
+  print("PASS - 8 checks")

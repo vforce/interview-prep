@@ -1,0 +1,98 @@
+{
+  "id": "mcp-vs-alternatives",
+  "title": "MCP vs Alternatives",
+  "definition": "\"MCP vs Alternatives\" is the production decision of whether to expose a tool/data integration as a standardized MCP client-server pair or instead wire it directly via provider-native function calling, framework-specific tool wrappers, OpenAPI-based plugins, or a RAG-only pipeline.",
+  "summary": "MCP replaces bespoke, per-app tool integrations with one standard protocol, turning an M×N integration problem (apps × tools) into M+N by giving every host and every provider a shared interface. Alternatives — native function calling, LangChain-style tool wrappers, OpenAPI plugins, RAG — are simpler for a single consumer but don't compose across multiple apps or teams without duplicated glue. The production call is a reuse-vs-overhead tradeoff: standardize once ≥2 consumers share a capability, stay native for a one-off.",
+  "objectives": [
+    "Explain the M×N vs M+N integration argument and when it actually applies.",
+    "Compare MCP against native function calling, framework tool wrappers, OpenAPI plugins, and RAG.",
+    "Map MCP's three primitives (tools/resources/prompts) onto what each alternative can and can't do.",
+    "Recognize that MCP standardizes the interface, not the model's tool-selection reasoning.",
+    "Choose MCP vs. an alternative for a given production scenario and justify the call."
+  ],
+  "lesson": "Before MCP, every AI app that wanted tools or live context hand-wrote its own glue: parse the model's tool-call output, execute it, marshal the result back into the conversation. With M host apps (a chat UI, an IDE agent, a Slack bot) each needing N tools (GitHub, a DB, internal search), that's M×N bespoke integrations, none portable. MCP standardizes the *interface* between host and provider instead of the glue itself: any MCP client can talk to any MCP server over a shared transport (stdio locally, HTTP/SSE remotely) using JSON-RPC. Build one server per tool and one client per host and you get M+N — the same trick LSP played for editors×languages. A server exposes three primitives: **tools** (model-invoked actions), **resources** (app-fetched, read-only context — think GET endpoints), and **prompts** (user-invoked templates).\n\nWorked intuition: a \"search internal docs\" capability written as native function calling lives entirely inside one app — you own the schema, the execution, and the result formatting, and no one else benefits. Written as an MCP server, it's a standalone process that a chat UI, an IDE agent, and a teammate's custom agent can all connect to unchanged, because they all speak the same protocol.\n\nThe key gotcha: MCP is a *protocol*, not a capability multiplier. An MCP tool call still bottoms out in the exact function-calling primitive the model already has — it sees a schema, emits a structured call, something executes it, a result comes back. MCP doesn't make a weaker model better at picking the right tool; it only changes *where the tool lives and who maintains it* (an independently versioned server, not code baked into your app). So for a single app with one or two static tools, MCP is frequently net overhead: a process to run, a transport to secure, a discovery round-trip (`list_tools`) before the first real call. The crossover happens the moment a second consumer — another app, another team, an external partner — needs the same capability.",
+  "examples": "**1. The integration count.** 4 host apps × 6 shared tools:\n```\nPoint-to-point:  4 × 6 = 24 custom integrations\nMCP:             4 clients + 6 servers = 10 pieces, and app #5 costs +1 (not +6)\n```\n\n**2. Same tool, two shapes (Python).**\n```python\n# Native function calling: schema + execution live inside ONE app\ntools = [{\n    \"name\": \"get_weather\",\n    \"description\": \"Get current weather for a city.\",\n    \"input_schema\": {\n        \"type\": \"object\",\n        \"properties\": {\"city\": {\"type\": \"string\"}},\n        \"required\": [\"city\"],\n    },\n}]\nresp = client.messages.create(model=\"claude-...\", tools=tools, messages=messages)\nfor block in resp.content:\n    if block.type == \"tool_use\" and block.name == \"get_weather\":\n        result = fetch_weather(block.input[\"city\"])   # executed here, in this app only\n```\n```python\n# MCP: same capability, exposed once, reusable by any MCP client\nfrom mcp.server.fastmcp import FastMCP\n\nmcp = FastMCP(\"weather\")\n\n@mcp.tool()\ndef get_weather(city: str) -> str:\n    \"\"\"Get current weather for a city.\"\"\"\n    return fetch_weather(city)\n\nif __name__ == \"__main__\":\n    mcp.run()   # stdio locally, or mount over HTTP for remote clients\n```\nSame schema shape either way — the difference is the second block is a standalone server any host can point at, not code wired into one app.",
+  "tradeoffs": "MCP buys reuse across hosts/teams, decoupled deployment and versioning, structured discovery (`list_tools`/`list_resources`), and a standard auth story for remote access — at the cost of running/monitoring another service, an extra hop, and a still-evolving spec. Native function calling is simplest and lowest-latency for a single app but doesn't compose: every new consumer reimplements the same glue and schemas drift apart. RAG-only pipelines are fine for static, read-heavy knowledge but can't take actions or serve live parameterized queries. OpenAPI-style plugins sit conceptually close to MCP but lack typed session/discovery/prompt primitives and are largely superseded. Default to MCP once ≥2 independent consumers need the same capability or you want to plug into the existing ecosystem of open MCP servers; default away from it for a single app with a couple of stable, low-churn tools.",
+  "diagnosticQuiz": [
+    {
+      "q": "Which statement best defines the Model Context Protocol (MCP)?",
+      "choices": [
+        "A proprietary OpenAI API for retrieval-augmented generation",
+        "An open client-server protocol that standardizes how applications expose tools, resources, and prompts to LLMs",
+        "A fine-tuning technique for improving a model's function-calling accuracy",
+        "A prompt-engineering pattern for chaining multiple tool calls in one turn"
+      ],
+      "answer": 1,
+      "explanation": "MCP defines a standard client-server interface (transport + message schema) so any compliant host can talk to any compliant server exposing tools/resources/prompts — it says nothing about model weights or prompting technique. The fine-tuning distractor is tempting because people conflate \"better tool use\" with \"a protocol for tool access\"; MCP doesn't change how well a model reasons about which tool to call, only how the tool gets described and discovered."
+    },
+    {
+      "q": "Your org has 4 host apps (chat UI, IDE agent, Slack bot, CLI) that each need the same 6 internal tools. Using hand-rolled point-to-point integrations vs. MCP (one client per host, one server per tool), how many integrations does each approach need?",
+      "choices": [
+        "6 point-to-point integrations vs 4 with MCP",
+        "24 point-to-point integrations vs 24 with MCP",
+        "10 point-to-point integrations vs 24 with MCP",
+        "24 point-to-point integrations vs 10 with MCP"
+      ],
+      "answer": 3,
+      "explanation": "Point-to-point is M×N = 4×6 = 24 bespoke integrations, one per app-tool pair. MCP is M+N = 4+6 = 10: each host implements one client, each tool implements one server, and any client can talk to any server. The tempting wrong answer inverts which side grows multiplicatively — MCP eliminates the product, it doesn't create it."
+    },
+    {
+      "q": "MCP is often compared to the Language Server Protocol (LSP). What's the core analogy?",
+      "choices": [
+        "Both use gRPC for low-latency binary transport",
+        "Both were designed exclusively for use inside VS Code",
+        "Both turn an M×N integration problem into an M+N problem by giving both sides one interface to implement once",
+        "Both replace structured schemas by having the model infer intent from free text"
+      ],
+      "answer": 2,
+      "explanation": "LSP let any editor support any language by implementing one client-side protocol instead of a bespoke plugin per editor-language pair; MCP does the same for AI apps and tool/data providers. The gRPC option is wrong on mechanics (MCP transport is JSON-RPC over stdio or HTTP) and represents the common mistake of assuming a modern-sounding transport instead of checking what the spec actually says."
+    },
+    {
+      "q": "You're building a single internal Slack bot that calls exactly one stable API (ticket lookup), and no other app will ever consume it. What's the production-sensible choice?",
+      "choices": [
+        "Build an OpenAPI plugin spec and register it with a plugin store",
+        "Use the model provider's native function-calling API directly in the bot's code",
+        "Stand up a dedicated MCP server with OAuth-secured remote transport for this one tool",
+        "Route every ticket lookup through a RAG pipeline over a nightly export of the ticket DB"
+      ],
+      "answer": 1,
+      "explanation": "One consumer, one stable tool — there's no reuse to amortize MCP's server, deployment, and auth overhead against, so native function calling is the least code and least infrastructure for the same outcome. Standing up an MCP server here is the over-engineering trap: MCP's value scales with the number of consumers sharing the integration, and here that number is one."
+    },
+    {
+      "q": "A team deploys an MCP server reachable over HTTP from multiple external clients and assumes this gives the same security guarantees as a local stdio MCP server launched as a subprocess by a trusted host. What's the flaw?",
+      "choices": [
+        "JSON-RPC is inherently insecure and should never be used for tool calls",
+        "Remote HTTP-based MCP servers cross a trust boundary and need explicit authorization, while a local stdio server inherits the trust of the process that spawned it",
+        "MCP forbids HTTP transport entirely for production use",
+        "stdio servers don't support tools, only resources, so the comparison is moot"
+      ],
+      "answer": 1,
+      "explanation": "A stdio server is spawned and owned by its host process, so it inherits that process's trust — there's no network boundary to secure. A remote HTTP server is reachable by anyone who can hit the endpoint, so MCP's spec requires an explicit authorization layer for that case. The common gotcha is assuming \"it's MCP\" implies uniform security regardless of transport, when the trust model actually changes with how the server is reached."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "Why would a production team choose MCP over wiring native function calling directly into their app?",
+      "a": "Because MCP amortizes the integration cost across every consumer that needs the same tool/data source — build the server once, and any MCP-speaking host (internal chat UI, IDE agent, a partner's agent) can use it unchanged, with independent versioning and deployment. It also buys access to a growing ecosystem of ready-made servers (filesystem, Git, Slack, Postgres, etc.) instead of writing wrappers from scratch. If there's genuinely only one consumer, this benefit doesn't materialize, and native function calling stays leaner."
+    },
+    {
+      "q": "What operational costs does adopting MCP add that a team should plan for?",
+      "a": "A new process/service to deploy, monitor, and keep available; a transport to secure — stdio only extends the trust of the local host process, but any HTTP/remote deployment needs an explicit authorization layer; an extra hop to debug when a tool call misbehaves (client → server → downstream API, vs. one in-process call); and exposure to a still-evolving spec, so upgrades can require coordinated client/server version bumps."
+    },
+    {
+      "q": "In a design review, how do you decide whether a new internal capability should be an MCP server or just a REST endpoint called via native function calling?",
+      "a": "Count the consumers. If ≥2 distinct apps, teams, or external partners need this capability — especially ones whose codebase you don't control — standardize it as an MCP server so each just implements a client once. If it's a single app with one or two stable, low-churn tools, native function calling is less code, less infrastructure, and lower latency, with no reuse benefit sacrificed because there's nothing yet to reuse."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "security-and-authorization",
+    "tools"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "1f35618d8131d54a",
+    "model": "sonnet",
+    "generatedAt": "2026-07-06T07:27:40Z"
+  }
+}

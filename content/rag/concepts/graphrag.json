@@ -1,0 +1,98 @@
+{
+  "id": "graphrag",
+  "title": "GraphRAG",
+  "definition": "GraphRAG is a RAG architecture that has an LLM extract a knowledge graph of entities and relationships from the corpus at index time, clusters that graph into hierarchical communities with precomputed LLM summaries, and answers queries via graph traversal (local search) or map-reduce over community summaries (global search) instead of relying only on chunk-embedding similarity.",
+  "summary": "Standard vector RAG retrieves the top-k chunks most similar to a query, which works for local fact lookup but fails on \"global\" questions whose answer is spread across the whole corpus. GraphRAG fixes this by extracting entities/relations into a knowledge graph, clustering it into communities (Leiden/Louvain), and having an LLM pre-summarize each community. At query time it either traverses the graph around a specific entity (local) or map-reduces over community summaries (global) to synthesize a corpus-wide answer.",
+  "objectives": [
+    "Explain why top-k vector retrieval fails on global/aggregate queries and how community structure fixes it.",
+    "Describe the GraphRAG indexing pipeline: entity/relation extraction, graph construction, community detection, hierarchical summarization.",
+    "Contrast local search (entity/graph traversal) vs global search (map-reduce over community summaries).",
+    "Evaluate the cost/latency tradeoffs of GraphRAG indexing and decide when it's justified vs plain/hybrid vector RAG in production."
+  ],
+  "lesson": "Vector RAG retrieves chunks by embedding similarity: fine when the answer lives in one or two chunks (\"What was Q3 revenue?\"). It breaks down on *global* queries whose answer is a property of the whole corpus, not any single chunk — \"What are the recurring risk themes across all 40 earnings calls?\" No chunk says \"recurring theme\"; top-k similarity search just returns a handful of chunks that happen to mention \"risk,\" missing most of the signal and any cross-document synthesis.\n\nGraphRAG (Microsoft Research, 2024, *\"From Local to Global\"*) restructures the index so that synthesis happens once, offline, instead of at every query. Indexing has four stages:\n\n1. **Extraction** — for every chunk, prompt an LLM to pull out `(entity, relation, entity)` triples plus short descriptions.\n2. **Graph build** — merge triples into a knowledge graph: nodes are entities, edges are relations.\n3. **Community detection** — cluster the graph (Leiden/Louvain) into hierarchical groups of densely-connected entities — fine-grained clusters nested inside coarser ones.\n4. **Summarization** — an LLM writes a summary per community, bottom-up, e.g. \"Acme and Globex both cite chip shortages and rising freight costs as 2023 risk factors.\"\n\nAt query time, GraphRAG picks a mode:\n- **Global search** (thematic/holistic questions): map the question over all (or top-ranked) community summaries, generate a partial answer from each, then reduce those into one synthesized response. The synthesis already happened at index time, per community — that's what makes \"what are the themes\" answerable at all.\n- **Local search** (entity-centric questions, e.g. \"What risks does Acme face?\"): start from the matched entity node and walk its edges — structurally similar to vector RAG but graph-guided instead of pure similarity.\n\n**The key gotcha**: this only pays off for genuinely *global* questions. For local fact lookup, GraphRAG's local search is roughly vector RAG with extra traversal overhead — no accuracy win, often worse latency. And entity extraction is noisy: \"Acme Corp,\" \"Acme,\" and \"Acme Corporation\" get extracted as separate nodes unless you add an explicit resolution/dedup step — skip it and your communities silently fragment, degrading summary quality.",
+  "examples": "### Example 1: minimal indexing + global query\n\n```python\nimport networkx as nx\nfrom networkx.algorithms.community import louvain_communities\n\n# 1. Index time: LLM-extracted (entity, relation, entity) triples, one call per chunk\ntriples = [\n    (\"Acme Corp\", \"affected_by\", \"Chip Shortage\"),\n    (\"Acme Corp\", \"mitigates_via\", \"Dual Sourcing\"),\n    (\"Globex Inc\", \"affected_by\", \"Chip Shortage\"),\n    (\"Globex Inc\", \"affected_by\", \"Logistics Costs\"),\n]\n\ng = nx.Graph()\nfor src, rel, dst in triples:\n    g.add_edge(src, dst, relation=rel)\n\n# 2. Cluster into communities (Leiden in production GraphRAG; Louvain here for a quick demo)\ncommunities = louvain_communities(g, seed=42)\n\n# 3. LLM summarizes each community once, offline, and the result is cached\ncommunity_summaries = {\n    i: llm_summarize(g.subgraph(c))   # e.g. \"Acme & Globex both cite chip shortages...\"\n    for i, c in enumerate(communities)\n}\n\n# 4. Query time — global search is map-reduce over the cached summaries\ndef global_search(question):\n    partials = [llm_answer(question, s) for s in community_summaries.values()]  # map\n    return llm_reduce(question, partials)                                       # reduce\n\nglobal_search(\"What supply-chain themes recur across our portfolio companies?\")\n```\n\n### Example 2: local vs. global on the same corpus\n\n| Query | Mode | What happens | Result |\n|---|---|---|---|\n| \"What risk did Acme mention?\" | Local (traverse \"Acme Corp\") | Walk edges: `affected_by → Chip Shortage`, `mitigates_via → Dual Sourcing` | Precise, cheap — vector RAG does about as well |\n| \"What risk themes recur across all portfolio companies?\" | Global (map-reduce over community summaries) | Community summary already states the cross-company pattern | Vector RAG top-k would surface 1-2 companies' mentions and miss the aggregate theme |",
+  "tradeoffs": "GraphRAG trades index-time cost and complexity for query-time synthesis quality on global/thematic questions. Indexing requires O(chunks) LLM calls for extraction plus O(communities) LLM calls for summarization — materially slower and pricier to build or refresh than an embedding-only index, so it suits mostly-static corpora (internal wikis, filings, research archives) more than fast-changing data. Entity resolution isn't solved by default and needs its own step, or communities fragment. Use GraphRAG when queries are genuinely corpus-level (\"summarize themes,\" \"compare entities across documents\") and the corpus is too large for one context window; skip it for point lookups, low-latency/high-QPS systems, or tight budgets — hybrid BM25+vector RAG with a reranker covers most fact-retrieval needs far more cheaply.",
+  "diagnosticQuiz": [
+    {
+      "q": "What fundamentally distinguishes GraphRAG's indexing pipeline from vector RAG's?",
+      "choices": [
+        "GraphRAG has an LLM extract entities/relations into a knowledge graph, clusters it into hierarchical communities, and precomputes LLM summaries per community",
+        "GraphRAG stores the same chunks in a graph database instead of a vector database, but retrieval logic at query time is otherwise identical",
+        "GraphRAG uses a higher-dimensional embedding model to encode chunks more precisely",
+        "GraphRAG skips indexing entirely and performs all synthesis live at query time"
+      ],
+      "answer": 0,
+      "explanation": "The definition is explicit — extraction, graph build, community detection, and bottom-up summarization all happen at index time, which is what lets query-time synthesis be cheap. The best distractor (storing chunks in a graph DB) reflects the misconception that GraphRAG is just a storage-backend swap; the actual change is *when* synthesis happens (offline, once) rather than *where* data sits."
+    },
+    {
+      "q": "A corpus has 500 chunks that get grouped into 40 communities across the hierarchy. Order of magnitude, how many LLM calls does GraphRAG's indexing require?",
+      "choices": [
+        "O(40) only — extraction is free; only summarization costs LLM calls",
+        "O(1) — a single call summarizes the whole corpus at once",
+        "O(500 × 40) — one call for every chunk-community pair",
+        "O(500 + 40) — one extraction call per chunk plus one summarization call per community"
+      ],
+      "answer": 3,
+      "explanation": "The tradeoffs section states indexing cost is \"O(chunks) LLM calls for extraction plus O(communities) LLM calls for summarization\" — two separate additive stages, each running independently over its own units. The tempting wrong answer (O(500×40)) assumes a cross-join between chunks and communities, but extraction only ever looks at one chunk at a time and summarization only ever looks at one community's subgraph at a time — nothing pairs them up."
+    },
+    {
+      "q": "Why can GraphRAG's global search answer \"what recurring themes appear across all 40 earnings calls\" when vector RAG top-k similarity search cannot?",
+      "choices": [
+        "GraphRAG fine-tunes the LLM on the corpus so it has memorized the themes directly",
+        "Cross-document synthesis already happened offline into community summaries; global search maps the question over those cached summaries and reduces the partial answers into one response",
+        "GraphRAG's embeddings are higher-dimensional and capture more semantic nuance per chunk",
+        "GraphRAG simply retrieves a larger k, pulling in more chunks so recall improves"
+      ],
+      "answer": 1,
+      "explanation": "The lesson's core point is that \"synthesis happens once, offline, instead of at every query\" — no single chunk contains the word \"theme,\" so no amount of top-k retrieval finds it, but a precomputed community summary already states the cross-document pattern. The tempting wrong answer (\"just retrieve more chunks\") is the natural misconception that GraphRAG is vector RAG with a bigger k; the lesson explicitly rules this out since the signal isn't concentrated in any chunk at all."
+    },
+    {
+      "q": "Which scenario is the best fit for adopting GraphRAG instead of hybrid BM25+vector RAG?",
+      "choices": [
+        "A latency-sensitive autocomplete feature predicting the next word as a user types",
+        "A high-QPS support bot doing point lookups (\"what's my order status\") against data that updates every minute",
+        "A static 5-year archive of research reports where analysts routinely ask \"what themes recur across all reports on X\"",
+        "A single 10-page PDF that fits entirely inside the LLM's context window"
+      ],
+      "answer": 2,
+      "explanation": "GraphRAG \"suits mostly-static corpora... more than fast-changing data\" and pays off for \"genuinely corpus-level\" questions too large for one context window — exactly this case. The high-QPS point-lookup option is the deliberate trap: it combines the two things the lesson explicitly says to skip GraphRAG for (point lookups, low-latency/high-QPS systems), where local search would add traversal overhead with no accuracy win."
+    },
+    {
+      "q": "A GraphRAG pipeline extracts \"Acme Corp,\" \"Acme,\" and \"Acme Corporation\" as three separate graph nodes from different chunks. Left unfixed, what happens?",
+      "choices": [
+        "Only global search is affected, since local search doesn't rely on graph structure at all",
+        "Local search throws a runtime error the moment it encounters duplicate node names",
+        "Communities silently fragment because the entity's edges are split across three nodes instead of one, degrading summary quality; the fix is an explicit entity resolution/dedup step",
+        "Nothing — Leiden/Louvain clustering merges nodes with similar names automatically before community detection"
+      ],
+      "answer": 2,
+      "explanation": "The lesson names this exactly as \"the key gotcha\": unresolved entity variants \"get extracted as separate nodes... your communities silently fragment, degrading summary quality.\" The best wrong answer assumes clustering algorithms understand string/semantic similarity — they don't, Leiden/Louvain operate purely on edge topology, so splitting one entity's edges across nodes weakens its connectivity signal rather than being auto-corrected; local search is also hurt, since traversing from the wrong node variant misses edges attached to the others."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "When would you reach for GraphRAG instead of standard vector RAG in a production system?",
+      "a": "When queries are **global/thematic** — \"summarize the main risks across these 200 filings,\" \"compare how different teams describe X\" — and the corpus is too large to fit in context. GraphRAG pre-computes cross-document synthesis at index time via community summaries, which top-k chunk retrieval structurally can't do. I'd avoid it for local fact lookup or high-churn corpora, where the extra indexing cost buys nothing and hybrid BM25+vector RAG is cheaper and lower-latency."
+    },
+    {
+      "q": "Walk me through what happens at index time in GraphRAG, and what's the most expensive part?",
+      "a": "Four stages: (1) an LLM extracts `(entity, relation, entity)` triples from every chunk, (2) triples are merged into a knowledge graph, (3) a community-detection algorithm (Leiden/Louvain) clusters the graph hierarchically, (4) an LLM summarizes each community bottom-up. The expensive part is the LLM calls — extraction scales with number of chunks, summarization scales with number of communities × hierarchy levels — so indexing cost and latency are both much higher than embedding-only pipelines, and reindexing after corpus changes isn't cheap."
+    },
+    {
+      "q": "What's a failure mode specific to GraphRAG that you wouldn't see in vector RAG, and how would you mitigate it?",
+      "a": "**Entity resolution** — the same real-world entity gets extracted under different surface forms (\"Acme Corp\" vs \"Acme\") and lands as separate graph nodes, fragmenting communities and diluting summaries. Mitigate with a canonicalization pass: normalize names, dedup via embedding similarity or an LLM disambiguation step, before or during graph construction. Also worth flagging: because reindexing is costly, a stale graph is a real production risk if the corpus updates frequently — needs an incremental-update strategy, not full rebuilds."
+    }
+  ],
+  "version": 2,
+  "relatedConcepts": [
+    "chunking",
+    "rag-overview"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "9d48862cb235f142",
+    "model": "sonnet",
+    "generatedAt": "2026-07-03T10:48:47Z",
+    "quizUpdatedAt": "2026-07-04T05:47:15Z"
+  }
+}

@@ -1,0 +1,98 @@
+{
+  "id": "hallucination",
+  "title": "Hallucination",
+  "definition": "Hallucination is an LLM producing fluent, confident output that is factually incorrect or unsupported by the given source, because next-token prediction optimizes for plausible continuations, not verified truth.",
+  "summary": "LLMs generate the most statistically plausible continuation of a prompt, not a fact-checked one — so they state falsehoods, fabricate citations, or contradict a source document with the same fluency and confidence as a correct answer. Hallucination splits into intrinsic (contradicts given input) and extrinsic (unsupported addition), and occurs in both open-domain (parametric memory) and closed-domain (RAG/summarization) settings. Production systems manage it via grounding, verification, and calibrated abstention — nothing eliminates it outright.",
+  "objectives": [
+    "Explain why next-token prediction yields confident-but-false output, and why scaling alone doesn't fix it.",
+    "Distinguish intrinsic vs. extrinsic hallucination, and open- vs. closed-domain settings.",
+    "Compute and interpret a faithfulness score for a grounded (RAG) generation.",
+    "Design production mitigations: retrieval grounding, entailment/self-consistency verification, abstention, monitoring.",
+    "Debunk the \"temperature=0 solves it\" and \"RAG solves it\" misconceptions."
+  ],
+  "lesson": "LLMs don't query a fact database — they compute a next-token distribution learned by compressing patterns from training text. A factual question triggers pattern completion, not lookup. For facts stated often and consistently in training data, completion converges to the truth, because truth is the dominant pattern. For rare entities, ambiguous phrasing, or anything outside the distribution, the model still must emit *some* fluent, high-probability continuation — and confident invention often scores as well as an honest \"I don't know,\" because refusals are comparatively rare in training and preference data. This is why bigger models don't eliminate hallucination: scale improves fluency and factual coverage, but the objective never directly checks output against reality.\n\nRLHF can sharpen the problem. Human raters tend to prefer complete, confident-sounding answers over hedged ones, so preference tuning can quietly reward assertive fabrication — the same mechanism behind sycophancy.\n\n**Worked example:** ask a model \"What time complexity does Python's `bisect` module document for its `nsmallest` optimization?\" — a false premise (`bisect` has no `nsmallest`, no such complexity exists). An ungrounded model will often invent a plausible answer (\"O(log n) via its internal heap optimization\") rather than flag the false premise, because detecting \"this doesn't exist\" requires modeling the *absence* of a fact — much harder than continuing a pattern.\n\n**Key gotcha:** hallucination isn't only a parametric-knowledge problem, and RAG doesn't solve it outright. Even handed the *correct* source, a model can still contradict it — this is unfaithfulness. It happens when the model's pretrained prior about a fact outweighs its attention to the provided context, or the relevant sentence is buried in a long context (\"lost in the middle\"). Grounding bounds *extrinsic* hallucination (unsupported additions) but not *intrinsic* hallucination (contradicting the very source you gave it) — you still need a verification layer on top.",
+  "examples": "**Example 1 — faithfulness scoring in RAG**\n\nSource doc (retrieved): \"Refunds are issued within 14 business days to the original payment method. Store credit is not offered for refunds.\"\n\nGenerated answer makes 3 claims: (1) \"Refunds take 14 business days\" ✅ supported, (2) \"Refunds go to the original payment method\" ✅ supported, (3) \"You can also request store credit instead\" ❌ contradicts source (intrinsic hallucination).\n\n```python\nclaims_supported = [True, True, False]  # from an NLI/entailment check vs. the source\nfaithfulness = sum(claims_supported) / len(claims_supported)\n# faithfulness = 0.667 -> below a 0.9 threshold: block/flag for human review\n```\n\n**Example 2 — self-consistency as a hallucination signal (open-domain)**\n\nSampling randomness at temperature > 0 can be repurposed as a hallucination detector: ask the same factual question several times and check whether answers agree.\n\n```python\ndef hallucination_risk(ask_model, question, n=5, temperature=0.7):\n    answers = [ask_model(question, temperature=temperature) for _ in range(n)]\n    distinct = {a.strip().lower() for a in answers}\n    return len(distinct) / n  # near 0: consistent; higher: likely hallucinated\n\n# distinct == {\"1969\", \"1971\"} across 5 samples -> risk = 0.4 -> flag for verification\n```\n\nHigh disagreement usually means the model's distribution is flat/uncertain over that fact — a cheap, no-labels proxy for \"don't trust this without grounding.\"",
+  "tradeoffs": "RAG + citations reduces hallucination but adds retrieval latency/cost and a new failure mode: bad retrieval still yields confident, wrong answers, and doesn't stop the model from ignoring good context. Verification layers (entailment checks, self-consistency, LLM-as-judge) catch more errors but multiply inference cost — reserve them for high-stakes or auditable answers, not every chat turn. Pushing the model to abstain more reduces false confidence but costs recall/helpfulness — an overly-cautious model refuses valid questions too. Lower temperature reduces sampling-driven inconsistency but doesn't touch intrinsic hallucination, and hurts tasks that want diversity. Mitigations are layered and cost-bearing — match the layer to the stakes, don't apply the heaviest one everywhere.",
+  "diagnosticQuiz": [
+    {
+      "q": "In the context of LLMs, \"hallucination\" most precisely refers to:",
+      "choices": [
+        "Any output the model generates using sampling instead of greedy decoding",
+        "Fluent, confident output that is factually wrong or unsupported by the given source, despite well-formed language",
+        "A crash or exception raised when the model's context window overflows",
+        "The model refusing to answer a question it doesn't know"
+      ],
+      "answer": 1,
+      "explanation": "Hallucination means confidently-stated content that's false or ungrounded — not a technical error, and not sampling itself. The best distractor (A) confuses hallucination with stochastic sampling; hallucination occurs even at temperature 0 with greedy decoding, since the issue is what the learned distribution favors, not how a token is picked from it."
+    },
+    {
+      "q": "A RAG-generated answer contains 8 discrete factual claims. Checking each against the retrieved source with an entailment model: 6 are supported, 1 is unsupported (extrinsic), and 1 contradicts the source (intrinsic). Using faithfulness = supported_claims / total_claims, what's the score?",
+      "choices": [
+        "7/8 = 0.875",
+        "1/8 = 0.125",
+        "6/8 = 0.75",
+        "8/8 = 1.0"
+      ],
+      "answer": 2,
+      "explanation": "Faithfulness counts only claims actually entailed by the source; both the unsupported and the contradicting claim fail that test, so 6 of 8 count, giving 0.75. The 7/8 distractor comes from wrongly treating \"merely unsupported\" as a pass since it isn't a direct contradiction — but ungrounded-and-not-contradictory is still a hallucination (extrinsic), not a pass."
+    },
+    {
+      "q": "Fundamentally, why do LLMs hallucinate even as they scale up in parameters and training data?",
+      "choices": [
+        "Because larger models have smaller context windows, forcing them to guess",
+        "Because hallucination is a tokenizer bug that scaling doesn't fix",
+        "Because the training objective rewards plausible next tokens, not verified truth, so confident invention can score as well as, or better than, correct hedging",
+        "Because larger models use higher temperature by default"
+      ],
+      "answer": 2,
+      "explanation": "Next-token prediction is a fluency/plausibility objective with nothing that directly checks output against reality; scale improves breadth and fluency without guaranteeing the model knows when to abstain. The temperature distractor is tempting since temperature affects variance, but it's a decoding knob, not the root cause — hallucination shows up even at temperature 0."
+    },
+    {
+      "q": "You're deciding whether a production feature needs RAG with citations versus a plain LLM call. Which scenario most clearly requires the RAG + citation approach?",
+      "choices": [
+        "A code-formatting helper that only reformats user-supplied code",
+        "A support bot answering questions about a company's current refund policy, where wrong answers create liability",
+        "A creative writing assistant generating story ideas for entertainment",
+        "A brainstorming tool suggesting alternative phrasings for a marketing slogan"
+      ],
+      "answer": 1,
+      "explanation": "Grounding matters most where facts are checkable, high-stakes, and time-sensitive (a policy that can change) — exactly where fuzzy parametric memory is least trustworthy. The other tasks are open-ended/creative or don't depend on retrievable facts, so grounding adds cost/latency without reducing real risk — a common trap is bolting RAG onto tasks that never asked \"what's true.\""
+    },
+    {
+      "q": "A team sets temperature=0 (greedy decoding) for their factual QA endpoint and considers hallucination \"solved\" because outputs are now deterministic. What's wrong with that conclusion?",
+      "choices": [
+        "Greedy decoding is impossible for autoregressive models, so the claim is meaningless",
+        "Greedy decoding forces the model to cite sources automatically",
+        "Temperature=0 actually increases hallucination rate compared to sampling",
+        "Determinism only removes sampling variance — it doesn't fix the underlying incorrect belief encoded in the model's learned distribution"
+      ],
+      "answer": 3,
+      "explanation": "Temperature controls how the next token is *chosen* from a distribution; it does nothing to fix a distribution that puts high probability mass on a false completion. The common misconception is conflating \"consistent\" with \"correct\" — determinism can make an error more dangerous, since it fails the same way silently every time instead of surfacing disagreement across samples (itself a useful detection signal, as in self-consistency checking)."
+    }
+  ],
+  "interviewQuestions": [
+    {
+      "q": "You're launching an LLM support agent grounded on an internal knowledge base. How do you detect and reduce hallucination before and after shipping?",
+      "a": "Before: force retrieval and require the model to cite the specific source chunk per claim; add a verification pass (entailment check or LLM-judge) that checks each claim against its cited chunk and blocks/edits unsupported ones; eval against a held-out set with a faithfulness metric, not just fluency. After: log every answer with citations, sample a percentage for human review, track hallucination rate as a first-class production metric, and add an abstention path (\"not in our docs, escalating\") for low-retrieval-confidence queries instead of forcing an answer."
+    },
+    {
+      "q": "Your RAG pipeline retrieves the correct document, but the model still contradicts it. What's happening, and how do you fix it?",
+      "a": "This is unfaithfulness/context-ignoring — the model's pretrained prior about that fact outweighs its attention to the provided context, or the key sentence is \"lost in the middle\" of a long context. Fixes: place the relevant snippet near the start/end of the prompt (or trim context to just that chunk), instruct explicitly \"answer only using the context below, say 'not found' otherwise,\" lower temperature, and add a post-hoc entailment check that flags/regenerates on contradiction. If it persists across prompt fixes, that's a signal to fine-tune on faithfulness examples rather than keep prompt-patching."
+    },
+    {
+      "q": "How do you measure a candidate model's hallucination rate for a go/no-go decision, without large-scale human annotation?",
+      "a": "Combine automated proxies: entailment/faithfulness scoring of generated claims against ground-truth or retrieved sources on a benchmark (open-domain like TruthfulQA, or a custom domain set); self-consistency — sample each question multiple times and measure answer agreement as a cheap uncertainty proxy; and a stronger LLM-as-judge scoring factuality on a rubric. Then spend human budget narrowly: audit a small stratified sample, weighted toward the automated metric's low-confidence/disagreement cases, to calibrate and sanity-check it before trusting it at scale."
+    }
+  ],
+  "version": 1,
+  "relatedConcepts": [
+    "pretraining",
+    "sampling-and-decoding"
+  ],
+  "followUps": [],
+  "metadata": {
+    "inputHash": "0e88fee641808067",
+    "model": "sonnet",
+    "generatedAt": "2026-07-04T14:03:43Z"
+  }
+}

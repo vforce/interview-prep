@@ -1,0 +1,12 @@
+# One algorithms-roadmap topic. `id` is stable — it keys progress. Don't rename it.
+
+id: dplis
+fam: dp
+label: DP LIS
+order: 28
+trigger: increasing / chain subsequence
+insight: O(n²) dp[i]=1+max(dp[j], j<i, a[j]<a[i]); O(n log n) keep a tails[] and bisect_left ('fake LIS')
+probs:
+- {n: Longest Continuous Increasing Subseq, slug: longest-continuous-increasing-subsequence, d: E}
+- {n: Longest Increasing Subsequence, slug: longest-increasing-subsequence, d: M}
+- {n: Min Removals to Make Mountain Array, slug: minimum-number-of-removals-to-make-mountain-array, d: H}
